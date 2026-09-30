@@ -10,6 +10,7 @@
 #include <boost/container/small_vector.hpp>
 #include <queue>
 #include <tsl/robin_map.h>
+#include "common/hash_u64.h"
 
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
@@ -374,7 +375,7 @@ private:
         MetaType type;
         s32 clear_mask = -1;
     };
-    tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
+    tsl::robin_map<VAddr, MetaDataInfo, Common::U64Hash> surface_metas;
 };
 
 } // namespace VideoCore

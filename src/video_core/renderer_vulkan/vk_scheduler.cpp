@@ -7,6 +7,7 @@
 #include "common/debug.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
+#include "core/emulator_settings.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/readback_stats.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -299,7 +300,9 @@ void Scheduler::HandOffToEncoder(SubmitInfo& info, u64 signal_value) {
     {
         std::unique_lock lk{encoder_mutex};
         // Back-pressure: the ordering thread may run at most a few ticks ahead of the encoder.
-        encoder_cv.wait(lk, [this] { return encoder_jobs.size() < MaxQueuedLists; });
+        static const size_t max_queued =
+            std::max<size_t>(1, EmulatorSettings.GetCpEncoderQueueDepth());
+        encoder_cv.wait(lk, [this] { return encoder_jobs.size() < max_queued; });
         job.list = std::move(current_list_owner);
         if (free_lists.empty()) {
             current_list_owner = std::make_unique<CommandList>();
@@ -349,6 +352,10 @@ void Scheduler::SubmitCommandBuffer(vk::CommandBuffer cmdbuf, SubmitInfo& info) 
 
 void Scheduler::EncoderThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuEncoder");
+    if (const u32 priority = EmulatorSettings.GetCpThreadPriority(); priority >= 2) {
+        Common::SetCurrentThreadPriority(static_cast<Common::ThreadPriority>(priority));
+    }
+    VideoCore::ReadbackStats::RegisterSampledThread("encoder");
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
     };

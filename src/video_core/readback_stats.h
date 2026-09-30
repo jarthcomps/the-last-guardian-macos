@@ -217,31 +217,22 @@ extern thread_local CpEventCounters cp_events;
 class CpTimer {
 public:
     explicit CpTimer(CpTime category) noexcept {
-        if (IsEnabled() && Detail::is_cp_thread) {
-            const u64 now = NowNs();
-            Detail::cp_time_ns[Detail::cp_current].fetch_add(now - Detail::cp_since,
-                                                             std::memory_order_relaxed);
-            Detail::cp_local_ns[Detail::cp_current] += now - Detail::cp_since;
-            prev = Detail::cp_current;
-            Detail::cp_current = static_cast<u32>(category);
-            Detail::cp_since = now;
-            active = true;
+        if (IsEnabled()) {
+            Begin(category);
         }
     }
     ~CpTimer() {
         if (active) {
-            const u64 now = NowNs();
-            Detail::cp_time_ns[Detail::cp_current].fetch_add(now - Detail::cp_since,
-                                                             std::memory_order_relaxed);
-            Detail::cp_local_ns[Detail::cp_current] += now - Detail::cp_since;
-            Detail::cp_current = prev;
-            Detail::cp_since = now;
+            End();
         }
     }
     CpTimer(const CpTimer&) = delete;
     CpTimer& operator=(const CpTimer&) = delete;
 
 private:
+    void Begin(CpTime category) noexcept;
+    void End() noexcept;
+
     u32 prev{};
     bool active{};
 };
@@ -414,7 +405,12 @@ enum class Reuse : u32 {
     BindSamplerSame,        ///< ... identical.
     Count,
 };
-void OnReuse(Reuse reuse, u64 amount = 1);
+void OnReuseSlow(Reuse reuse, u64 amount);
+inline void OnReuse(Reuse reuse, u64 amount = 1) {
+    if (IsEnabled()) {
+        OnReuseSlow(reuse, amount);
+    }
+}
 
 /// What one draw or dispatch changed in state that later draws depend on (caches, memory tracking,
 /// barriers). If most draws change nothing but the stream, their lookups could run ahead of the
@@ -444,15 +440,39 @@ enum class CallClass : u32 {
 constexpr u32 NumCallClasses = static_cast<u32>(CallClass::Count);
 
 /// Records that the current draw or dispatch changed shared state (command processor only).
-void NoteMutation(Mutation mutation);
+void NoteMutationSlow(Mutation mutation);
+inline void NoteMutation(Mutation mutation) {
+    if (IsEnabled()) {
+        NoteMutationSlow(mutation);
+    }
+}
 
 /// Collects the mutations of one draw or dispatch and adds them to the counters at Finish. Calls
 /// that return early are not counted.
 class MutationScope {
 public:
-    MutationScope() noexcept;
-    ~MutationScope();
-    void Finish(CallClass call_class) noexcept;
+    MutationScope() noexcept {
+        if (IsEnabled()) {
+            Begin();
+        }
+    }
+    ~MutationScope() {
+        if (active) {
+            End();
+        }
+    }
+    void Finish(CallClass call_class) noexcept {
+        if (active) {
+            FinishImpl(call_class);
+        }
+    }
+
+private:
+    void Begin() noexcept;
+    void End() noexcept;
+    void FinishImpl(CallClass call_class) noexcept;
+
+    bool active{};
 };
 
 /// Records an asynchronous fence of the given kind and whether it had to submit the command
@@ -500,6 +520,11 @@ enum class WaitClass : u32 {
     Count,
 };
 
+/// Adds the calling thread to the sampling profiler (cp_sampler_hz setting, Windows). The first
+/// call starts the sampler thread, which suspends each registered thread briefly at the given
+/// rate and appends its call stack to log/cp_samples.txt.
+void RegisterSampledThread(const char* name);
+
 /// Reads the setting and starts the reporter thread when enabled.
 void Start();
 
@@ -508,8 +533,18 @@ void Stop();
 
 void OnPresent();
 void OnSubmit();
-void OnDraw();
-void OnDispatch();
+void OnDrawSlow();
+inline void OnDraw() {
+    if (IsEnabled()) {
+        OnDrawSlow();
+    }
+}
+void OnDispatchSlow();
+inline void OnDispatch() {
+    if (IsEnabled()) {
+        OnDispatchSlow();
+    }
+}
 void OnFault(bool is_write, u64 handler_ns);
 void OnProtect(u64 ns);
 void OnFinish(u64 wait_ns);

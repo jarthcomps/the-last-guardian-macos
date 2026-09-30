@@ -158,6 +158,7 @@ void L::DrawAdvanced() {
         std::unique_lock lock{DebugState.frame_dump_list_mutex};
         while (!DebugState.frame_dump_list.empty()) {
             const auto& frame_dump = DebugState.frame_dump_list.back();
+            DebugState.ExportFrameDump(frame_dump);
             frame_viewers.emplace_back(frame_dump);
             DebugState.frame_dump_list.pop_back();
         }

@@ -9,6 +9,7 @@
 #include <vector>
 #include <boost/container/small_vector.hpp>
 #include <tsl/robin_map.h>
+#include "common/hash_u64.h"
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
 #include "common/types.h"
@@ -310,7 +311,7 @@ private:
     void NoteHotRange(VAddr window_start, VAddr window_end, bool is_write);
     /// readback_prefetch_lifetime: fences a hot range stays prefetched after its last fault.
     const u32 prefetch_lifetime;
-    tsl::robin_map<u64, u64> stream_reuse;
+    tsl::robin_map<u64, u64, Common::U64Hash> stream_reuse;
     u64 stream_reuse_tick{};
     u64 stream_reuse_wraps{};
     VAddr stream_reuse_min{~0ULL};

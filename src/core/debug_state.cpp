@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <fstream>
 #include <imgui.h>
 
 #include "common/assert.h"
 #include "common/native_clock.h"
+#include "common/path_util.h"
 #include "common/singleton.h"
 #include "core/signals.h"
 #include "debug_state.h"
@@ -205,6 +207,95 @@ void DebugStateImpl::PushRegsDumpCompute(uintptr_t base_addr, uintptr_t header_a
         .cs_program = cs,
         .code = std::vector<u32>{params.code.begin(), params.code.end()},
     };
+}
+
+void DebugStateImpl::ExportFrameDump(const FrameDump& frame) const {
+    const auto path = Common::FS::GetUserPath(Common::FS::PathType::LogDir) /
+                      fmt::format("frame_dump_{}.csv", frame.frame_id);
+    std::ofstream out{path};
+    if (!out) {
+        return;
+    }
+    out << "idx,queue,submit,op,pass,color_targets,depth,rt_addr,rt_w,rt_h,depth_addr,depth_w,"
+           "depth_h,indices,instances,groups_x,groups_y,groups_z,hash0,hash1,hash2,hash3,hash4,"
+           "cs_hash"
+        << '\n';
+    u32 idx = 0;
+    u32 pass = 0;
+    u64 prev_key = ~0ULL;
+    for (const auto& queue : frame.queues) {
+        auto data = std::span{queue.data};
+        const auto* initial_data = data.data();
+        while (!data.empty()) {
+            const auto* header = reinterpret_cast<const AmdGpu::PM4Type3Header*>(data.data());
+            if (header->type == 2) {
+                data = data.subspan(1);
+                continue;
+            }
+            if (header->type != 3) {
+                break;
+            }
+            const AmdGpu::PM4ItOpcode opcode = header->opcode;
+            if (Core::Devtools::Widget::IsDrawCall(opcode)) {
+                const auto offset =
+                    reinterpret_cast<uintptr_t>(header) - reinterpret_cast<uintptr_t>(initial_data);
+                const auto it = frame.regs.find(offset);
+                const auto op_name = magic_enum::enum_name(opcode);
+                if (it == frame.regs.end()) {
+                    out << fmt::format("{},{},{},{}\n", idx++, magic_enum::enum_name(queue.type),
+                                       queue.submit_num, op_name);
+                } else {
+                    const RegDump& dump = it->second;
+                    const auto& regs = dump.regs;
+                    u32 color_targets = 0;
+                    u64 rt_addr = 0;
+                    u32 rt_w = 0;
+                    u32 rt_h = 0;
+                    u64 depth_addr = 0;
+                    u32 depth_w = 0;
+                    u32 depth_h = 0;
+                    bool depth = false;
+                    if (!dump.is_compute) {
+                        for (u32 i = 0; i < AmdGpu::NUM_COLOR_BUFFERS; ++i) {
+                            const auto& cb = regs.color_buffers[i];
+                            if (cb && regs.color_target_mask.GetMask(i) != 0) {
+                                if (color_targets++ == 0) {
+                                    rt_addr = cb.Address();
+                                    rt_w = cb.Pitch();
+                                    rt_h = cb.Height();
+                                }
+                            }
+                        }
+                        depth = regs.depth_buffer.DepthValid();
+                        if (depth) {
+                            depth_addr = regs.depth_buffer.DepthAddress();
+                            depth_w = regs.depth_buffer.Pitch();
+                            depth_h = regs.depth_buffer.Height();
+                        }
+                        const u64 key = rt_addr * 31 + depth_addr * 17 + color_targets;
+                        if (key != prev_key) {
+                            prev_key = key;
+                            ++pass;
+                        }
+                    }
+                    out << fmt::format(
+                        "{},{},{},{},{},{},{},{:#x},{},{},{:#x},{},{},{},{},{},{},{}", idx++,
+                        magic_enum::enum_name(queue.type), queue.submit_num, op_name,
+                        dump.is_compute ? 0 : pass, color_targets, depth ? 1 : 0, rt_addr, rt_w,
+                        rt_h, depth_addr, depth_w, depth_h, dump.is_compute ? 0 : regs.num_indices,
+                        dump.is_compute ? 0 : regs.num_instances.NumInstances(),
+                        dump.is_compute ? dump.regs.cs_program.dim_x : 0,
+                        dump.is_compute ? dump.regs.cs_program.dim_y : 0,
+                        dump.is_compute ? dump.regs.cs_program.dim_z : 0);
+                    for (const auto& stage : dump.stages) {
+                        out << fmt::format(",{:#x}", stage.hash);
+                    }
+                    out << fmt::format(",{:#x}\n", dump.is_compute ? dump.cs_data.hash : 0);
+                }
+            }
+            data = data.subspan(header->NumWords() + 1);
+        }
+    }
 }
 
 void DebugStateImpl::CollectShader(const std::string& name, Shader::SwStage l_stage,

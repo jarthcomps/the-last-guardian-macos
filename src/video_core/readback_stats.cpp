@@ -8,6 +8,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -18,6 +19,7 @@
 #include "common/path_util.h"
 #include "common/string_util.h"
 #include "common/thread.h"
+#include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "video_core/readback_stats.h"
 
@@ -1007,12 +1009,12 @@ void OnSubmit() {
     counters.submits.fetch_add(1, std::memory_order_relaxed);
 }
 
-void OnDraw() {
+void OnDrawSlow() {
     counters.draws.fetch_add(1, std::memory_order_relaxed);
     counters.cmds_since_submit.fetch_add(1, std::memory_order_relaxed);
 }
 
-void OnDispatch() {
+void OnDispatchSlow() {
     counters.dispatches.fetch_add(1, std::memory_order_relaxed);
     counters.cmds_since_submit.fetch_add(1, std::memory_order_relaxed);
 }
@@ -1249,7 +1251,7 @@ void OnHazard(Hazard hazard) {
     counters.hazards[static_cast<size_t>(hazard)].fetch_add(1, std::memory_order_relaxed);
 }
 
-void OnReuse(Reuse reuse, u64 amount) {
+void OnReuseSlow(Reuse reuse, u64 amount) {
     counters.reuse[static_cast<size_t>(reuse)].fetch_add(amount, std::memory_order_relaxed);
 }
 
@@ -1270,28 +1272,320 @@ constexpr u32 CacheMutations = (1u << static_cast<u32>(Mutation::BufferCreated))
                                (1u << static_cast<u32>(Mutation::PipelineCompiled));
 } // namespace
 
-void NoteMutation(Mutation mutation) {
+#ifdef _WIN32
+namespace {
+
+constexpr u32 SamplerMaxDepth = 40;
+
+struct SampledThread {
+    std::string name;
+    HANDLE handle;
+};
+
+struct SamplerState {
+    std::mutex mutex;
+    std::vector<SampledThread> threads;
+    std::set<DWORD> known_ids;
+    std::once_flag started;
+};
+
+// Never destroyed: the sampler thread may still run while the process exits.
+SamplerState& Sampler() {
+    static SamplerState* state = new SamplerState;
+    return *state;
+}
+
+struct RawSample {
+    u32 thread{};
+    u32 depth{};
+    u64 pc[SamplerMaxDepth]{};
+};
+
+/// Suspends the thread, unwinds its stack into `sample` and resumes it. Nothing in here may
+/// allocate or take a lock: the suspended thread could be holding it.
+bool CaptureStack(HANDLE handle, RawSample& sample) {
+    if (SuspendThread(handle) == static_cast<DWORD>(-1)) {
+        return false;
+    }
+    alignas(16) CONTEXT context{};
+    context.ContextFlags = CONTEXT_FULL;
+    const bool ok = GetThreadContext(handle, &context) != 0;
+    if (ok) {
+        while (sample.depth < SamplerMaxDepth && context.Rip != 0) {
+            sample.pc[sample.depth++] = context.Rip;
+            DWORD64 image_base{};
+            PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
+            if (!entry) {
+                break;
+            }
+            PVOID handler_data{};
+            DWORD64 frame{};
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, entry, &context,
+                             &handler_data, &frame, nullptr);
+        }
+    }
+    ResumeThread(handle);
+    return ok;
+}
+
+/// Adds the game's own threads (render thread, main thread, job workers) to the sampled set.
+void DiscoverGameThreads() {
+    static constexpr std::array<const char*, 5> wanted{"ps4render", "Game:Main", "workerThread",
+                                                       "HavokWorkerThread", "PAWorker"};
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    const DWORD pid = GetCurrentProcessId();
+    THREADENTRY32 entry{.dwSize = sizeof(THREADENTRY32)};
+    for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry)) {
+        if (entry.th32OwnerProcessID != pid) {
+            continue;
+        }
+        {
+            std::scoped_lock lock{Sampler().mutex};
+            if (Sampler().known_ids.contains(entry.th32ThreadID)) {
+                continue;
+            }
+        }
+        HANDLE thread =
+            OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
+                       entry.th32ThreadID);
+        if (!thread) {
+            continue;
+        }
+        std::string name;
+        PWSTR wide{};
+        if (SUCCEEDED(GetThreadDescription(thread, &wide)) && wide) {
+            name = Common::UTF16ToUTF8(wide);
+            LocalFree(wide);
+        }
+        if (name.empty()) {
+            // The name is set shortly after the thread starts: look again next time.
+            CloseHandle(thread);
+            continue;
+        }
+        const bool match = std::ranges::any_of(
+            wanted, [&](const char* part) { return name.find(part) != std::string::npos; });
+        std::scoped_lock lock{Sampler().mutex};
+        Sampler().known_ids.insert(entry.th32ThreadID);
+        if (match) {
+            Sampler().threads.push_back({name, thread});
+        } else {
+            CloseHandle(thread);
+        }
+    }
+    CloseHandle(snapshot);
+}
+
+/// GPU and memory utilization (percent) of the first NVIDIA GPU, through the driver's NVML.
+bool ReadGpuUtilization(u32& gpu, u32& memory) {
+    struct Utilization {
+        unsigned int gpu;
+        unsigned int memory;
+    };
+    using InitFn = int (*)();
+    using HandleFn = int (*)(unsigned int, void**);
+    using UtilFn = int (*)(void*, Utilization*);
+    static bool tried = false;
+    static void* device = nullptr;
+    static UtilFn get_utilization = nullptr;
+    if (!tried) {
+        tried = true;
+        HMODULE nvml = LoadLibraryW(L"nvml.dll");
+        if (!nvml) {
+            nvml = LoadLibraryW(L"C:/Program Files/NVIDIA Corporation/NVSMI/nvml.dll");
+        }
+        if (nvml) {
+            const auto init = reinterpret_cast<InitFn>(GetProcAddress(nvml, "nvmlInit_v2"));
+            const auto handle =
+                reinterpret_cast<HandleFn>(GetProcAddress(nvml, "nvmlDeviceGetHandleByIndex_v2"));
+            get_utilization =
+                reinterpret_cast<UtilFn>(GetProcAddress(nvml, "nvmlDeviceGetUtilizationRates"));
+            if (!init || !handle || !get_utilization || init() != 0 || handle(0, &device) != 0) {
+                get_utilization = nullptr;
+            }
+        }
+    }
+    if (!get_utilization || !device) {
+        return false;
+    }
+    Utilization utilization{};
+    if (get_utilization(device, &utilization) != 0) {
+        return false;
+    }
+    gpu = utilization.gpu;
+    memory = utilization.memory;
+    return true;
+}
+
+void SamplerMain(u32 hz) {
+    Common::SetCurrentThreadName("shadPS4:CpSampler");
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                          TIMER_ALL_ACCESS);
+    if (!timer) {
+        return;
+    }
+    const LONG period_ms = std::max<LONG>(1, static_cast<LONG>(1000 / hz));
+    LARGE_INTEGER due;
+    due.QuadPart = -static_cast<LONGLONG>(period_ms) * 10000;
+    SetWaitableTimer(timer, &due, period_ms, nullptr, nullptr, FALSE);
+
+    const auto path = Common::FS::GetUserPath(Common::FS::PathType::LogDir) / "cp_samples.txt";
+    std::ofstream out{path};
+    if (!out) {
+        return;
+    }
+    const auto exe_base = reinterpret_cast<u64>(GetModuleHandleW(nullptr));
+    u64 exe_size = 0;
+    {
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(exe_base);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(exe_base + dos->e_lfanew);
+        exe_size = nt->OptionalHeader.SizeOfImage;
+    }
+    wchar_t exe_path[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    out << fmt::format("# exe {}\n", Common::UTF16ToUTF8(exe_path));
+    out << fmt::format("# hz {}\n", 1000 / period_ms);
+
+    std::vector<std::string> known_threads;
+    std::map<u64, u32> module_ids;
+    std::vector<RawSample> pending;
+    pending.reserve(8192);
+    const u64 start_ns = NowNs();
+    u64 last_flush_ns = start_ns;
+    std::vector<u64> times;
+    times.reserve(8192);
+
+    while (true) {
+        WaitForSingleObject(timer, INFINITE);
+        std::vector<SampledThread> threads;
+        {
+            std::scoped_lock lock{Sampler().mutex};
+            threads = Sampler().threads;
+        }
+        const u64 now = NowNs();
+        for (u32 i = 0; i < threads.size(); ++i) {
+            RawSample sample;
+            sample.thread = i;
+            if (CaptureStack(threads[i].handle, sample) && sample.depth > 0) {
+                pending.push_back(sample);
+                times.push_back(now - start_ns);
+            }
+        }
+        if (now - last_flush_ns < 1'000'000'000ULL) {
+            continue;
+        }
+        last_flush_ns = now;
+        DiscoverGameThreads();
+        out << fmt::format("F {} {}\n", (now - start_ns) / 1'000'000, DebugState.GetFrameNum());
+        if (u32 gpu_percent{}, memory_percent{}; ReadGpuUtilization(gpu_percent, memory_percent)) {
+            out << fmt::format("G {} {} {}\n", (now - start_ns) / 1'000'000, gpu_percent,
+                               memory_percent);
+        }
+        for (u32 i = static_cast<u32>(known_threads.size()); i < threads.size(); ++i) {
+            known_threads.push_back(threads[i].name);
+            out << fmt::format("T {} {}\n", i, threads[i].name);
+        }
+        for (size_t n = 0; n < pending.size(); ++n) {
+            const RawSample& sample = pending[n];
+            std::string line = fmt::format("S {} {}", sample.thread, times[n] / 1'000'000);
+            for (u32 d = 0; d < sample.depth; ++d) {
+                const u64 pc = sample.pc[d];
+                if (pc - exe_base < exe_size) {
+                    line += fmt::format(" e{:x}", pc - exe_base);
+                    continue;
+                }
+                HMODULE module{};
+                if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                        reinterpret_cast<LPCWSTR>(pc), &module)) {
+                    line += fmt::format(" x{:x}", pc);
+                    continue;
+                }
+                const u64 base = reinterpret_cast<u64>(module);
+                auto it = module_ids.find(base);
+                if (it == module_ids.end()) {
+                    wchar_t module_path[MAX_PATH]{};
+                    GetModuleFileNameW(module, module_path, MAX_PATH);
+                    it = module_ids.emplace(base, static_cast<u32>(module_ids.size())).first;
+                    out << fmt::format("M {} {}\n", it->second, Common::UTF16ToUTF8(module_path));
+                }
+                line += fmt::format(" m{}:{:x}", it->second, pc - base);
+            }
+            out << line << '\n';
+        }
+        out.flush();
+        pending.clear();
+        times.clear();
+    }
+}
+
+} // namespace
+#endif
+
+void RegisterSampledThread(const char* name) {
+#ifdef _WIN32
+    const u32 hz = EmulatorSettings.GetCpSamplerHz();
+    if (hz == 0) {
+        return;
+    }
+    HANDLE handle{};
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &handle,
+                         THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                         FALSE, 0)) {
+        return;
+    }
+    {
+        std::scoped_lock lock{Sampler().mutex};
+        Sampler().known_ids.insert(GetThreadId(handle));
+        Sampler().threads.push_back({name, handle});
+    }
+    std::call_once(Sampler().started, [hz] { std::thread{SamplerMain, hz}.detach(); });
+#endif
+}
+
+void NoteMutationSlow(Mutation mutation) {
     if (mutation_active) {
         mutation_mask |= 1u << static_cast<u32>(mutation);
     }
 }
 
-MutationScope::MutationScope() noexcept {
-    mutation_active = IsEnabled();
-    if (mutation_active) {
-        mutation_mask = 0;
-        mutation_start = NowNs();
+void CpTimer::Begin(CpTime category) noexcept {
+    if (Detail::is_cp_thread) {
+        const u64 now = NowNs();
+        Detail::cp_time_ns[Detail::cp_current].fetch_add(now - Detail::cp_since,
+                                                         std::memory_order_relaxed);
+        Detail::cp_local_ns[Detail::cp_current] += now - Detail::cp_since;
+        prev = Detail::cp_current;
+        Detail::cp_current = static_cast<u32>(category);
+        Detail::cp_since = now;
+        active = true;
     }
 }
 
-MutationScope::~MutationScope() {
+void CpTimer::End() noexcept {
+    const u64 now = NowNs();
+    Detail::cp_time_ns[Detail::cp_current].fetch_add(now - Detail::cp_since,
+                                                     std::memory_order_relaxed);
+    Detail::cp_local_ns[Detail::cp_current] += now - Detail::cp_since;
+    Detail::cp_current = prev;
+    Detail::cp_since = now;
+}
+
+void MutationScope::Begin() noexcept {
+    mutation_active = true;
+    mutation_mask = 0;
+    mutation_start = NowNs();
+    active = true;
+}
+
+void MutationScope::End() noexcept {
     mutation_active = false;
 }
 
-void MutationScope::Finish(CallClass call_class) noexcept {
-    if (!mutation_active) {
-        return;
-    }
+void MutationScope::FinishImpl(CallClass call_class) noexcept {
+    active = false;
     mutation_active = false;
     const u32 c = static_cast<u32>(call_class);
     counters.mutation_calls[c].fetch_add(1, std::memory_order_relaxed);

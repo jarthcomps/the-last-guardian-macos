@@ -258,6 +258,9 @@ public:
     using CsState = AmdGpu::ComputeProgram;
     void PushRegsDumpCompute(uintptr_t base_addr, uintptr_t header_addr, const CsState& cs_state);
 
+    /// Writes one row per draw and dispatch of a finished frame dump to log/frame_dump_<id>.csv.
+    void ExportFrameDump(const FrameDump& frame) const;
+
     void CollectShader(const std::string& name, Shader::SwStage l_stage, vk::ShaderModule module,
                        std::span<const u32> spv, std::span<const u32> raw_code,
                        std::span<const u32> patch_spv, bool is_patched);

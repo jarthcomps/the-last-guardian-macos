@@ -359,8 +359,12 @@ void Liverpool::ProcessCommands() {
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
+    if (const u32 priority = EmulatorSettings.GetCpThreadPriority(); priority >= 2) {
+        Common::SetCurrentThreadPriority(static_cast<Common::ThreadPriority>(priority));
+    }
     gpu_id = std::this_thread::get_id();
     VideoCore::ReadbackStats::MarkCpThread();
+    VideoCore::ReadbackStats::RegisterSampledThread("cp");
 
     while (!stoken.stop_requested()) {
         {

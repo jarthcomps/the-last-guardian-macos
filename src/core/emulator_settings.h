@@ -471,6 +471,15 @@ struct GPUSettings {
     // end of every guest submission, 4 = fences without readbacks wait for all earlier work
     // (always on with the encoder thread).
     Setting<u32> cp_encoder_debug{0};
+    // Sampling profiler of the command processor, encoder and priority threads (Windows): samples
+    // per second, 0 = off. Writes log/cp_samples.txt (call stacks, resolved offline).
+    Setting<u32> cp_sampler_hz{0};
+    // Priority of the command processor and encoder threads: 0 or 1 = default, 2 = above normal,
+    // 3 = highest.
+    Setting<u32> cp_thread_priority{0};
+    // Encoder thread: how many recorded command lists the command processor may hand over before
+    // it waits for the encoder (encoder mode 2).
+    Setting<u32> cp_encoder_queue_depth{8};
     // Encoder thread: fence kinds that wait for all earlier work (bit mask, see
     // VideoCore::FenceKind): 1 = graphics EOP, 2 = graphics EOS, 4 = compute ReleaseMem,
     // 8 = label writes held behind a fence, 16 = end of a guest submission.
@@ -536,6 +545,10 @@ struct GPUSettings {
                                        &GPUSettings::readback_async_guest_faults),
             make_override<GPUSettings>("cp_encoder_mode", &GPUSettings::cp_encoder_mode),
             make_override<GPUSettings>("cp_encoder_debug", &GPUSettings::cp_encoder_debug),
+            make_override<GPUSettings>("cp_sampler_hz", &GPUSettings::cp_sampler_hz),
+            make_override<GPUSettings>("cp_thread_priority", &GPUSettings::cp_thread_priority),
+            make_override<GPUSettings>("cp_encoder_queue_depth",
+                                       &GPUSettings::cp_encoder_queue_depth),
             make_override<GPUSettings>("cp_full_fence_kinds", &GPUSettings::cp_full_fence_kinds),
             make_override<GPUSettings>("vblank_frequency", &GPUSettings::vblank_frequency),
         };
@@ -548,9 +561,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     readback_async_fences_enabled, readback_fence_wait_shortcut, readback_hot_write_pages_enabled,
     readback_stream_reuse_enabled, readback_prefetch_mode, readback_prefetch_lifetime,
     rt_lookup_reuse_enabled, stage_lookup_reuse, shader_backing_reads, shader_backing_verify,
-    readback_async_guest_faults, cp_encoder_mode, cp_encoder_debug, cp_full_fence_kinds,
-    dump_shaders, patch_shaders, vblank_frequency, full_screen, full_screen_mode, present_mode,
-    hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation)
+    readback_async_guest_faults, cp_encoder_mode, cp_encoder_debug, cp_sampler_hz,
+    cp_thread_priority, cp_encoder_queue_depth, cp_full_fence_kinds, dump_shaders, patch_shaders,
+    vblank_frequency, full_screen, full_screen_mode, present_mode, hdr_allowed, fsr_enabled,
+    rcas_enabled, rcas_attenuation)
 // -------------------------------
 // Vulkan settings
 // -------------------------------
@@ -843,6 +857,9 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, ReadbackAsyncGuestFaultsEnabled, readback_async_guest_faults)
     SETTING_FORWARD(m_gpu, CpEncoderMode, cp_encoder_mode)
     SETTING_FORWARD(m_gpu, CpEncoderDebug, cp_encoder_debug)
+    SETTING_FORWARD(m_gpu, CpSamplerHz, cp_sampler_hz)
+    SETTING_FORWARD(m_gpu, CpThreadPriority, cp_thread_priority)
+    SETTING_FORWARD(m_gpu, CpEncoderQueueDepth, cp_encoder_queue_depth)
     SETTING_FORWARD(m_gpu, CpFullFenceKinds, cp_full_fence_kinds)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, PatchShaders, patch_shaders)
 
