@@ -260,12 +260,12 @@ void Rasterizer::NoteBindReuse(const Shader::Info& stage) {
         }
         return all_same;
     };
-    const bool buffers_same = compare(snap.buffers, stage.buffers, Reuse::BindBufferChecked,
-                                      Reuse::BindBufferSame);
+    const bool buffers_same =
+        compare(snap.buffers, stage.buffers, Reuse::BindBufferChecked, Reuse::BindBufferSame);
     const bool images_same =
         compare(snap.images, stage.images, Reuse::BindImageChecked, Reuse::BindImageSame);
-    const bool samplers_same = compare(snap.samplers, stage.samplers, Reuse::BindSamplerChecked,
-                                       Reuse::BindSamplerSame);
+    const bool samplers_same =
+        compare(snap.samplers, stage.samplers, Reuse::BindSamplerChecked, Reuse::BindSamplerSame);
 
     OnReuse(Reuse::BindStageChecked);
     if (same_program) {
@@ -472,6 +472,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
     VideoCore::ReadbackStats::CpTimer timer{VideoCore::ReadbackStats::CpTime::Draw};
     ShaderCallScope shader_call;
+    VideoCore::ReadbackStats::MutationScope mutation;
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::Prepare};
@@ -548,6 +549,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         shader_call.call.depth_target = bool(state.depth_stencil_attachment.image_view);
     }
 
+    mutation.Finish(state.num_color_attachments == 0
+                        ? VideoCore::ReadbackStats::CallClass::DepthDraw
+                        : VideoCore::ReadbackStats::CallClass::ColorDraw);
     ResetBindings();
 }
 
@@ -676,6 +680,7 @@ void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
     VideoCore::ReadbackStats::CpTimer timer{VideoCore::ReadbackStats::CpTime::Dispatch};
     ShaderCallScope shader_call;
+    VideoCore::ReadbackStats::MutationScope mutation;
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::Prepare};
@@ -729,6 +734,7 @@ void Rasterizer::DispatchDirect() {
     VideoCore::ReadbackStats::OnDispatch();
     ++recorded_work;
 
+    mutation.Finish(VideoCore::ReadbackStats::CallClass::Dispatch);
     ResetBindings();
 }
 
@@ -1121,6 +1127,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                     vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
                                                           : vk::AccessFlagBits2::eShaderRead,
                                           vk::PipelineStageFlagBits2::eAllCommands)) {
+                VideoCore::ReadbackStats::NoteMutation(
+                    VideoCore::ReadbackStats::Mutation::BufferBarrier);
                 buffer_barriers.emplace_back(*barrier);
             }
             if (desc.is_written && desc.is_formatted) {

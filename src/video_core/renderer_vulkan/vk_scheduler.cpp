@@ -75,6 +75,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     EndRendering();
     is_rendering = true;
     render_state = new_state;
+    VideoCore::ReadbackStats::NoteMutation(VideoCore::ReadbackStats::Mutation::PassBegin);
     if (timing_pool) {
         VideoCore::ReadbackStats::OnRenderPassBegin();
     }

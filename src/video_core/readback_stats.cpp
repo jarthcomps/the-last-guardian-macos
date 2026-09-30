@@ -111,6 +111,11 @@ struct Counters {
     std::array<std::atomic<u64>, 6> submit_hist{};
     std::array<std::atomic<u64>, static_cast<size_t>(Hazard::Count)> hazards{};
     std::array<std::atomic<u64>, static_cast<size_t>(Reuse::Count)> reuse{};
+    std::array<std::atomic<u64>, NumCallClasses> mutation_calls{};
+    std::array<std::atomic<u64>, NumCallClasses> mutation_ns{};
+    std::array<std::atomic<u64>, NumCallClasses> mutation_none{};
+    std::array<std::atomic<u64>, NumCallClasses> mutation_cache_clean{};
+    std::array<std::array<std::atomic<u64>, NumMutations>, NumCallClasses> mutation_kinds{};
     std::atomic<u64> prefetch_downloads{};
     std::atomic<u64> prefetch_bytes{};
     std::atomic<u64> prefetch_repeat_downloads{};
@@ -246,6 +251,20 @@ struct GpuWaitStat {
     u64 max_ns{};
     u64 bytes{};
 };
+
+const char* CallClassName(u32 call_class) {
+    static constexpr std::array<const char*, NumCallClasses> names{"depth_draw", "color_draw",
+                                                                   "dispatch"};
+    return names[call_class];
+}
+
+const char* MutationName(u32 mutation) {
+    static constexpr std::array<const char*, NumMutations> names{
+        "stream_copy",    "buffer_created",    "buffer_upload", "buffer_gpu_mark",
+        "buffer_barrier", "image_created",     "image_upload",  "image_barrier",
+        "target_marked",  "pipeline_compiled", "pass_begin"};
+    return names[mutation];
+}
 
 const char* WaitReasonName(u32 reason) {
     switch (static_cast<WaitReason>(reason)) {
@@ -770,7 +789,15 @@ void ReporterThread(std::stop_token stoken) {
     for (u32 r = 0; r < NumWaitReasons; ++r) {
         csv << fmt::format(",wait_{}_ms,wait_{}_n", WaitReasonName(r), WaitReasonName(r));
     }
-    csv << ",wait_other_threads_ms\n";
+    csv << ",wait_other_threads_ms";
+    for (u32 c = 0; c < NumCallClasses; ++c) {
+        const char* name = CallClassName(c);
+        csv << fmt::format(",mut_{0}_calls,mut_{0}_ms,mut_{0}_none,mut_{0}_cache_clean", name);
+        for (u32 k = 0; k < NumMutations; ++k) {
+            csv << fmt::format(",mut_{}_{}", name, MutationName(k));
+        }
+    }
+    csv << "\n";
     csv.flush();
 
     u64 last_ns = NowNs();
@@ -865,6 +892,15 @@ void ReporterThread(std::stop_token stoken) {
                                           take(counters.gpu_wait_count[r]));
             }
             cp_columns += fmt::format(",{:.2f}", Ms(take(counters.other_thread_gpu_wait_ns)));
+            for (u32 c = 0; c < NumCallClasses; ++c) {
+                cp_columns +=
+                    fmt::format(",{},{:.2f},{},{}", take(counters.mutation_calls[c]),
+                                Ms(take(counters.mutation_ns[c])), take(counters.mutation_none[c]),
+                                take(counters.mutation_cache_clean[c]));
+                for (u32 k = 0; k < NumMutations; ++k) {
+                    cp_columns += fmt::format(",{}", take(counters.mutation_kinds[c][k]));
+                }
+            }
         }
         std::string wait_columns;
         for (u32 q = 0; q < 2; ++q) {
@@ -1215,6 +1251,62 @@ void OnHazard(Hazard hazard) {
 
 void OnReuse(Reuse reuse, u64 amount) {
     counters.reuse[static_cast<size_t>(reuse)].fetch_add(amount, std::memory_order_relaxed);
+}
+
+namespace {
+thread_local bool mutation_active{};
+thread_local u32 mutation_mask{};
+thread_local u64 mutation_start{};
+
+/// Mutations that change what a later draw sees in a cache or in memory tracking. The rest
+/// (stream copies, pass starts, first-time target marks) only append to this draw's own output.
+constexpr u32 CacheMutations = (1u << static_cast<u32>(Mutation::BufferCreated)) |
+                               (1u << static_cast<u32>(Mutation::BufferUpload)) |
+                               (1u << static_cast<u32>(Mutation::BufferGpuMark)) |
+                               (1u << static_cast<u32>(Mutation::BufferBarrier)) |
+                               (1u << static_cast<u32>(Mutation::ImageCreated)) |
+                               (1u << static_cast<u32>(Mutation::ImageUpload)) |
+                               (1u << static_cast<u32>(Mutation::ImageBarrier)) |
+                               (1u << static_cast<u32>(Mutation::PipelineCompiled));
+} // namespace
+
+void NoteMutation(Mutation mutation) {
+    if (mutation_active) {
+        mutation_mask |= 1u << static_cast<u32>(mutation);
+    }
+}
+
+MutationScope::MutationScope() noexcept {
+    mutation_active = IsEnabled();
+    if (mutation_active) {
+        mutation_mask = 0;
+        mutation_start = NowNs();
+    }
+}
+
+MutationScope::~MutationScope() {
+    mutation_active = false;
+}
+
+void MutationScope::Finish(CallClass call_class) noexcept {
+    if (!mutation_active) {
+        return;
+    }
+    mutation_active = false;
+    const u32 c = static_cast<u32>(call_class);
+    counters.mutation_calls[c].fetch_add(1, std::memory_order_relaxed);
+    counters.mutation_ns[c].fetch_add(NowNs() - mutation_start, std::memory_order_relaxed);
+    if (mutation_mask == 0) {
+        counters.mutation_none[c].fetch_add(1, std::memory_order_relaxed);
+    }
+    if ((mutation_mask & CacheMutations) == 0) {
+        counters.mutation_cache_clean[c].fetch_add(1, std::memory_order_relaxed);
+    }
+    for (u32 k = 0; k < NumMutations; ++k) {
+        if (mutation_mask & (1u << k)) {
+            counters.mutation_kinds[c][k].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 void OnCommandReplay(u64 commands, u64 ns) {

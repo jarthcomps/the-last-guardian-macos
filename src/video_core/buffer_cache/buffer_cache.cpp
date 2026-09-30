@@ -689,6 +689,7 @@ void BufferCache::BindVertexBuffers(
             if (auto barrier =
                     buffer->GetBarrier(vk::AccessFlagBits2::eVertexAttributeRead,
                                        vk::PipelineStageFlagBits2::eVertexAttributeInput)) {
+                ReadbackStats::NoteMutation(ReadbackStats::Mutation::BufferBarrier);
                 barriers.emplace_back(*barrier);
             }
         }
@@ -745,6 +746,7 @@ void BufferCache::BindIndexBuffer(
     if (IsRegionGpuModified(index_address, index_buffer_size)) {
         if (auto barrier = vk_buffer->GetBarrier(vk::AccessFlagBits2::eIndexRead,
                                                  vk::PipelineStageFlagBits2::eIndexInput)) {
+            ReadbackStats::NoteMutation(ReadbackStats::Mutation::BufferBarrier);
             barriers.emplace_back(*barrier);
         }
     }
@@ -899,6 +901,7 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
             }
         }
         const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
+        ReadbackStats::NoteMutation(ReadbackStats::Mutation::StreamCopy);
         if (stream_reuse_enabled && stream_buffer.WrapCount() == stream_reuse_wraps) {
             stream_reuse.emplace(reuse_key, offset);
             stream_reuse_min = std::min<VAddr>(stream_reuse_min, device_addr);
@@ -931,6 +934,7 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
             //     ReadbackStats::OnHazard(ReadbackStats::Hazard::GpuMarkOverlap);
             // }
         }
+        ReadbackStats::NoteMutation(ReadbackStats::Mutation::BufferGpuMark);
         gpu_modified_ranges.Add(device_addr, size);
     }
     return {&buffer, buffer.Offset(device_addr)};
@@ -1113,6 +1117,7 @@ void BufferCache::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
 }
 
 BufferId BufferCache::CreateBuffer(VAddr device_addr, u32 wanted_size) {
+    ReadbackStats::NoteMutation(ReadbackStats::Mutation::BufferCreated);
     if (auto* events = ReadbackStats::CpEvents()) {
         ++events->buffers_created;
     }
@@ -1207,6 +1212,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
         [&] { src_buffer = UploadCopies(buffer, copies, total_size_bytes); });
 
     if (src_buffer) {
+        ReadbackStats::NoteMutation(ReadbackStats::Mutation::BufferUpload);
         if (auto* events = ReadbackStats::CpEvents()) {
             events->upload_bytes += total_size_bytes;
             ReadbackStats::OnUpload(total_size_bytes);

@@ -694,6 +694,9 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
+    if (False(image.flags & ImageFlagBits::GpuModified)) {
+        ReadbackStats::NoteMutation(ReadbackStats::Mutation::TargetMarked);
+    }
     image.flags |= ImageFlagBits::GpuModified;
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
@@ -720,6 +723,9 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
 
 ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
+    if (False(image.flags & ImageFlagBits::GpuModified)) {
+        ReadbackStats::NoteMutation(ReadbackStats::Mutation::TargetMarked);
+    }
     image.flags |= ImageFlagBits::GpuModified;
     image.usage.depth_target = 1u;
     UpdateImage(image_id);
@@ -791,6 +797,7 @@ void TextureCache::RefreshImage(Image& image) {
         image.hash = hash;
     }
 
+    ReadbackStats::NoteMutation(ReadbackStats::Mutation::ImageUpload);
     const u32 num_layers = image.info.resources.layers;
     const u32 num_mips = image.info.resources.levels;
     const bool is_gpu_modified = True(image.flags & ImageFlagBits::GpuModified);
@@ -874,6 +881,7 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
 }
 
 void TextureCache::RegisterImage(ImageId image_id) {
+    ReadbackStats::NoteMutation(ReadbackStats::Mutation::ImageCreated);
     Image& image = slot_images[image_id];
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");

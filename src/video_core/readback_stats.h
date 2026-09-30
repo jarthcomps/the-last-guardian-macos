@@ -416,6 +416,45 @@ enum class Reuse : u32 {
 };
 void OnReuse(Reuse reuse, u64 amount = 1);
 
+/// What one draw or dispatch changed in state that later draws depend on (caches, memory tracking,
+/// barriers). If most draws change nothing but the stream, their lookups could run ahead of the
+/// command processor on a helper thread.
+enum class Mutation : u32 {
+    StreamCopy,       ///< Copied constant data into the stream buffer (not a reuse hit).
+    BufferCreated,    ///< Created or merged a buffer in the buffer cache.
+    BufferUpload,     ///< Uploaded guest data into a cached buffer (records copies and barriers).
+    BufferGpuMark,    ///< Marked a range as GPU-written.
+    BufferBarrier,    ///< Needed a buffer barrier (the buffer's access state changed).
+    ImageCreated,     ///< Created or registered an image.
+    ImageUpload,      ///< Uploaded guest data into an image.
+    ImageBarrier,     ///< Changed an image's layout or access (records a barrier).
+    TargetMarked,     ///< Marked a render target as GPU-written for the first time.
+    PipelineCompiled, ///< Compiled a new pipeline.
+    PassBegin,        ///< Started a new render pass.
+    Count,
+};
+constexpr u32 NumMutations = static_cast<u32>(Mutation::Count);
+
+enum class CallClass : u32 {
+    DepthDraw, ///< Draws without color targets (shadow maps, depth prepass).
+    ColorDraw, ///< Draws with color targets.
+    Dispatch,  ///< Compute dispatches.
+    Count,
+};
+constexpr u32 NumCallClasses = static_cast<u32>(CallClass::Count);
+
+/// Records that the current draw or dispatch changed shared state (command processor only).
+void NoteMutation(Mutation mutation);
+
+/// Collects the mutations of one draw or dispatch and adds them to the counters at Finish. Calls
+/// that return early are not counted.
+class MutationScope {
+public:
+    MutationScope() noexcept;
+    ~MutationScope();
+    void Finish(CallClass call_class) noexcept;
+};
+
 /// Records an asynchronous fence of the given kind and whether it had to submit the command
 /// buffer.
 void OnAsyncFence(FenceKind kind, bool submitted);

@@ -3,6 +3,7 @@
 
 #include <ranges>
 #include "common/assert.h"
+#include "video_core/readback_stats.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -341,6 +342,7 @@ void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
     if (barriers.empty()) {
         return;
     }
+    VideoCore::ReadbackStats::NoteMutation(VideoCore::ReadbackStats::Mutation::ImageBarrier);
 
     if (!cmdbuf) {
         // When using external cmdbuf you are responsible for ending rp.

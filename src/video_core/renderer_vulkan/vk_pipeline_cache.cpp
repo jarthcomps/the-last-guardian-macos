@@ -400,6 +400,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         return graphics_pipelines.try_emplace(graphics_key);
     }();
     if (is_new) {
+        VideoCore::ReadbackStats::NoteMutation(
+            VideoCore::ReadbackStats::Mutation::PipelineCompiled);
         VideoCore::ReadbackStats::CpTimer compile_timer{
             VideoCore::ReadbackStats::CpTime::PipelineCompile};
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
@@ -436,6 +438,8 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         return compute_pipelines.try_emplace(compute_key);
     }();
     if (is_new) {
+        VideoCore::ReadbackStats::NoteMutation(
+            VideoCore::ReadbackStats::Mutation::PipelineCompiled);
         VideoCore::ReadbackStats::CpTimer compile_timer{
             VideoCore::ReadbackStats::CpTime::PipelineCompile};
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
