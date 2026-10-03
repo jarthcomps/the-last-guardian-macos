@@ -62,11 +62,11 @@ graphics card and waiting for it, which is what made the game slow. The work, in
 12. **Encoder thread** (`cp_encoder_mode: 2`). The command thread records its Vulkan commands
     into lists, and a second thread turns them into GPU command buffers and submits them. The
     command thread spends ~25% less time per draw.
-13. **Full fences for compute** (`cp_full_fence_kinds: 4`). With the encoder thread, GPU work
-    reaches the GPU a little later than it is recorded. Without full fences, Trico's feathers
-    flickered when pulling the spear out at the start of the game. Compute fences now wait for
-    all work recorded before them; that fixes it at a fraction of the cost of doing it for every
-    fence kind.
+13. **Full fences** (`cp_full_fence_kinds: 31`). With the encoder thread, GPU work reaches the
+    GPU a little later than it is recorded. Without full fences, Trico's feathers flickered when
+    pulling the spear out at the start of the game. Fences now wait for all work recorded before
+    them. Only compute fences (`4`) were enough at the spear and are cheaper, but people still
+    reported flicker with `4`, so the release uses all kinds (`31`).
 14. **Shader lookup reuse** (`stage_lookup_reuse: 1`). At each draw, a shader first checks the
     variant it picked last time (right ~97% of the time) before searching all its variants.
 15. **Game threads wait for their own readbacks** (`readback_async_guest_faults`). When a game
@@ -106,7 +106,7 @@ Lessons from other emulators (Dolphin, Xenia, Ryujinx) are in
     "stage_lookup_reuse": 1,
     "readback_async_guest_faults": true,
     "cp_encoder_mode": 2,
-    "cp_full_fence_kinds": 4,
+    "cp_full_fence_kinds": 31,
     "readback_stats_enabled": false
   }
 }
@@ -134,7 +134,7 @@ frame, so a shorter GPU frame shortens those waits.
   violation). If one comes back at the same spot, set `rt_lookup_reuse_enabled` to `false` and
   report whether it stays.
 - Trico's feathers: `cp_full_fence_kinds: 0` (no full fences) flickers when pulling the spear
-  out. 4 was clean there, and so were 27 and 31, so the exact fence kind that matters isn't pinned
-  down yet.
+  out. 4, 27 and 31 were clean there, so the exact fence kind that matters isn't pinned down yet.
+  The release uses 31 after reports of flicker with 4; 4 is cheaper if flicker is not a problem.
 - The command thread is still the limit, but its cost is now spread over many small steps
   (bindings, draw recording, shader lookups). Further gains need less work per draw.
