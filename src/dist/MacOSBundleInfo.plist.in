@@ -9,11 +9,11 @@
     <key>CFBundleExecutable</key>
     <string>shadps4</string>
     <key>CFBundleIdentifier</key>
-    <string>com.shadps4-emu.shadps4</string>
+    <string>local.guardian.shadps4.nightly</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>shadps4</string>
+    <string>shadPS4 Guardian nightly</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

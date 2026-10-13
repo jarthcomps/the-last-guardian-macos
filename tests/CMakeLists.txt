@@ -2,6 +2,13 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 # Find or download Google Test
+if (APPLE AND ARCHITECTURE STREQUAL "x86_64")
+    add_executable(shadps4_rosetta_avx_store_test test_rosetta_avx_store.cpp)
+    target_include_directories(shadps4_rosetta_avx_store_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(shadps4_rosetta_avx_store_test PRIVATE xbyak::xbyak)
+    add_test(NAME rosetta_avx_store COMMAND shadps4_rosetta_avx_store_test)
+endif()
+
 include(FetchContent)
     FetchContent_Declare(
     googletest
