@@ -7,6 +7,11 @@ if (APPLE AND ARCHITECTURE STREQUAL "x86_64")
     target_include_directories(shadps4_rosetta_avx_store_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(shadps4_rosetta_avx_store_test PRIVATE xbyak::xbyak)
     add_test(NAME rosetta_avx_store COMMAND shadps4_rosetta_avx_store_test)
+    add_executable(shadps4_pm4_address_test test_pm4_addresses.cpp)
+    target_include_directories(shadps4_pm4_address_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(shadps4_pm4_address_test PRIVATE
+        Boost::headers spdlog::spdlog magic_enum::magic_enum)
+    add_test(NAME pm4_addresses COMMAND shadps4_pm4_address_test)
 endif()
 
 include(FetchContent)
