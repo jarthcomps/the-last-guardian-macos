@@ -1,0 +1,4 @@
+[submodule "engine"]
+	path = engine
+	url = https://github.com/jarthcomps/the-last-guardian-macos.git
+	branch = shadps4-fork

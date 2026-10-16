@@ -1,0 +1,6 @@
+{
+  "GPU": {
+    "readbacks_mode": 2,
+    "readback_linear_images_enabled": true
+  }
+}

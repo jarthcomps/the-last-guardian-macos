@@ -1,0 +1,18 @@
+{
+  "GPU": {
+    "readback_async_fences_enabled": true,
+    "readback_batching_enabled": true,
+    "readback_fence_wait_shortcut": 3,
+    "readback_stream_reuse_enabled": true,
+    "readback_prefetch_mode": 1,
+    "readback_prefetch_lifetime": 60,
+    "rt_lookup_reuse_enabled": true,
+    "stage_lookup_reuse": 1,
+    "readback_async_guest_faults": true,
+    "cp_encoder_mode": 2,
+    "cp_full_fence_kinds": 31,
+    "readback_stats_enabled": false,
+    "readback_stats_gpu_timing_enabled": false,
+    "cp_encoder_queue_depth": 8
+  }
+}

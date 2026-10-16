@@ -1,0 +1,1243 @@
+diff -ruN a/src/kosmickrisp/compiler/meson.build b/src/kosmickrisp/compiler/meson.build
+--- a/src/kosmickrisp/compiler/meson.build
++++ b/src/kosmickrisp/compiler/meson.build
+@@ -35,3 +35,10 @@
+   link_with : libmsl_compiler,
+ )
+ 
++if with_tests
++  test('shadps4-diagnostic-entrypoint-names', executable(
++    'shadps4_diagnostic_entrypoint_names_test',
++    'test_shadps4_diagnostic_name.c',
++  ))
++endif
++
+diff -ruN a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -8,6 +8,7 @@
+ #include "msl_private.h"
+ #include "nir.h"
+ #include "nir_builder.h"
++#include "shadps4_diagnostic_name.h"
+ 
+ static const char *
+ get_stage_string(mesa_shader_stage stage)
+@@ -2197,6 +2198,8 @@
+    const char *entrypoint_name = "main_entrypoint";
+    nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
+    struct nir_function *function = entrypoint->function;
++   if (kk_is_shadps4_diagnostic_name(function->name))
++      return;
+    ralloc_free((void *)function->name);
+    function->name = ralloc_strdup(function, entrypoint_name);
+ }
+diff -ruN a/src/kosmickrisp/compiler/shadps4_diagnostic_name.h b/src/kosmickrisp/compiler/shadps4_diagnostic_name.h
+--- a/src/kosmickrisp/compiler/shadps4_diagnostic_name.h
++++ b/src/kosmickrisp/compiler/shadps4_diagnostic_name.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef SHADPS4_DIAGNOSTIC_NAME_H
++#define SHADPS4_DIAGNOSTIC_NAME_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <string.h>
++
++/* The emulator generates these ASCII identifiers only for opt-in profiling.
++ * Keep arbitrary application entrypoint names on the existing rename path.
++ */
++static inline bool
++kk_is_shadps4_diagnostic_name(const char *name)
++{
++   if (!name)
++      return false;
++
++   const char *prefixes[] = {"shadps4_guest_", "shadps4_host_tiling_"};
++   size_t prefix_length = 0;
++   for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
++      size_t length = strlen(prefixes[i]);
++      if (strncmp(name, prefixes[i], length) == 0) {
++         prefix_length = length;
++         break;
++      }
++   }
++   if (!prefix_length || !name[prefix_length])
++      return false;
++
++   /* Bound both the accepted Metal identifier and the validation scan. */
++   for (size_t i = prefix_length; i < 128; ++i) {
++      unsigned char c = (unsigned char)name[i];
++      if (!c)
++         return true;
++      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
++            (c >= '0' && c <= '9') || c == '_'))
++         return false;
++   }
++   return false;
++}
++
++#endif
+diff -ruN a/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c b/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c
+--- a/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c
++++ b/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c
+@@ -0,0 +1,44 @@
++/* SPDX-License-Identifier: MIT */
++#include "shadps4_diagnostic_name.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++
++static void check(bool condition)
++{
++   if (!condition) {
++      fputs("Diagnostic shader name test failed\n", stderr);
++      abort();
++   }
++}
++
++int main(void)
++{
++   check(kk_is_shadps4_diagnostic_name(
++      "shadps4_guest_cs_0123456789abcdef_p12"));
++   check(kk_is_shadps4_diagnostic_name(
++      "shadps4_host_tiling_Thin1D_32_detiler_single"));
++   check(!kk_is_shadps4_diagnostic_name(NULL));
++   check(!kk_is_shadps4_diagnostic_name(""));
++   check(!kk_is_shadps4_diagnostic_name("main"));
++   check(!kk_is_shadps4_diagnostic_name("main_entrypoint"));
++   check(!kk_is_shadps4_diagnostic_name("shadps4_guest_"));
++   check(!kk_is_shadps4_diagnostic_name("shadps4_host_tiling_"));
++   check(!kk_is_shadps4_diagnostic_name("shadps4_guest_a b"));
++   check(!kk_is_shadps4_diagnostic_name("shadps4_guest_a-b"));
++   check(!kk_is_shadps4_diagnostic_name("shadps4_guest_a\n"));
++   check(!kk_is_shadps4_diagnostic_name("shadps4_guest_a\xc3\xa9"));
++   check(!kk_is_shadps4_diagnostic_name("shadps4_guest_;return"));
++   check(!kk_is_shadps4_diagnostic_name("shadps4_guest_(x)"));
++   check(!kk_is_shadps4_diagnostic_name("other_shadps4_guest_x"));
++   char boundary[129];
++   memset(boundary, 'a', sizeof(boundary));
++   memcpy(boundary, "shadps4_guest_", strlen("shadps4_guest_"));
++   boundary[127] = '\0';
++   check(kk_is_shadps4_diagnostic_name(boundary));
++   boundary[127] = 'a';
++   boundary[128] = '\0';
++   check(!kk_is_shadps4_diagnostic_name(boundary));
++   puts("Diagnostic shader name tests passed");
++   return 0;
++}
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -24,7 +24,60 @@
+ #include "vk_common_entrypoints.h"
+ #include "vk_format.h"
+ #include "vk_pipeline_layout.h"
++#include <stdlib.h>
+ 
++#include "util/os_time.h"
++#include "util/u_atomic.h"
++
++struct kk_shadps4_encoder_stats kk_shadps4_stats;
++
++bool
++kk_shadps4_encoder_stats_enabled(void)
++{
++   static int enabled = -1;
++   if (enabled < 0)
++      enabled = getenv("KK_SHADPS4_ENCODER_STATS") != NULL;
++   return enabled > 0;
++}
++
++/* KK_SHADPS4_DROP_COMPUTE_BARRIERS=1 (diagnostic, breaks synchronization):
++ * barriers inside compute encoders are not recorded, to measure what they
++ * cost the GPU. */
++static bool
++kk_shadps4_drop_compute_barriers(void)
++{
++   static int enabled = -1;
++   if (enabled < 0)
++      enabled = kk_shadps4_env_flag(getenv("KK_SHADPS4_DROP_COMPUTE_BARRIERS"));
++   return enabled > 0;
++}
++
++/* Prints one line per second with the counts since the previous line. Called
++ * at the end of every command buffer recording. */
++void
++kk_shadps4_encoder_stats_report(void)
++{
++   static int64_t last_ns;
++   static struct kk_shadps4_encoder_stats last;
++   const int64_t now = os_time_get_nano();
++   if (last_ns == 0) {
++      last_ns = now;
++      last = kk_shadps4_stats;
++      return;
++   }
++   if (now - last_ns < 1000000000ll)
++      return;
++   const struct kk_shadps4_encoder_stats current = kk_shadps4_stats;
++   const struct kk_shadps4_encoder_stats delta =
++      kk_shadps4_encoder_stats_delta(&last, &current);
++   char line[512];
++   kk_shadps4_encoder_stats_format(&delta, (now - last_ns) / 1e9, line, sizeof(line));
++   fputs(line, stderr);
++   fflush(stderr);
++   last_ns = now;
++   last = current;
++}
++
+ static void
+ kk_descriptor_state_fini(struct kk_cmd_buffer *cmd,
+                          struct kk_descriptor_state *desc)
+@@ -67,6 +120,10 @@
+ 
+    cs_end(cmd);
+    mtl_end_command_buffer(cmd->metal.cmd_buf);
++   if (kk_shadps4_encoder_stats_enabled()) {
++      p_atomic_inc(&kk_shadps4_stats.command_buffers);
++      kk_shadps4_encoder_stats_report();
++   }
+    kk_cmd_pool_return_allocator(kk_cmd_buffer_pool(cmd), cmd->metal.allocator);
+    cmd->metal.allocator = NULL;
+ }
+@@ -269,13 +326,19 @@
+ 
+    cmd->metal.render = mtl_new_render_command_encoder_with_descriptor(
+       cmd->metal.cmd_buf, state->render_pass_descriptor);
++   if (kk_shadps4_encoder_stats_enabled()) {
++      const unsigned reason = state->render_start_reason < KK_SHADPS4_RENDER_START_COUNT
++                                 ? state->render_start_reason
++                                 : KK_SHADPS4_RENDER_START_BEGIN;
++      p_atomic_inc(&kk_shadps4_stats.render_starts[reason]);
++   }
++   state->render_start_reason = KK_SHADPS4_RENDER_START_BEGIN;
+ 
+    kk_encoder_update_debug(cmd, cmd->metal.render);
+    /* Starting a new render pass means we already flushed and no barrier is
+     * needed. */
+-   state->render.write_available = false;
+-   state->render.ds_write_available = false;
+-   state->render.storage_write_available = false;
++   kk_shadps4_encoder_hazards_reset(&state->render.hazards);
++   state->render.encoder_may_write_memory = false;
+ 
+    uint32_t layer_ids[KK_MAX_MULTIVIEW_VIEW_COUNT] = {};
+    uint32_t count = 0u;
+@@ -315,10 +378,14 @@
+ {
+    /* If we are inside render, we need to force a restart later */
+    if (cmd->metal.render) {
++      KK_SHADPS4_STAT(compute_after_render);
+       kk_apply_attachment_store_ops(cmd, true);
+       cs_end(cmd);
+       kk_cmd_buffer_dirty_all_gfx(cmd);
+       cmd->state.gfx.need_to_start_render_pass = true;
++      cmd->state.gfx.render_start_reason = KK_SHADPS4_RENDER_START_COMPUTE;
++   } else if (cmd->metal.compute == NULL) {
++      KK_SHADPS4_STAT(compute_fresh);
+    }
+ 
+    if (cmd->metal.compute == NULL) {
+@@ -406,53 +473,66 @@
+  * no split is needed.
+  */
+ static bool
++kk_image_is_encoder_attachment(const struct kk_rendering_state *render,
++                               const struct vk_image *image)
++{
++   if (image == NULL)
++      return false;
++   for (uint32_t i = 0; i < render->color_att_count; i++) {
++      const struct kk_attachment *att = &render->color_att[i];
++      if (att->iview && att->iview->vk.image == image)
++         return true;
++      if (att->resolve_iview && att->resolve_iview->vk.image == image)
++         return true;
++   }
++   const struct kk_attachment *others[] = {&render->depth_att,
++                                           &render->stencil_att,
++                                           &render->fsr_att};
++   for (uint32_t i = 0; i < ARRAY_SIZE(others); i++) {
++      if (others[i]->iview && others[i]->iview->vk.image == image)
++         return true;
++      if (others[i]->resolve_iview &&
++          others[i]->resolve_iview->vk.image == image)
++         return true;
++   }
++   return false;
++}
++
++static bool
+ kk_barrier_requires_encoder_split(struct kk_cmd_buffer *cmd,
+                                   const VkDependencyInfo *dep)
+ {
+-   const VkAccessFlags2 texture_read_access =
+-      VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+-      VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+-   const VkAccessFlags2 any_write_access =
+-      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+-      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+-      VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+-      VK_ACCESS_2_MEMORY_WRITE_BIT;
+-   const VkAccessFlags2 ds_write_access =
+-      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+-      VK_ACCESS_2_MEMORY_WRITE_BIT;
+-   const VkAccessFlags2 storage_write_access =
+-      VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+-      VK_ACCESS_2_MEMORY_WRITE_BIT;
+    struct kk_rendering_state *render = &cmd->state.gfx.render;
+    const bool has_ds =
+       render->depth_att.iview != NULL || render->stencil_att.iview != NULL;
++   const bool may_write = render->encoder_may_write_memory;
+ 
++   /* Only writes that may have been produced inside the active encoder can
++    * require a split; everything recorded before it is already complete
++    * (see shadps4_barrier_split.h). */
+    VkAccessFlags2 src = 0, dst = 0;
+    for (uint32_t i = 0; i < dep->memoryBarrierCount; i++) {
+-      src |= dep->pMemoryBarriers[i].srcAccessMask;
++      src |= kk_shadps4_attributable_writes(dep->pMemoryBarriers[i].srcAccessMask,
++                                            KK_SHADPS4_BARRIER_MEMORY, false,
++                                            may_write);
+       dst |= dep->pMemoryBarriers[i].dstAccessMask;
+    }
+    for (uint32_t i = 0; i < dep->bufferMemoryBarrierCount; i++) {
+-      src |= dep->pBufferMemoryBarriers[i].srcAccessMask;
++      src |= kk_shadps4_attributable_writes(
++         dep->pBufferMemoryBarriers[i].srcAccessMask, KK_SHADPS4_BARRIER_BUFFER,
++         false, may_write);
+       dst |= dep->pBufferMemoryBarriers[i].dstAccessMask;
+    }
+    for (uint32_t i = 0; i < dep->imageMemoryBarrierCount; i++) {
+-      src |= dep->pImageMemoryBarriers[i].srcAccessMask;
++      VK_FROM_HANDLE(vk_image, image, dep->pImageMemoryBarriers[i].image);
++      const bool is_attachment = kk_image_is_encoder_attachment(render, image);
++      src |= kk_shadps4_attributable_writes(
++         dep->pImageMemoryBarriers[i].srcAccessMask, KK_SHADPS4_BARRIER_IMAGE,
++         is_attachment, may_write);
+       dst |= dep->pImageMemoryBarriers[i].dstAccessMask;
+    }
+ 
+-   if (src & any_write_access)
+-      render->write_available = true;
+-   if (has_ds && (src & ds_write_access))
+-      render->ds_write_available = true;
+-   if (src & storage_write_access)
+-      render->storage_write_available = true;
+-
+-   if (render->write_available && (dst & texture_read_access))
+-      return true;
+-
+-   return (render->ds_write_available || render->storage_write_available) &&
+-          (dst & VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT);
++   return kk_shadps4_barrier_requires_split(src, dst, has_ds, &render->hazards);
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+@@ -465,19 +545,31 @@
+     * barrier. To take advantage of this we need to remove the chaining of
+     * encoders. */
+    if (cmd->metal.render) {
++      KK_SHADPS4_STAT(barriers_in_render);
+       /* Multisample attachments require render pass split always. Then based on
+        * the barrier and if we are using depth/stencil or not, we may have to
+        * break the render pass. See comment in kk_barrier_requires_encoder_split
+        */
+       if (cmd->state.gfx.render.samples > 1 ||
+           kk_barrier_requires_encoder_split(cmd, pDependencyInfo)) {
++         KK_SHADPS4_STAT(barriers_in_render_split);
+          kk_apply_attachment_store_ops(cmd, true);
+          cs_end(cmd);
++         cmd->state.gfx.render_start_reason = KK_SHADPS4_RENDER_START_BARRIER;
+          cs_start_render(cmd);
+       } else
+          mtl_barrier_after_encoder_stages(cmd->metal.render, MTL_STAGE_VERTEX,
+                                           MTL_STAGE_FRAGMENT);
+    } else if (cmd->metal.compute) {
++      if (kk_shadps4_encoder_stats_enabled()) {
++         static uint64_t last_dispatches;
++         p_atomic_inc(&kk_shadps4_stats.compute_barriers);
++         if (kk_shadps4_compute_barrier_idle(
++                &last_dispatches, p_atomic_read(&kk_shadps4_stats.dispatches)))
++            p_atomic_inc(&kk_shadps4_stats.compute_barriers_idle);
++      }
++      if (kk_shadps4_drop_compute_barriers())
++         return;
+       /* We chain encoders, so an intra-encoder barrier is enough here:
+        * no need to tear down and recreate the encoder.
+        */
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -9,6 +9,9 @@
+ #define KK_CMD_BUFFER_H 1
+ 
+ #include "kk_private.h"
++#include "shadps4_barrier_split.h"
++#include "shadps4_encoder_stats.h"
++#include "util/u_atomic.h"
+ 
+ #include "kk_descriptor_set.h"
+ #include "kk_image.h"
+@@ -124,10 +127,12 @@
+    struct kk_attachment fsr_att;
+ 
+    bool ms_bresenham_lines;
+-   /* Barrier tracking to understand if we need to split render passes. */
+-   bool write_available;
+-   bool ds_write_available;
+-   bool storage_write_available;
++   /* Barrier tracking to understand if we need to split render passes.
++    * Reset whenever a render encoder starts (shadps4_barrier_split.h). */
++   struct kk_shadps4_encoder_hazards hazards;
++   /* A draw of the active render encoder used a shader that writes memory,
++    * so shader writes named by a later barrier may come from this encoder. */
++   bool encoder_may_write_memory;
+    bool sample_locations_enable;
+    uint32_t sample_locations_count;
+    VkSampleLocationEXT sample_locations[KK_MAX_SAMPLES];
+@@ -153,6 +158,8 @@
+    bool is_depth_stencil_dynamic;
+    bool is_cull_front_and_back;
+    bool need_to_start_render_pass;
++   /* Why the next render encoder starts (KK_SHADPS4_ENCODER_STATS). */
++   uint8_t render_start_reason;
+ 
+    enum kk_dirty dirty;
+    uint32_t pipeline_sample_count;
+@@ -314,6 +321,17 @@
+ 
+ void cs_start_render(struct kk_cmd_buffer *cmd);
+ mtl_render_encoder *cs_get_render(struct kk_cmd_buffer *cmd);
++
++/* Encoder statistics, enabled with KK_SHADPS4_ENCODER_STATS in the
++ * environment (shadps4_encoder_stats.h). */
++extern struct kk_shadps4_encoder_stats kk_shadps4_stats;
++bool kk_shadps4_encoder_stats_enabled(void);
++void kk_shadps4_encoder_stats_report(void);
++#define KK_SHADPS4_STAT(field)                                                 \
++   do {                                                                        \
++      if (kk_shadps4_encoder_stats_enabled())                                  \
++         p_atomic_inc(&kk_shadps4_stats.field);                                \
++   } while (0)
+ mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd);
+ void cs_end(struct kk_cmd_buffer *cmd);
+ void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_dispatch.c b/src/kosmickrisp/vulkan/kk_cmd_dispatch.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_dispatch.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_dispatch.c
+@@ -21,6 +21,7 @@
+ kk_flush_compute_state(struct kk_cmd_buffer *cmd)
+ {
+    mtl_compute_encoder *encoder = cs_get_compute(cmd);
++   KK_SHADPS4_STAT(dispatches);
+ 
+    // Fill Metal argument buffer with descriptor set addresses
+    struct kk_descriptor_state *desc = &cmd->state.cs.descriptors;
+@@ -81,6 +82,7 @@
+    struct mtl_size local_size = cs->info.cs.local_size;
+ 
+    mtl_compute_encoder *encoder = cs_get_compute(cmd);
++   KK_SHADPS4_STAT(dispatches);
+    if (cmd->state.cond_render.enabled) {
+       /* Convert to indirect for predication */
+       VkDispatchIndirectCommand indirect = {
+@@ -130,6 +132,7 @@
+    struct mtl_size local_size = cs->info.cs.local_size;
+ 
+    mtl_compute_encoder *encoder = cs_get_compute(cmd);
++   KK_SHADPS4_STAT(dispatches);
+    if (cmd->state.cond_render.enabled) {
+       struct kk_ptr patched =
+          kk_pool_alloc(cmd, sizeof(VkDispatchIndirectCommand), 4u);
+diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -466,6 +466,7 @@
+          attachment_descriptor, MTL_LOAD_ACTION_LOAD);
+    }
+    cmd->state.gfx.need_to_start_render_pass = no_framebuffer;
++   cmd->state.gfx.render_start_reason = KK_SHADPS4_RENDER_START_BEGIN;
+ 
+    kk_cmd_buffer_dirty_all_gfx(cmd);
+ 
+@@ -628,6 +629,13 @@
+ 
+    kk_apply_attachment_store_ops(cmd, false);
+ 
++   if (kk_shadps4_encoder_stats_enabled() && cmd->metal.render == NULL) {
++      if (cmd->metal.compute)
++         p_atomic_inc(&kk_shadps4_stats.end_rendering_closed_compute);
++      else
++         p_atomic_inc(&kk_shadps4_stats.end_rendering_empty);
++   }
++
+    /* Clean up previous encoder */
+    cs_end(cmd);
+    mtl_release(cmd->state.gfx.render_pass_descriptor);
+@@ -971,6 +979,7 @@
+       cs_end(cmd);
+       kk_cmd_buffer_dirty_all_gfx(cmd);
+       cmd->state.gfx.need_to_start_render_pass = true;
++      cmd->state.gfx.render_start_reason = KK_SHADPS4_RENDER_START_STATE;
+    }
+ }
+ 
+@@ -1527,7 +1536,21 @@
+ 
+    kk_flush_render_pass(cmd);
+    kk_flush_pipeline(cmd);
++   KK_SHADPS4_STAT(draws);
+ 
++   /* Barriers recorded later in this encoder may name writes of these
++    * draws only if one of their shaders writes memory. */
++   if (!gfx->render.encoder_may_write_memory) {
++      for (unsigned stage = MESA_SHADER_VERTEX; stage <= MESA_SHADER_FRAGMENT;
++           stage++) {
++         const struct kk_shader *shader = cmd->state.shaders[stage];
++         if (shader && shader->info.writes_memory) {
++            gfx->render.encoder_may_write_memory = true;
++            break;
++         }
++      }
++   }
++
+    if (desc->push_dirty)
+       kk_cmd_buffer_flush_push_descriptors(cmd, desc);
+ 
+@@ -1971,14 +1994,29 @@
+       return false;
+ 
+    /* Metal does not support triangle fans */
+-   if (data->prim == MESA_PRIM_TRIANGLE_FAN)
++   if (data->prim == MESA_PRIM_TRIANGLE_FAN) {
++      KK_SHADPS4_STAT(unroll_fan);
+       return true;
++   }
+ 
+    /* Check for remaining unroll conditions */
+-   return requires_unroll_index_promotion(data) ||
+-          requires_unroll_robustness(cmd, data) ||
+-          requires_unroll_restart(cmd, data) ||
+-          requires_unroll_flatshade(cmd, data);
++   if (requires_unroll_index_promotion(data)) {
++      KK_SHADPS4_STAT(unroll_promotion);
++      return true;
++   }
++   if (requires_unroll_robustness(cmd, data)) {
++      KK_SHADPS4_STAT(unroll_robustness);
++      return true;
++   }
++   if (requires_unroll_restart(cmd, data)) {
++      KK_SHADPS4_STAT(unroll_restart);
++      return true;
++   }
++   if (requires_unroll_flatshade(cmd, data)) {
++      KK_SHADPS4_STAT(unroll_flatshade);
++      return true;
++   }
++   return false;
+ }
+ 
+ static uint64_t
+diff -ruN a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include "kk_physical_device.h"
++#include "shadps4_cache_key.h"
+ 
+ #include "kk_debug.h"
+ #include "kk_entrypoints.h"
+@@ -979,6 +980,9 @@
+ 
+    _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
+                        sizeof(instance->driver_build_sha));
++   const struct kk_shadps4_cache_key_extra extra = kk_shadps4_cache_key_extra(
++      pdev->settings.disabled_workarounds, (uint64_t)kk_mesa_debug_flags);
++   _mesa_blake3_update(&blake3_ctx, &extra, sizeof(extra));
+ 
+    unsigned char blake3[BLAKE3_KEY_LEN];
+    _mesa_blake3_final(&blake3_ctx, blake3);
+diff -ruN a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -899,11 +899,28 @@
+    return false;
+ }
+ 
++static bool
++shader_writes_external_memory(nir_shader *nir)
++{
++   nir_foreach_function_impl(impl, nir) {
++      nir_foreach_block_safe(block, impl) {
++         nir_foreach_instr_safe(instr, block) {
++            if (instr->type != nir_instr_type_intrinsic)
++               continue;
++            if (nir_intrinsic_writes_external_memory(nir_instr_as_intrinsic(instr)))
++               return true;
++         }
++      }
++   }
++   return false;
++}
++
+ static void
+ gather_shader_info(struct kk_shader *shader, nir_shader *nir,
+                    const struct vk_graphics_pipeline_state *state)
+ {
+    shader->info.stage = nir->info.stage;
++   shader->info.writes_memory = shader_writes_external_memory(nir);
+    shader->info.uses_per_draw_data = msl_gather_uses_per_draw_data(nir);
+    shader->info.num_cull_distances = nir->info.cull_distance_array_size;
+    if (nir->info.stage == MESA_SHADER_VERTEX) {
+diff -ruN a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -54,6 +54,11 @@
+    /* Required for fragment shader cull distance discards. */
+    uint8_t num_cull_distances;
+ 
++   /* The shader stores to or atomically updates buffers or images. Used to
++    * decide whether a barrier inside a render pass must split the encoder
++    * (shadps4_barrier_split.h). */
++   bool writes_memory;
++
+    union {
+       /* Vertex shader is the pipeline, store all relevant data here. */
+       struct {
+diff -ruN a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+--- a/src/kosmickrisp/vulkan/meson.build
++++ b/src/kosmickrisp/vulkan/meson.build
+@@ -202,3 +202,25 @@
+ )
+ 
+ devenv.append('VK_DRIVER_FILES', kosmickrisp_icd.full_path())
++
++if with_tests
++  test('shadps4-barrier-split', executable(
++    'shadps4_barrier_split_test',
++    'test_shadps4_barrier_split.c',
++    include_directories : [include_directories('../../../include')],
++  ))
++endif
++
++if with_tests
++  test('shadps4-encoder-stats', executable(
++    'shadps4_encoder_stats_test',
++    'test_shadps4_encoder_stats.c',
++  ))
++endif
++
++if with_tests
++  test('shadps4-cache-key', executable(
++    'shadps4_cache_key_test',
++    'test_shadps4_cache_key.c',
++  ))
++endif
+diff -ruN a/src/kosmickrisp/vulkan/shadps4_barrier_split.h b/src/kosmickrisp/vulkan/shadps4_barrier_split.h
+--- a/src/kosmickrisp/vulkan/shadps4_barrier_split.h
++++ b/src/kosmickrisp/vulkan/shadps4_barrier_split.h
+@@ -0,0 +1,136 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Render encoder split decision for pipeline barriers recorded inside a
++ * render pass (shadPS4 / The Last Guardian performance work).
++ *
++ * KosmicKrisp serializes Metal encoders: end_encoder() places a barrier after
++ * all stages of the finished encoder, so every write recorded before the
++ * active render encoder started is complete and visible to it. A barrier
++ * inside the encoder therefore only has to split it when the writes it
++ * names may have been produced by draws of that same encoder:
++ *
++ *  - attachment writes, when the barrier names an image bound as one of the
++ *    encoder's attachments (or is a global memory barrier, which names
++ *    everything);
++ *  - shader (storage) writes, when a draw of the encoder used a shader that
++ *    writes memory.
++ *
++ * Upstream treated every write bit in a barrier as if it could come from the
++ * active encoder, which split the encoder at every draw that read a buffer
++ * written by an earlier compute dispatch. On a tile based GPU each split
++ * stores and reloads every attachment.
++ *
++ * This header is plain C with no driver types so it can be unit tested on
++ * its own (test_shadps4_barrier_split.c).
++ */
++#ifndef SHADPS4_BARRIER_SPLIT_H
++#define SHADPS4_BARRIER_SPLIT_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include <vulkan/vulkan_core.h>
++
++enum kk_shadps4_barrier_kind {
++   KK_SHADPS4_BARRIER_MEMORY, /* VkMemoryBarrier2: names all memory */
++   KK_SHADPS4_BARRIER_BUFFER, /* VkBufferMemoryBarrier2 */
++   KK_SHADPS4_BARRIER_IMAGE,  /* VkImageMemoryBarrier2 */
++};
++
++/* Hazard flags that live as long as one Metal render encoder. They are the
++ * same three flags upstream kept in kk_rendering_state. */
++struct kk_shadps4_encoder_hazards {
++   bool write_available;
++   bool ds_write_available;
++   bool storage_write_available;
++};
++
++static inline void
++kk_shadps4_encoder_hazards_reset(struct kk_shadps4_encoder_hazards *hazards)
++{
++   hazards->write_available = false;
++   hazards->ds_write_available = false;
++   hazards->storage_write_available = false;
++}
++
++#define KK_SHADPS4_ATTACHMENT_WRITES                                           \
++   (VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |                                   \
++    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
++#define KK_SHADPS4_SHADER_WRITES                                               \
++   (VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)
++#define KK_SHADPS4_GENERIC_WRITES (VK_ACCESS_2_MEMORY_WRITE_BIT)
++
++/* The subset of a barrier's source access mask whose writes may have been
++ * produced inside the active render encoder.
++ *
++ * kind                  : what the barrier names.
++ * image_is_attachment   : for image barriers, the image is bound as a color,
++ *                         depth, stencil, resolve or shading rate attachment
++ *                         of the active encoder.
++ * encoder_may_write_memory : a draw of the active encoder used a shader that
++ *                         writes memory (storage buffers or images).
++ */
++static inline VkAccessFlags2
++kk_shadps4_attributable_writes(VkAccessFlags2 src,
++                               enum kk_shadps4_barrier_kind kind,
++                               bool image_is_attachment,
++                               bool encoder_may_write_memory)
++{
++   VkAccessFlags2 out = 0;
++   switch (kind) {
++   case KK_SHADPS4_BARRIER_IMAGE:
++      if (image_is_attachment)
++         out |= src & (KK_SHADPS4_ATTACHMENT_WRITES | KK_SHADPS4_GENERIC_WRITES);
++      if (encoder_may_write_memory)
++         out |= src & (KK_SHADPS4_SHADER_WRITES | KK_SHADPS4_GENERIC_WRITES);
++      break;
++   case KK_SHADPS4_BARRIER_BUFFER:
++      /* Buffers are never attachments; only draw shaders can write them. */
++      if (encoder_may_write_memory)
++         out |= src & (KK_SHADPS4_SHADER_WRITES | KK_SHADPS4_GENERIC_WRITES);
++      break;
++   case KK_SHADPS4_BARRIER_MEMORY:
++      /* A global barrier may name the encoder's own attachments. */
++      out |= src & (KK_SHADPS4_ATTACHMENT_WRITES | KK_SHADPS4_GENERIC_WRITES);
++      if (encoder_may_write_memory)
++         out |= src & KK_SHADPS4_SHADER_WRITES;
++      break;
++   }
++   return out;
++}
++
++/* Upstream's split rule, fed only with attributable source writes. Updates
++ * the encoder's hazard flags and returns true when the render encoder must be
++ * ended and restarted before the work after the barrier. */
++static inline bool
++kk_shadps4_barrier_requires_split(VkAccessFlags2 attributable_src,
++                                  VkAccessFlags2 dst, bool has_ds,
++                                  struct kk_shadps4_encoder_hazards *hazards)
++{
++   const VkAccessFlags2 texture_read_access =
++      VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
++      VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
++   const VkAccessFlags2 any_write_access =
++      KK_SHADPS4_ATTACHMENT_WRITES | KK_SHADPS4_SHADER_WRITES |
++      KK_SHADPS4_GENERIC_WRITES;
++   const VkAccessFlags2 ds_write_access =
++      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
++      VK_ACCESS_2_MEMORY_WRITE_BIT;
++   const VkAccessFlags2 storage_write_access =
++      KK_SHADPS4_SHADER_WRITES | KK_SHADPS4_GENERIC_WRITES;
++
++   if (attributable_src & any_write_access)
++      hazards->write_available = true;
++   if (has_ds && (attributable_src & ds_write_access))
++      hazards->ds_write_available = true;
++   if (attributable_src & storage_write_access)
++      hazards->storage_write_available = true;
++
++   if (hazards->write_available && (dst & texture_read_access))
++      return true;
++
++   return (hazards->ds_write_available || hazards->storage_write_available) &&
++          (dst & VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT);
++}
++
++#endif /* SHADPS4_BARRIER_SPLIT_H */
+diff -ruN a/src/kosmickrisp/vulkan/shadps4_cache_key.h b/src/kosmickrisp/vulkan/shadps4_cache_key.h
+--- a/src/kosmickrisp/vulkan/shadps4_cache_key.h
++++ b/src/kosmickrisp/vulkan/shadps4_cache_key.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Settings that change generated MSL must be part of the pipeline cache UUID, or a cache written
++ * with one MESA_KK_DISABLE_WORKAROUNDS / MESA_KK_DEBUG value silently feeds shaders compiled
++ * with another (shadPS4 keeps a persistent Vulkan pipeline cache, so a workaround change was not
++ * taking effect until the cache was cleared). Plain C so it can be tested on its own
++ * (test_shadps4_cache_key.c).
++ */
++#ifndef SHADPS4_CACHE_KEY_H
++#define SHADPS4_CACHE_KEY_H
++
++#include <stdint.h>
++#include <string.h>
++
++struct kk_shadps4_cache_key_extra {
++   uint64_t disabled_workarounds;
++   uint64_t debug_flags;
++};
++
++static inline struct kk_shadps4_cache_key_extra
++kk_shadps4_cache_key_extra(uint64_t disabled_workarounds, uint64_t debug_flags)
++{
++   struct kk_shadps4_cache_key_extra key;
++   memset(&key, 0, sizeof(key));
++   key.disabled_workarounds = disabled_workarounds;
++   key.debug_flags = debug_flags;
++   return key;
++}
++
++#endif /* SHADPS4_CACHE_KEY_H */
+diff -ruN a/src/kosmickrisp/vulkan/shadps4_encoder_stats.h b/src/kosmickrisp/vulkan/shadps4_encoder_stats.h
+--- a/src/kosmickrisp/vulkan/shadps4_encoder_stats.h
++++ b/src/kosmickrisp/vulkan/shadps4_encoder_stats.h
+@@ -0,0 +1,145 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Per second Metal encoder statistics (shadPS4 / The Last Guardian performance
++ * work). Enabled with the environment variable KK_SHADPS4_ENCODER_STATS; the
++ * driver then prints one "KK_ENCODER_STATS" line per second to stderr counting
++ * command buffers, render encoder starts by reason, compute encoders, render
++ * passes that ended without draws, barriers recorded while rendering, draws and
++ * dispatches. The counters, the per interval delta and the line format live
++ * here, in plain C, so they can be unit tested (test_shadps4_encoder_stats.c).
++ */
++#ifndef SHADPS4_ENCODER_STATS_H
++#define SHADPS4_ENCODER_STATS_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++
++enum kk_shadps4_render_start_reason {
++   KK_SHADPS4_RENDER_START_BEGIN = 0, /* first draw after vkCmdBeginRendering */
++   KK_SHADPS4_RENDER_START_BARRIER,   /* restarted by a barrier inside the pass */
++   KK_SHADPS4_RENDER_START_COMPUTE,   /* restarted after compute work interrupted the pass */
++   KK_SHADPS4_RENDER_START_STATE,     /* restarted after an attachment or sample change */
++   KK_SHADPS4_RENDER_START_COUNT,
++};
++
++struct kk_shadps4_encoder_stats {
++   uint64_t command_buffers;
++   uint64_t render_starts[KK_SHADPS4_RENDER_START_COUNT];
++   uint64_t compute_after_render; /* compute encoder opened while rendering (ends the pass) */
++   uint64_t compute_fresh;        /* compute encoder opened with no encoder active */
++   uint64_t end_rendering_closed_compute; /* vkCmdEndRendering closed a compute encoder */
++   uint64_t end_rendering_empty;          /* vkCmdEndRendering with no encoder active */
++   uint64_t barriers_in_render;
++   uint64_t barriers_in_render_split;
++   uint64_t draws;
++   uint64_t dispatches;
++   /* Draws unrolled through a compute pre-pass, by reason. */
++   uint64_t unroll_fan;
++   uint64_t unroll_promotion;
++   uint64_t unroll_robustness;
++   uint64_t unroll_restart;
++   uint64_t unroll_flatshade;
++   /* Barriers recorded inside a compute encoder (each one waits for all
++    * earlier dispatches and copies of the encoder), and of those the ones
++    * with no dispatch since the previous one (redundant). */
++   uint64_t compute_barriers;
++   uint64_t compute_barriers_idle;
++};
++
++/* Value of a diagnostic switch such as KK_SHADPS4_DROP_COMPUTE_BARRIERS: on
++ * only when set to "1". */
++static inline bool
++kk_shadps4_env_flag(const char *value)
++{
++   return value != NULL && value[0] == '1' && value[1] == '\0';
++}
++
++/* A compute barrier recorded when `dispatches` dispatches were counted so far:
++ * returns true when none happened since the previous compute barrier. */
++static inline bool
++kk_shadps4_compute_barrier_idle(uint64_t *last_dispatches, uint64_t dispatches)
++{
++   const bool idle = *last_dispatches == dispatches;
++   *last_dispatches = dispatches;
++   return idle;
++}
++
++static inline struct kk_shadps4_encoder_stats
++kk_shadps4_encoder_stats_delta(const struct kk_shadps4_encoder_stats *before,
++                               const struct kk_shadps4_encoder_stats *after)
++{
++   struct kk_shadps4_encoder_stats d;
++   d.command_buffers = after->command_buffers - before->command_buffers;
++   for (unsigned i = 0; i < KK_SHADPS4_RENDER_START_COUNT; i++)
++      d.render_starts[i] = after->render_starts[i] - before->render_starts[i];
++   d.compute_after_render = after->compute_after_render - before->compute_after_render;
++   d.compute_fresh = after->compute_fresh - before->compute_fresh;
++   d.end_rendering_closed_compute =
++      after->end_rendering_closed_compute - before->end_rendering_closed_compute;
++   d.end_rendering_empty = after->end_rendering_empty - before->end_rendering_empty;
++   d.barriers_in_render = after->barriers_in_render - before->barriers_in_render;
++   d.barriers_in_render_split =
++      after->barriers_in_render_split - before->barriers_in_render_split;
++   d.draws = after->draws - before->draws;
++   d.dispatches = after->dispatches - before->dispatches;
++   d.unroll_fan = after->unroll_fan - before->unroll_fan;
++   d.unroll_promotion = after->unroll_promotion - before->unroll_promotion;
++   d.unroll_robustness = after->unroll_robustness - before->unroll_robustness;
++   d.unroll_restart = after->unroll_restart - before->unroll_restart;
++   d.unroll_flatshade = after->unroll_flatshade - before->unroll_flatshade;
++   d.compute_barriers = after->compute_barriers - before->compute_barriers;
++   d.compute_barriers_idle =
++      after->compute_barriers_idle - before->compute_barriers_idle;
++   return d;
++}
++
++static inline uint64_t
++kk_shadps4_encoder_stats_render_starts(const struct kk_shadps4_encoder_stats *s)
++{
++   uint64_t total = 0;
++   for (unsigned i = 0; i < KK_SHADPS4_RENDER_START_COUNT; i++)
++      total += s->render_starts[i];
++   return total;
++}
++
++/* Writes one report line (without newline handling beyond the final one).
++ * Returns the number of characters that would have been written, like
++ * snprintf. */
++static inline int
++kk_shadps4_encoder_stats_format(const struct kk_shadps4_encoder_stats *s,
++                                double seconds, char *buffer, size_t size)
++{
++   return snprintf(
++      buffer, size,
++      "KK_ENCODER_STATS dt=%.2fs cmdbufs=%llu render_enc=%llu begin=%llu "
++      "barrier=%llu after_compute=%llu state=%llu compute_enc=%llu "
++      "after_render=%llu fresh=%llu end_rendering_closed_compute=%llu "
++      "end_rendering_empty=%llu barriers_in_render=%llu split=%llu draws=%llu "
++      "dispatches=%llu unroll_fan=%llu unroll_promotion=%llu "
++      "unroll_robustness=%llu unroll_restart=%llu unroll_flatshade=%llu "
++      "compute_barriers=%llu compute_barriers_idle=%llu\n",
++      seconds, (unsigned long long)s->command_buffers,
++      (unsigned long long)kk_shadps4_encoder_stats_render_starts(s),
++      (unsigned long long)s->render_starts[KK_SHADPS4_RENDER_START_BEGIN],
++      (unsigned long long)s->render_starts[KK_SHADPS4_RENDER_START_BARRIER],
++      (unsigned long long)s->render_starts[KK_SHADPS4_RENDER_START_COMPUTE],
++      (unsigned long long)s->render_starts[KK_SHADPS4_RENDER_START_STATE],
++      (unsigned long long)(s->compute_after_render + s->compute_fresh),
++      (unsigned long long)s->compute_after_render,
++      (unsigned long long)s->compute_fresh,
++      (unsigned long long)s->end_rendering_closed_compute,
++      (unsigned long long)s->end_rendering_empty,
++      (unsigned long long)s->barriers_in_render,
++      (unsigned long long)s->barriers_in_render_split,
++      (unsigned long long)s->draws, (unsigned long long)s->dispatches,
++      (unsigned long long)s->unroll_fan, (unsigned long long)s->unroll_promotion,
++      (unsigned long long)s->unroll_robustness,
++      (unsigned long long)s->unroll_restart,
++      (unsigned long long)s->unroll_flatshade,
++      (unsigned long long)s->compute_barriers,
++      (unsigned long long)s->compute_barriers_idle);
++}
++
++#endif /* SHADPS4_ENCODER_STATS_H */
+diff -ruN a/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c b/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c
+--- a/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c
++++ b/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c
+@@ -0,0 +1,156 @@
++/* SPDX-License-Identifier: MIT */
++#include "shadps4_barrier_split.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++
++static int failures;
++
++static void
++check(bool condition, const char *what)
++{
++   if (!condition) {
++      fprintf(stderr, "Barrier split test failed: %s\n", what);
++      failures++;
++   }
++}
++
++#define SHADER_W VK_ACCESS_2_SHADER_WRITE_BIT
++#define STORAGE_W VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
++#define COLOR_W VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
++#define DS_W VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
++#define MEM_W VK_ACCESS_2_MEMORY_WRITE_BIT
++#define XFER_W VK_ACCESS_2_TRANSFER_WRITE_BIT
++#define SHADER_R VK_ACCESS_2_SHADER_READ_BIT
++#define VATTR_R VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT
++#define INPUT_R VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT
++#define DS_R VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT
++
++/* One barrier against a fresh encoder: the common case. */
++static bool
++single(VkAccessFlags2 src, VkAccessFlags2 dst, enum kk_shadps4_barrier_kind kind,
++       bool image_is_attachment, bool encoder_writes, bool has_ds)
++{
++   struct kk_shadps4_encoder_hazards h;
++   kk_shadps4_encoder_hazards_reset(&h);
++   const VkAccessFlags2 src_here =
++      kk_shadps4_attributable_writes(src, kind, image_is_attachment, encoder_writes);
++   return kk_shadps4_barrier_requires_split(src_here, dst, has_ds, &h);
++}
++
++int
++main(void)
++{
++   const enum kk_shadps4_barrier_kind MEMORY = KK_SHADPS4_BARRIER_MEMORY;
++   const enum kk_shadps4_barrier_kind BUFFER = KK_SHADPS4_BARRIER_BUFFER;
++   const enum kk_shadps4_barrier_kind IMAGE = KK_SHADPS4_BARRIER_IMAGE;
++
++   /* Attribution: writes recorded before the encoder are never attributable. */
++   check(kk_shadps4_attributable_writes(SHADER_W, BUFFER, false, false) == 0,
++         "compute write to a buffer, no memory writing draws");
++   check(kk_shadps4_attributable_writes(XFER_W, BUFFER, false, true) == 0,
++         "transfer writes never come from a render encoder");
++   check(kk_shadps4_attributable_writes(XFER_W | COLOR_W, IMAGE, false, true) == 0,
++         "attachment write to an image that is not an attachment here");
++   check(kk_shadps4_attributable_writes(SHADER_W | COLOR_W, BUFFER, false, true) ==
++            SHADER_W,
++         "buffer barrier keeps only shader writes when draws write memory");
++   check(kk_shadps4_attributable_writes(SHADER_W | COLOR_W, IMAGE, true, false) ==
++            COLOR_W,
++         "attachment image keeps attachment writes only");
++   check(kk_shadps4_attributable_writes(SHADER_W | COLOR_W, IMAGE, true, true) ==
++            (SHADER_W | COLOR_W),
++         "attachment image with memory writing draws keeps both");
++   check(kk_shadps4_attributable_writes(MEM_W, IMAGE, false, false) == 0,
++         "generic write on a foreign image, no memory writing draws");
++   check(kk_shadps4_attributable_writes(MEM_W, IMAGE, true, false) == MEM_W,
++         "generic write on an attachment image");
++   check(kk_shadps4_attributable_writes(MEM_W, BUFFER, false, true) == MEM_W,
++         "generic write on a buffer with memory writing draws");
++   check(kk_shadps4_attributable_writes(COLOR_W | DS_W | MEM_W, MEMORY, false, false) ==
++            (COLOR_W | DS_W | MEM_W),
++         "global barrier always keeps attachment and generic writes");
++   check(kk_shadps4_attributable_writes(SHADER_W, MEMORY, false, false) == 0,
++         "global barrier drops shader writes without memory writing draws");
++   check(kk_shadps4_attributable_writes(SHADER_W | STORAGE_W, MEMORY, false, true) ==
++            (SHADER_W | STORAGE_W),
++         "global barrier keeps shader writes with memory writing draws");
++
++   /* The case this change exists for: a draw inside an open pass reads a
++    * buffer that an earlier compute dispatch wrote. No split. */
++   check(!single(SHADER_W, SHADER_R, BUFFER, false, false, true),
++         "compute written buffer read by a draw: no split");
++   check(!single(SHADER_W, VATTR_R, BUFFER, false, false, true),
++         "compute written vertex buffer: no split");
++   check(!single(XFER_W, SHADER_R, BUFFER, false, false, true),
++         "uploaded buffer read by a draw: no split");
++   /* Texture written as an attachment by an earlier pass, sampled now. */
++   check(!single(COLOR_W, SHADER_R, IMAGE, false, false, true),
++         "earlier pass attachment sampled now: no split");
++   check(!single(DS_W, SHADER_R, IMAGE, false, false, true),
++         "earlier pass depth sampled now: no split");
++
++   /* Real feedback: the encoder's own attachment is read as a texture. */
++   check(single(COLOR_W, SHADER_R, IMAGE, true, false, true),
++         "own color attachment sampled: split");
++   check(single(DS_W, SHADER_R, IMAGE, true, false, true),
++         "own depth attachment sampled: split");
++   check(single(DS_W, INPUT_R, IMAGE, true, false, true),
++         "own depth attachment as input attachment: split");
++   check(!single(DS_W, INPUT_R, IMAGE, true, false, false),
++         "depth write flag needs a depth attachment to count (upstream rule)");
++   check(!single(COLOR_W, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT, IMAGE, true, false,
++                 true),
++         "attachment write then attachment read: no split (upstream rule)");
++
++   /* Draw shaders that write memory keep the conservative behaviour. */
++   check(single(SHADER_W, SHADER_R, BUFFER, false, true, true),
++         "memory writing draws then buffer read: split");
++   check(single(STORAGE_W, INPUT_R, BUFFER, false, true, true),
++         "memory writing draws then input attachment read: split");
++   check(single(SHADER_W, SHADER_R, IMAGE, false, true, true),
++         "memory writing draws then storage image read: split");
++
++   /* Global memory barriers stay conservative for attachments. */
++   check(single(COLOR_W, SHADER_R, MEMORY, false, false, true),
++         "global barrier naming attachment writes: split");
++   check(single(MEM_W, VK_ACCESS_2_MEMORY_READ_BIT, MEMORY, false, false, true),
++         "global memory write to memory read: split");
++   check(!single(SHADER_W, SHADER_R, MEMORY, false, false, true),
++         "global barrier for compute writes only: no split");
++
++   /* Hazard flags persist within one encoder and reset with it. */
++   {
++      struct kk_shadps4_encoder_hazards h;
++      kk_shadps4_encoder_hazards_reset(&h);
++      VkAccessFlags2 src = kk_shadps4_attributable_writes(COLOR_W, IMAGE, true, false);
++      check(!kk_shadps4_barrier_requires_split(src, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
++                                               true, &h),
++            "attachment write noted, no texture read yet");
++      check(h.write_available, "write_available set by attributable write");
++      src = kk_shadps4_attributable_writes(SHADER_W, BUFFER, false, false);
++      check(src == 0, "second barrier not attributable");
++      check(kk_shadps4_barrier_requires_split(src, SHADER_R, true, &h),
++            "later texture read in the same encoder still splits");
++      kk_shadps4_encoder_hazards_reset(&h);
++      check(!h.write_available && !h.ds_write_available && !h.storage_write_available,
++            "reset clears all flags");
++      check(!kk_shadps4_barrier_requires_split(0, SHADER_R, true, &h),
++            "fresh encoder, texture read, nothing to wait for");
++   }
++   {
++      struct kk_shadps4_encoder_hazards h;
++      kk_shadps4_encoder_hazards_reset(&h);
++      VkAccessFlags2 src = kk_shadps4_attributable_writes(SHADER_W, BUFFER, false, false);
++      kk_shadps4_barrier_requires_split(src, SHADER_R, true, &h);
++      check(!h.write_available && !h.storage_write_available,
++            "unattributable writes leave the flags clear");
++   }
++
++   if (failures) {
++      fprintf(stderr, "%d barrier split checks failed\n", failures);
++      return EXIT_FAILURE;
++   }
++   puts("Barrier split tests passed");
++   return EXIT_SUCCESS;
++}
+diff -ruN a/src/kosmickrisp/vulkan/test_shadps4_cache_key.c b/src/kosmickrisp/vulkan/test_shadps4_cache_key.c
+--- a/src/kosmickrisp/vulkan/test_shadps4_cache_key.c
++++ b/src/kosmickrisp/vulkan/test_shadps4_cache_key.c
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: MIT */
++#include "shadps4_cache_key.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++
++int
++main(void)
++{
++   const struct kk_shadps4_cache_key_extra a = kk_shadps4_cache_key_extra(0x3000, 0);
++   const struct kk_shadps4_cache_key_extra b = kk_shadps4_cache_key_extra(0x3000, 0);
++   const struct kk_shadps4_cache_key_extra c = kk_shadps4_cache_key_extra(0x23000, 0);
++   const struct kk_shadps4_cache_key_extra d = kk_shadps4_cache_key_extra(0x3000, 2);
++   if (memcmp(&a, &b, sizeof(a)) != 0 || memcmp(&a, &c, sizeof(a)) == 0 ||
++       memcmp(&a, &d, sizeof(a)) == 0) {
++      fputs("Cache key test failed\n", stderr);
++      return EXIT_FAILURE;
++   }
++   puts("Cache key tests passed");
++   return EXIT_SUCCESS;
++}
+diff -ruN a/src/kosmickrisp/vulkan/test_shadps4_encoder_stats.c b/src/kosmickrisp/vulkan/test_shadps4_encoder_stats.c
+--- a/src/kosmickrisp/vulkan/test_shadps4_encoder_stats.c
++++ b/src/kosmickrisp/vulkan/test_shadps4_encoder_stats.c
+@@ -0,0 +1,91 @@
++/* SPDX-License-Identifier: MIT */
++#include "shadps4_encoder_stats.h"
++
++#include <stdlib.h>
++#include <string.h>
++
++static int failures;
++
++static void
++check(bool condition, const char *what)
++{
++   if (!condition) {
++      fprintf(stderr, "Encoder stats test failed: %s\n", what);
++      failures++;
++   }
++}
++
++int
++main(void)
++{
++   struct kk_shadps4_encoder_stats before = {0};
++   struct kk_shadps4_encoder_stats after = {0};
++   before.command_buffers = 10;
++   after.command_buffers = 940;
++   after.render_starts[KK_SHADPS4_RENDER_START_BEGIN] = 2960;
++   after.render_starts[KK_SHADPS4_RENDER_START_BARRIER] = 1200;
++   after.render_starts[KK_SHADPS4_RENDER_START_COMPUTE] = 840;
++   before.render_starts[KK_SHADPS4_RENDER_START_COMPUTE] = 40;
++   after.render_starts[KK_SHADPS4_RENDER_START_STATE] = 3;
++   after.compute_after_render = 4000;
++   after.compute_fresh = 6000;
++   before.compute_fresh = 1;
++   after.end_rendering_closed_compute = 4700;
++   after.end_rendering_empty = 2;
++   after.barriers_in_render = 1500;
++   after.barriers_in_render_split = 1200;
++   after.draws = 27000;
++   after.dispatches = 15000;
++   after.unroll_restart = 52;
++   after.unroll_flatshade = 1;
++   after.compute_barriers = 900;
++   before.compute_barriers = 100;
++   after.compute_barriers_idle = 70;
++
++   const struct kk_shadps4_encoder_stats d = kk_shadps4_encoder_stats_delta(&before, &after);
++   check(d.command_buffers == 930, "command buffer delta");
++   check(d.render_starts[KK_SHADPS4_RENDER_START_COMPUTE] == 800, "render start delta by reason");
++   check(d.compute_fresh == 5999, "compute fresh delta");
++   check(kk_shadps4_encoder_stats_render_starts(&d) == 2960 + 1200 + 800 + 3,
++         "render start total");
++
++   check(kk_shadps4_env_flag("1"), "switch on");
++   check(!kk_shadps4_env_flag(NULL) && !kk_shadps4_env_flag("0") &&
++            !kk_shadps4_env_flag("") && !kk_shadps4_env_flag("10"),
++         "switch off");
++   uint64_t last = 0;
++   check(!kk_shadps4_compute_barrier_idle(&last, 5), "barrier after dispatches");
++   check(kk_shadps4_compute_barrier_idle(&last, 5), "barrier right after a barrier");
++   check(!kk_shadps4_compute_barrier_idle(&last, 6), "barrier after one more dispatch");
++
++   char line[512];
++   const int n = kk_shadps4_encoder_stats_format(&d, 1.0, line, sizeof(line));
++   check(n > 0 && (size_t)n < sizeof(line), "line fits");
++   check(strcmp(line,
++                "KK_ENCODER_STATS dt=1.00s cmdbufs=930 render_enc=4963 begin=2960 "
++                "barrier=1200 after_compute=800 state=3 compute_enc=9999 "
++                "after_render=4000 fresh=5999 end_rendering_closed_compute=4700 "
++                "end_rendering_empty=2 barriers_in_render=1500 split=1200 draws=27000 "
++                "dispatches=15000 unroll_fan=0 unroll_promotion=0 unroll_robustness=0 "
++                "unroll_restart=52 unroll_flatshade=1 compute_barriers=800 "
++                "compute_barriers_idle=70\n") == 0,
++         "report line");
++
++   /* A zero interval formats cleanly too. */
++   const struct kk_shadps4_encoder_stats zero = {0};
++   check(kk_shadps4_encoder_stats_format(&zero, 0.5, line, sizeof(line)) > 0, "zero line");
++   check(strstr(line, "cmdbufs=0 render_enc=0 ") != NULL, "zero counts");
++
++   /* Truncation reports the needed size without overflowing. */
++   char small[16];
++   const int needed = kk_shadps4_encoder_stats_format(&d, 1.0, small, sizeof(small));
++   check(needed == n, "needed length");
++   check(small[sizeof(small) - 1] == '\0', "terminated when truncated");
++
++   if (failures) {
++      fprintf(stderr, "%d encoder stats checks failed\n", failures);
++      return EXIT_FAILURE;
++   }
++   puts("Encoder stats tests passed");
++   return EXIT_SUCCESS;
++}
