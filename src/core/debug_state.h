@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <filesystem>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -155,7 +156,7 @@ class DebugStateImpl {
     std::unordered_map<size_t, FrameDump*> waiting_reg_dumps;
     std::unordered_map<size_t, std::string> waiting_reg_dumps_dbg;
     bool waiting_submit_pause = false;
-    bool should_show_frame_dump = false;
+    std::atomic_bool should_show_frame_dump = false;
 
     std::shared_mutex frame_dump_list_mutex;
     std::vector<FrameDump> frame_dump_list{};
@@ -260,6 +261,14 @@ public:
 
     /// Writes one row per draw and dispatch of a finished frame dump to log/frame_dump_<id>.csv.
     void ExportFrameDump(const FrameDump& frame) const;
+
+    /// The CSV path ExportFrameDump writes for a frame id.
+    static std::filesystem::path FrameDumpPath(u32 frame_id);
+
+    /// Exports every finished frame dump (RequestFrameDump) the way the devtools layer does when
+    /// its menu bar is shown, without that window. Returns the exported frame ids; empty while a
+    /// dump is still being captured or when none is pending. The guest stays paused afterwards.
+    std::vector<u32> ExportFinishedFrameDumps();
 
     void CollectShader(const std::string& name, Shader::SwStage l_stage, vk::ShaderModule module,
                        std::span<const u32> spv, std::span<const u32> raw_code,

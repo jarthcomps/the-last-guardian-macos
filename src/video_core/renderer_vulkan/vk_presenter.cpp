@@ -25,6 +25,7 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
 
+#include <thread>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -133,6 +134,7 @@ static vk::Rect2D FitImage(s32 frame_width, s32 frame_height, s32 swapchain_widt
 enum class ScreenshotKind : u8 {
     GameOnly,
     WithOverlays,
+    Burst, ///< raw RGBA frame of a screenshot burst (RequestScreenshotBurst)
 };
 
 struct ScreenshotReadback {
@@ -423,6 +425,25 @@ static void SavePendingScreenshots(const std::vector<ScreenshotReadback>& readba
 
         std::vector<u8> rgba;
         if (!ConvertReadbackToRgba8(readback, rgba)) {
+            continue;
+        }
+
+        if (readback.kind == ScreenshotKind::Burst) {
+            // Raw frames, written off the priority thread so fence signals are not delayed:
+            // "RGBA" magic, width and height as little endian u32, then width*height*4 bytes.
+            std::thread([path = readback.paths.front(), width = readback.width,
+                         height = readback.height, data = std::move(rgba)] {
+                std::error_code ec{};
+                std::filesystem::create_directories(path.parent_path(), ec);
+                const auto temp = path.string() + ".part";
+                std::ofstream out(temp, std::ios::binary);
+                const u32 header[3] = {0x41424752u, width, height};
+                out.write(reinterpret_cast<const char*>(header), sizeof(header));
+                out.write(reinterpret_cast<const char*>(data.data()),
+                          static_cast<std::streamsize>(data.size()));
+                out.close();
+                std::filesystem::rename(temp, path, ec);
+            }).detach();
             continue;
         }
 
@@ -731,6 +752,20 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                       cmdbuf);
         CopyImageToReadback(cmdbuf, image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
                             readback);
+    }
+    if (const auto burst = VideoCore::ConsumeBurstFrame()) {
+        const auto dir = Common::FS::GetUserPath(Common::FS::PathType::ScreenshotsDir) /
+                         fmt::format("burst_{}", burst->burst_id);
+        const bool hdr_encoded =
+            attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Bt2020Pq;
+        pending_screenshots.emplace_back(
+            instance, draw_scheduler, ScreenshotKind::Burst,
+            std::vector<std::filesystem::path>{dir / fmt::format("{:04}.rgba", burst->index)},
+            image_size.width, image_size.height, view_info.format, hdr_encoded);
+        image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
+                      cmdbuf);
+        CopyImageToReadback(cmdbuf, image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                            pending_screenshots.back());
     }
 
     // Continue with host-side passes that draw the displayed (scaled) frame.

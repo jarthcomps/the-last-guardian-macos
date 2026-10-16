@@ -21,6 +21,9 @@
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/shader_diagnostic_names.h"
+
+#include <magic_enum/magic_enum.hpp>
 
 namespace Vulkan {
 
@@ -709,6 +712,16 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
 
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    const bool diagnostic_names = ShaderDiagnostic::NamesEnabled();
+    if (diagnostic_names) {
+        const auto name = ShaderDiagnostic::GuestName(magic_enum::enum_name(info.hw_stage),
+                                                     info.pgm_hash, perm_idx);
+        const auto result = ShaderDiagnostic::SetEntryPointOpName(spv, name);
+        if (result != ShaderDiagnostic::OpNameResult::Success) {
+            LOG_WARNING(Render_Vulkan, "Could not label guest shader {:#x}: diagnostic SPIR-V result {}",
+                        info.pgm_hash, static_cast<int>(result));
+        }
+    }
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
     vk::ShaderModule module;
@@ -717,7 +730,22 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
     if (is_patched) {
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.hw_stage, info.pgm_hash);
-        module = CompileSPV(*patch, instance.GetDevice());
+        if (diagnostic_names) {
+            std::vector<u32> tagged_patch{patch->begin(), patch->end()};
+            const auto name = ShaderDiagnostic::GuestName(magic_enum::enum_name(info.hw_stage),
+                                                         info.pgm_hash, perm_idx);
+            const auto result = ShaderDiagnostic::SetEntryPointOpName(tagged_patch, name);
+            if (result != ShaderDiagnostic::OpNameResult::Success) {
+                LOG_WARNING(Render_Vulkan,
+                            "Could not label patched guest shader {:#x}: diagnostic SPIR-V result {}",
+                            info.pgm_hash, static_cast<int>(result));
+                module = CompileSPV(*patch, instance.GetDevice());
+            } else {
+                module = CompileSPV(tagged_patch, instance.GetDevice());
+            }
+        } else {
+            module = CompileSPV(*patch, instance.GetDevice());
+        }
     } else {
         module = CompileSPV(spv, instance.GetDevice());
     }

@@ -18,6 +18,9 @@
 #include "core/libraries/kernel/threads/thread_state.h"
 #include "core/libraries/libs.h"
 #include "core/memory.h"
+#ifdef __APPLE__
+#include "core/libraries/kernel/threads/apple_guest_thread_qos.h"
+#endif
 
 #if defined(ARCH_X86_64) || defined(__arm64__) || defined(__aarch64__)
 extern "C" void* PS4_SYSV_ABI _runOnAnotherStack(void* arg, void* func,
@@ -257,6 +260,20 @@ static void* RunThread(void* arg) {
     auto* curthread = static_cast<Pthread*>(arg);
     g_curthread = curthread;
     Common::SetCurrentThreadName(curthread->name.c_str());
+#ifdef __APPLE__
+    if (const auto qos_mode = GetGuestThreadQosMode(); qos_mode != GuestThreadQosMode::Disabled) {
+        const auto qos = ApplyGuestThreadQos(qos_mode);
+        LOG_WARNING(Kernel_Pthread,
+                    "Guest thread QoS diagnostic ({}) for '{}' (tid {}): before={} relative={} "
+                    "(error {}), set attempted={} (error {}), after={} relative={} (error {})",
+                    qos_mode == GuestThreadQosMode::Inspect ? "inspect" : "user-initiated",
+                    curthread->name, curthread->tid.load(), GuestThreadQosClassName(qos.before_class),
+                    qos.before_relative_priority, qos.before_error, qos.set_attempted,
+                    qos.set_error,
+                    GuestThreadQosClassName(qos.after_class), qos.after_relative_priority,
+                    qos.after_error);
+    }
+#endif
     DebugState.AddCurrentThreadToGuestList();
     Core::InitializeTLS();
 

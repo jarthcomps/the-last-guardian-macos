@@ -11,6 +11,8 @@
 #include "video_core/texture_cache/image.h"
 
 #include <vk_mem_alloc.h>
+#include "video_core/renderer_vulkan/barrier_stats.h"
+#include "video_core/texture_cache/image_barrier_policy.h"
 
 namespace VideoCore {
 
@@ -300,6 +302,21 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
         if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
             return {};
         }
+        constexpr auto all_write_flags =
+            write_flags | vk::AccessFlagBits2::eColorAttachmentWrite |
+            vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
+            vk::AccessFlagBits2::eShaderStorageWrite | vk::AccessFlagBits2::eHostWrite;
+        if (ImageBarrierPolicy::skip_read_after_read &&
+            CanSkipImageReadAfterRead(static_cast<u64>(last_state.access_mask),
+                                      static_cast<u64>(dst_mask),
+                                      static_cast<u64>(all_write_flags))) {
+            // Read after read: no barrier. Keep both uses so the next write waits for both.
+            ImageBarrierPolicy::read_after_read_skipped.fetch_add(1, std::memory_order_relaxed);
+            last_state.layout = dst_layout;
+            last_state.access_mask |= dst_mask;
+            last_state.pl_stage |= dst_stage;
+            return {};
+        }
 
         barriers.emplace_back(vk::ImageMemoryBarrier2{
             .srcStageMask = last_state.pl_stage,
@@ -331,6 +348,7 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
 void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                     std::optional<SubresourceRange> range,
                     Vulkan::CommandRecorder cmdbuf /*= {}*/) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::ImageTransit};
     // Adjust pipeline stage
     const vk::PipelineStageFlags2 dst_pl_stage =
         (dst_mask == vk::AccessFlagBits2::eTransferRead ||
@@ -357,6 +375,7 @@ void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
 
 void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffer buffer,
                    u64 offset) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::ImageUpload};
     SetBackingSamples(info.num_samples, false);
     scheduler->EndRendering();
 
@@ -403,6 +422,7 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
 
 void Image::Download(std::span<const vk::BufferImageCopy> download_copies, vk::Buffer buffer,
                      u64 offset, u64 download_size) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::ImageDownload};
     SetBackingSamples(info.num_samples);
     scheduler->EndRendering();
 
@@ -593,6 +613,7 @@ void Image::CopyImage(Image& src_image) {
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
 }
 void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::ImageCopy};
     const auto& src_info = src_image.info;
     const u32 num_mips = std::min(src_info.resources.levels, info.resources.levels);
     const u32 num_layers = std::min(src_info.resources.layers, info.resources.layers);

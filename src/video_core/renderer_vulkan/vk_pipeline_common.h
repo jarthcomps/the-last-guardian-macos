@@ -60,8 +60,11 @@ public:
     using DescriptorWrites = std::vector<vk::WriteDescriptorSet>;
     using BufferBarriers = boost::container::small_vector<vk::BufferMemoryBarrier2, 16>;
 
+    /// Records the buffer barriers (unless `skip_barriers`), push constants and descriptors of a
+    /// draw or dispatch. `skip_barriers` is used on Metal when the open render encoder already
+    /// orders the writes the barriers describe (SHADPS4_METAL_ENCODER_ORDERING).
     void BindResources(DescriptorWrites& set_writes, const BufferBarriers& buffer_barriers,
-                       const Shader::PushData& push_data) const;
+                       const Shader::PushData& push_data, bool skip_barriers = false) const;
 
 protected:
     [[nodiscard]] std::string GetDebugString() const;

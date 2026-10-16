@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string_view>
+#include <cstdlib>
+#include <cstdio>
+#include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/amdgpu/eop_latency_stats.h"
+#include "video_core/renderer_vulkan/barrier_stats.h"
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -364,9 +370,14 @@ void Liverpool::Process(std::stop_token stoken) {
     }
     gpu_id = std::this_thread::get_id();
     VideoCore::ReadbackStats::MarkCpThread();
+    Vulkan::BarrierStats::sync_thread = true;
     VideoCore::ReadbackStats::RegisterSampledThread("cp");
 
     while (!stoken.stop_requested()) {
+        if (rasterizer) {
+            // Out of work: a guest thread may be waiting on a fence deferred inside a pass.
+            rasterizer->FlushDeferredFences(Vulkan::FlushReason::Idle);
+        }
         {
             VideoCore::ReadbackStats::CpTimer idle_timer{VideoCore::ReadbackStats::CpTime::Idle};
             const u64 idle_start = VideoCore::ReadbackStats::NowNs();
@@ -406,6 +417,10 @@ void Liverpool::Process(std::stop_token stoken) {
             const u64 packets_before = VideoCore::ReadbackStats::Detail::cp_packets;
             VideoCore::ReadbackStats::Detail::cp_yield_kind = 0;
             task.resume();
+            if (rasterizer && VideoCore::ReadbackStats::Detail::cp_yield_kind != 0) {
+                // The ring is blocked on a wait that may depend on a deferred fence.
+                rasterizer->FlushDeferredFences(Vulkan::FlushReason::Yield);
+            }
             if (profile && VideoCore::ReadbackStats::Detail::cp_yield_kind != 0 &&
                 VideoCore::ReadbackStats::Detail::cp_packets == packets_before) {
                 // Only re-checked a wait: time spent cycling over blocked queues.
@@ -927,6 +942,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 LOG_DEBUG(Render, "Encountered EventWrite: event_type = {}, event_index = {}",
                           magic_enum::enum_name(event->event_type.Value()),
                           magic_enum::enum_name(event->event_index.Value()));
+                if (rasterizer && (event->event_type.Value() == EventType::CsPartialFlush ||
+                                   event->event_index.Value() == EventIndex::CsVsPsPartialFlush)) {
+                    rasterizer->GuestComputeFlush();
+                }
                 if (event->event_type.Value() == EventType::SoVgtStreamoutFlush) {
                     // TODO: handle proper synchronization, for now signal that update is done
                     // immediately
@@ -986,10 +1005,38 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
                 // The packet is copied: the signal may run after the command buffer is reused.
-                auto signal = [this, eop = *event_eop] {
+                static const bool eop_stats = [] {
+                    const char* value = std::getenv("SHADPS4_EOP_STATS");
+                    return value != nullptr && std::string_view{value} == "1";
+                }();
+                const u64 eop_submit_ns = last_gfx_submit_ns.load(std::memory_order_relaxed);
+                const u64 eop_cp_ns =
+                    eop_stats && event_eop->int_sel.Value() != InterruptSelect::None
+                        ? VideoCore::ReadbackStats::NowNs()
+                        : 0;
+                if (eop_cp_ns != 0) {
+                    if (rasterizer) {
+                        auto* semaphore = rasterizer->GetScheduler().GetMasterSemaphore();
+                        semaphore->Refresh();
+                        GlobalEopLatencyStats().OnCpTicks(semaphore->CurrentTick(),
+                                                          semaphore->KnownGpuTick());
+                    }
+                    const auto report = GlobalEopLatencyStats().TakeReport(eop_cp_ns);
+                    if (!report.empty()) {
+                        std::fputs(report.c_str(), stderr);
+                        std::fflush(stderr);
+                    }
+                }
+                auto signal = [this, eop = *event_eop, eop_submit_ns, eop_cp_ns] {
                     static constexpr auto irq = [] {
                         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
                     };
+                    if (eop_cp_ns != 0) {
+                        const u64 gpu_ns = Vulkan::Scheduler::LastPriorityOperationStartNs();
+                        GlobalEopLatencyStats().Add(eop_submit_ns, eop_cp_ns,
+                                                    gpu_ns > eop_cp_ns ? gpu_ns : eop_cp_ns,
+                                                    VideoCore::ReadbackStats::NowNs());
+                    }
                     RunFenceSignal(
                         *this, gpu_id,
                         [&] {
@@ -1104,6 +1151,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::AcquireMem: {
                 // const auto* acquire_mem = reinterpret_cast<PM4CmdAcquireMem*>(header);
+                if (rasterizer) {
+                    rasterizer->GuestComputeFlush();
+                }
                 break;
             }
             case PM4ItOpcode::Rewind: {
@@ -1369,6 +1419,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
         case PM4ItOpcode::AcquireMem: {
+            if (rasterizer) {
+                rasterizer->GuestComputeFlush();
+            }
             break;
         }
         case PM4ItOpcode::Rewind: {
@@ -1562,7 +1615,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
         case PM4ItOpcode::EventWrite: {
-            // const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
+            const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
+            if (rasterizer && (event->event_type.Value() == EventType::CsPartialFlush ||
+                               event->event_index.Value() == EventIndex::CsVsPsPartialFlush)) {
+                rasterizer->GuestComputeFlush();
+            }
             break;
         }
         default:
@@ -1616,6 +1673,8 @@ Liverpool::CmdBuffer Liverpool::CopyCmdBuffers(std::span<const u32> dcb, std::sp
 
 void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     auto& queue = mapped_queues[GfxQueueId];
+    last_gfx_submit_ns.store(VideoCore::ReadbackStats::NowNs(), std::memory_order_relaxed);
+    GlobalEopLatencyStats().OnSubmit(last_gfx_submit_ns.load(std::memory_order_relaxed));
 
     if (EmulatorSettings.IsCopyGpuBuffers()) {
         std::tie(dcb, ccb) = CopyCmdBuffers(dcb, ccb);

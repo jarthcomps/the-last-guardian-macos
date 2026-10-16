@@ -8,6 +8,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/barrier_stats.h"
 
 namespace Vulkan {
 
@@ -20,12 +21,13 @@ Pipeline::Pipeline(const Instance& instance_, Scheduler& scheduler_, DescriptorH
 Pipeline::~Pipeline() = default;
 
 void Pipeline::BindResources(DescriptorWrites& set_writes, const BufferBarriers& buffer_barriers,
-                             const Shader::PushData& push_data) const {
+                             const Shader::PushData& push_data, bool skip_barriers) const {
+    BarrierStats::Scope barrier_scope{BarrierStats::Source::Resources};
     const auto cmdbuf = scheduler.CommandBuffer();
     const auto bind_point =
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
 
-    if (!buffer_barriers.empty()) {
+    if (!buffer_barriers.empty() && !skip_barriers) {
         const auto dependencies = vk::DependencyInfo{
             .dependencyFlags = vk::DependencyFlagBits::eByRegion,
             .bufferMemoryBarrierCount = u32(buffer_barriers.size()),

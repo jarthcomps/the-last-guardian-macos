@@ -410,6 +410,10 @@ uint32_t ComputeSurfaceAddrFromCoordMacroTiled(uint32_t x, uint32_t y, uint32_t 
 #endif
 
 uint GetMipLevel(inout uint texel) {
+#ifdef SINGLE_MIP
+    // The CPU proved the complete dispatch lies inside mip zero; texel is unchanged.
+    return 0;
+#else
     uint mip = 0;
     uint mip_size = info.mips[mip].size / BYTES_PER_PIXEL;
     while (texel >= mip_size && mip < info.num_mips) {
@@ -418,6 +422,7 @@ uint GetMipLevel(inout uint texel) {
         mip_size = info.mips[mip].size / BYTES_PER_PIXEL;
     }
     return mip;
+#endif
 }
 
 void main() {

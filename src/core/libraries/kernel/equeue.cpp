@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string_view>
+#include <string>
+#include <cstdlib>
+#include <cstdio>
+#include <chrono>
+#include "core/libraries/kernel/wait_stats.h"
 #include <thread>
 #include <magic_enum/magic_enum.hpp>
 
@@ -17,6 +23,11 @@
 #include "core/libraries/libs.h"
 
 namespace Libraries::Kernel {
+
+WaitStats& GuestWaitStats() {
+    static WaitStats stats;
+    return stats;
+}
 
 extern boost::asio::io_context io_context;
 extern void KernelSignalRequest();
@@ -480,7 +491,30 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev,
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
+    static const bool wait_stats_enabled = [] {
+        const char* value = std::getenv("SHADPS4_WAIT_STATS");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    const auto wait_start = std::chrono::steady_clock::now();
     *out = equeue->WaitForEvents(ev, num, timo);
+    if (wait_stats_enabled) {
+        const auto now = std::chrono::steady_clock::now();
+        const u64 ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - wait_start).count();
+        std::string key = "eq:" + std::string{equeue->GetName()};
+        if (*out > 0) {
+            key += " filter=" + std::to_string(static_cast<int>(ev[0].filter)) +
+                   " ident=" + std::to_string(ev[0].ident);
+        } else {
+            key += " timeout";
+        }
+        GuestWaitStats().Record(key, ns);
+        const auto summary = GuestWaitStats().TakeSummary(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+        if (!summary.empty()) {
+            std::fputs(summary.c_str(), stderr);
+            std::fflush(stderr);
+        }
+    }
 
     if (*out == 0) {
         return ORBIS_KERNEL_ERROR_ETIMEDOUT;

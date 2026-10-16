@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string_view>
+#include <cstdlib>
+#include <chrono>
+#include "core/libraries/kernel/wait_stats.h"
 #include <condition_variable>
 #include <list>
 #include <mutex>
@@ -328,7 +332,20 @@ s32 PS4_SYSV_ABI sceKernelWaitSema(OrbisKernelSema sem, s32 needCount, u32* pTim
     if (!orbis_sems.is_allocated(sem)) {
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    return orbis_sems[sem]->Wait(true, needCount, pTimeout);
+    static const bool wait_stats_enabled = [] {
+        const char* value = std::getenv("SHADPS4_WAIT_STATS");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    if (!wait_stats_enabled) {
+        return orbis_sems[sem]->Wait(true, needCount, pTimeout);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const s32 result = orbis_sems[sem]->Wait(true, needCount, pTimeout);
+    const auto ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+            .count();
+    GuestWaitStats().Record("sem:" + orbis_sems[sem]->name, static_cast<u64>(ns));
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceKernelSignalSema(OrbisKernelSema sem, s32 signalCount) {

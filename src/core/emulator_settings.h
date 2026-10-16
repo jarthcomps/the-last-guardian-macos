@@ -426,6 +426,8 @@ struct GPUSettings {
     Setting<bool> direct_memory_access_enabled{false};
     // Writes readback_stats.csv / readback_top.txt diagnostics to the log directory.
     Setting<bool> readback_stats_enabled{false};
+    // GPU queries can perturb small submissions substantially; allow CPU-only diagnostics.
+    Setting<bool> readback_stats_gpu_timing_enabled{true};
     // Completes image readbacks and recently read back buffers with one GPU wait per fence.
     Setting<bool> readback_batching_enabled{false};
     // Signals end-of-pipe fences after their readbacks complete on another thread instead of
@@ -521,6 +523,8 @@ struct GPUSettings {
                                        &GPUSettings::direct_memory_access_enabled),
             make_override<GPUSettings>("readback_stats_enabled",
                                        &GPUSettings::readback_stats_enabled),
+            make_override<GPUSettings>("readback_stats_gpu_timing_enabled",
+                                       &GPUSettings::readback_stats_gpu_timing_enabled),
             make_override<GPUSettings>("readback_batching_enabled",
                                        &GPUSettings::readback_batching_enabled),
             make_override<GPUSettings>("readback_async_fences_enabled",
@@ -557,7 +561,8 @@ struct GPUSettings {
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     GPUSettings, window_width, window_height, internal_screen_width, internal_screen_height,
     null_gpu, copy_gpu_buffers, readbacks_mode, readback_linear_images_enabled,
-    direct_memory_access_enabled, readback_stats_enabled, readback_batching_enabled,
+    direct_memory_access_enabled, readback_stats_enabled, readback_stats_gpu_timing_enabled,
+    readback_batching_enabled,
     readback_async_fences_enabled, readback_fence_wait_shortcut, readback_hot_write_pages_enabled,
     readback_stream_reuse_enabled, readback_prefetch_mode, readback_prefetch_lifetime,
     rt_lookup_reuse_enabled, stage_lookup_reuse, shader_backing_reads, shader_backing_verify,
@@ -843,6 +848,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, ReadbackLinearImagesEnabled, readback_linear_images_enabled)
     SETTING_FORWARD_BOOL(m_gpu, DirectMemoryAccessEnabled, direct_memory_access_enabled)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackStatsEnabled, readback_stats_enabled)
+    SETTING_FORWARD_BOOL(m_gpu, ReadbackStatsGpuTimingEnabled, readback_stats_gpu_timing_enabled)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackBatchingEnabled, readback_batching_enabled)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackAsyncFencesEnabled, readback_async_fences_enabled)
     SETTING_FORWARD(m_gpu, ReadbackFenceWaitShortcut, readback_fence_wait_shortcut)

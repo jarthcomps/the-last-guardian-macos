@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string_view>
+#include <cstdlib>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -17,7 +19,9 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/texture_cache/image_upload_policy.h"
 #include "video_core/texture_cache/tile_manager.h"
+#include "video_core/renderer_vulkan/barrier_stats.h"
 
 namespace VideoCore {
 
@@ -92,6 +96,19 @@ void TextureCache::RecordImageDownloads(ReadbackBatch& batch) {
                   });
     }
     download_images.clear();
+}
+
+bool TextureCache::HasPendingDownloadIn(std::span<const ImageId> image_ids) {
+    std::unique_lock lk{download_images_mutex};
+    for (const ImageId image_id : image_ids) {
+        if (!image_id || !download_images.contains(image_id)) {
+            continue;
+        }
+        if (True(slot_images[image_id].flags & ImageFlagBits::GpuModified)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 u32 TextureCache::ImageDownloadSize(const Image& image) {
@@ -765,6 +782,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 }
 
 void TextureCache::RefreshImage(Image& image) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::ImageRefresh};
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
     }
@@ -777,8 +795,16 @@ void TextureCache::RefreshImage(Image& image) {
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
 
+    static const bool skip_hash = [] {
+        const char* value = std::getenv("SHADPS4_IMAGE_UPLOAD_SKIP_HASH");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    const bool memory_gpu_modified =
+        skip_hash &&
+        buffer_cache.IsRegionGpuModified(image.info.guest_address, image.info.guest_size);
     if (True(image.flags & ImageFlagBits::MaybeCpuDirty) &&
-        False(image.flags & ImageFlagBits::CpuDirty)) {
+        False(image.flags & ImageFlagBits::CpuDirty) &&
+        ShouldProbeMaybeCpuDirty(memory_gpu_modified, skip_hash)) {
         // The image size should be less than page size to be considered MaybeCpuDirty
         // So this calculation should be very uncommon and reasonably fast
         // For now we'll just check up to 64 first pixels
@@ -812,7 +838,8 @@ void TextureCache::RefreshImage(Image& image) {
         const auto [mip_size, mip_pitch, mip_height, mip_offset] = image.info.mips_layout[m];
 
         // Protect GPU modified resources from accidental CPU reuploads.
-        if (is_gpu_modified && !is_gpu_dirty) {
+        if (ShouldHashBeforeUpload(is_gpu_modified, is_gpu_dirty, memory_gpu_modified,
+                                   skip_hash)) {
             const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
             const u64 hash = XXH3_64bits(addr + mip_offset, mip_size);
             if (image.mip_hashes[m] == hash) {

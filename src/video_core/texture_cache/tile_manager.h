@@ -30,7 +30,7 @@ public:
     Result DetileImage(vk::Buffer in_buffer, u32 in_offset, const ImageInfo& info);
 
 private:
-    vk::Pipeline GetTilingPipeline(const ImageInfo& info, bool is_tiler);
+    vk::Pipeline GetTilingPipeline(const ImageInfo& info, bool is_tiler, bool single_mip);
     ScratchBuffer GetScratchBuffer(u32 size);
 
 private:
@@ -39,8 +39,9 @@ private:
     StreamBuffer& stream_buffer;
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pl_layout;
-    std::array<vk::UniquePipeline, AmdGpu::NUM_TILE_MODES * NUM_BPPS> detilers{};
-    std::array<vk::UniquePipeline, AmdGpu::NUM_TILE_MODES * NUM_BPPS> tilers{};
+    // Keep generic and specialized shaders separate when the same surface is used both ways.
+    std::array<vk::UniquePipeline, AmdGpu::NUM_TILE_MODES * NUM_BPPS * 2> detilers{};
+    std::array<vk::UniquePipeline, AmdGpu::NUM_TILE_MODES * NUM_BPPS * 2> tilers{};
 };
 
 } // namespace VideoCore

@@ -3,11 +3,16 @@
 
 #include "ipc.h"
 
+#include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <string>
+#include <thread>
+#include <fmt/format.h>
 
 #include <SDL3/SDL.h>
 
+#include "common/singleton.h"
 #include "common/memory_patcher.h"
 #include "common/thread.h"
 #include "common/types.h"
@@ -16,12 +21,68 @@
 #include "core/emulator_settings.h"
 #include "core/emulator_state.h"
 #include "core/libraries/audio/audioout.h"
+#include "core/libraries/pad/pad.h"
 #include "input/input_handler.h"
+#include "input/controller.h"
 #include "sdl_window.h"
 #include "src/core/libraries/usbd/usbd.h"
+#include "video_core/readback_stats.h"
+#include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "test_control.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
+
+namespace {
+
+namespace TestControl = IPCTestControl;
+
+bool test_control_enabled = false;
+
+Libraries::Pad::OrbisPadButtonDataOffset ToOrbisButton(TestControl::Button button) {
+    using OrbisButton = Libraries::Pad::OrbisPadButtonDataOffset;
+    switch (button) {
+    case TestControl::Button::Cross:
+        return OrbisButton::Cross;
+    case TestControl::Button::Circle:
+        return OrbisButton::Circle;
+    case TestControl::Button::Square:
+        return OrbisButton::Square;
+    case TestControl::Button::Triangle:
+        return OrbisButton::Triangle;
+    case TestControl::Button::Options:
+        return OrbisButton::Options;
+    case TestControl::Button::Up:
+        return OrbisButton::Up;
+    case TestControl::Button::Down:
+        return OrbisButton::Down;
+    case TestControl::Button::Left:
+        return OrbisButton::Left;
+    case TestControl::Button::Right:
+        return OrbisButton::Right;
+    case TestControl::Button::L1:
+        return OrbisButton::L1;
+    case TestControl::Button::R1:
+        return OrbisButton::R1;
+    }
+    return OrbisButton::None;
+}
+
+Input::Axis ToInputAxis(TestControl::Axis axis) {
+    switch (axis) {
+    case TestControl::Axis::LeftX:
+        return Input::Axis::LeftX;
+    case TestControl::Axis::LeftY:
+        return Input::Axis::LeftY;
+    case TestControl::Axis::RightX:
+        return Input::Axis::RightX;
+    case TestControl::Axis::RightY:
+        return Input::Axis::RightY;
+    }
+    return Input::Axis::LeftX;
+}
+
+} // namespace
 
 /**
  * Protocol summary:
@@ -49,6 +110,7 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  * - CAPABILITIES:
  *   - ENABLE_MEMORY_PATCH: enables PATCH_MEMORY command
  *   - ENABLE_EMU_CONTROL: enables PAUSE, RESUME, STOP, TOGGLE_FULLSCREEN commands
+ *   - ENABLE_TEST_CONTROL: emitted only when SHADPS4_ENABLE_TEST_CONTROL=1 and IPC is enabled
  * - INPUT CMD:
  *   - RUN: start the emulator execution
  *   - START: start the game execution
@@ -61,6 +123,10 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
  *   - RESUME: resume the game execution
  *   - STOP: stop and quit the emulator
  *   - TOGGLE_FULLSCREEN: enable / disable fullscreen
+ *   - TEST_PAD_BUTTON <slot 0..3> <button> <pressed 0|1>
+ *   - TEST_PAD_AXIS <slot 0..3> <left_x|left_y|right_x|right_y> <value 0..255>
+ *   - TEST_SCREENSHOT: request a game-only screenshot using the normal screenshot filename/path
+ *   - TEST_METRICS: report cumulative present count, frame draw/dispatch averages, monotonic ns
  * - OUTPUT CMD:
  *   - RESTART(argn: number, argv: ...string): Request restart of the emulator, must call STOP
  **/
@@ -71,6 +137,8 @@ void IPC::Init() {
     if (!enabled) {
         return;
     }
+    const char* testControlEnv = std::getenv("SHADPS4_ENABLE_TEST_CONTROL");
+    test_control_enabled = TestControl::Enabled(enabled, testControlEnv ? testControlEnv : "");
 
     EmulatorState::GetInstance()->SetAutoPatchesLoadEnabled(false);
 
@@ -82,6 +150,9 @@ void IPC::Init() {
     std::cerr << ";#IPC_ENABLED\n";
     std::cerr << ";ENABLE_MEMORY_PATCH\n";
     std::cerr << ";ENABLE_EMU_CONTROL\n";
+    if (test_control_enabled) {
+        std::cerr << ";ENABLE_TEST_CONTROL\n";
+    }
     std::cerr << ";#IPC_END\n";
     std::cerr.flush();
 
@@ -115,11 +186,81 @@ void IPC::InputLoop() {
     };
 
     while (true) {
-        auto& cmd = next_str();
+        std::string cmd;
+        std::getline(std::cin, cmd);
         if (cmd.empty()) {
             continue;
         }
-        if (cmd == "RUN") {
+        if (cmd.starts_with("TEST_")) {
+            using TestControl::ParseStatus;
+            const auto status = TestControl::Dispatch(
+                cmd, test_control_enabled,
+                [](int slot, TestControl::Button button, bool pressed) {
+                    auto& controllers = *Common::Singleton<Input::GameControllers>::Instance();
+                    controllers[slot]->Button(ToOrbisButton(button), pressed);
+                },
+                [](int slot, TestControl::Axis axis, int value) {
+                    auto& controllers = *Common::Singleton<Input::GameControllers>::Instance();
+                    controllers[slot]->Axis(ToInputAxis(axis), value, false);
+                },
+                [] { VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly); },
+                [] {
+                    const auto elapsed = std::chrono::steady_clock::now().time_since_epoch();
+                    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed)
+                                        .count();
+                    std::cerr << fmt::format(";TEST_METRICS {} {:.1f} {:.1f} {}\n",
+                                             VideoCore::ReadbackStats::FrameIndex(),
+                                             DebugState.GetDrawCallsAvg(),
+                                             DebugState.GetDispatchesAvg(), ns);
+                    std::cerr.flush();
+                },
+                [](int count) {
+                    // Same capture as the devtools "Dump frames" menu: the next guest frames are
+                    // recorded and the guest pauses. The export normally happens in the devtools
+                    // layer, which only runs with its menu bar shown, so wait for it here instead
+                    // and answer with the frame ids. The caller sends RESUME afterwards.
+                    if (DebugState.DumpingCurrentFrame() || DebugState.ShouldPauseInSubmit()) {
+                        std::cerr << ";TEST_CONTROL_ERROR busy\n";
+                        std::cerr.flush();
+                        return;
+                    }
+                    DebugState.RequestFrameDump(count);
+                    std::thread([] {
+                        using namespace std::chrono_literals;
+                        const auto deadline = std::chrono::steady_clock::now() + 60s;
+                        while (std::chrono::steady_clock::now() < deadline) {
+                            const auto frames = DebugState.ExportFinishedFrameDumps();
+                            if (!frames.empty()) {
+                                // The guest is paused by the submit that completed the dump;
+                                // that pause starts after the dump is exported. Answer only
+                                // once it holds, so the caller's RESUME cannot arrive first
+                                // (ResumeGuestThreads is a no-op while nothing is paused).
+                                while (!DebugState.IsGuestThreadsPaused() &&
+                                       std::chrono::steady_clock::now() < deadline) {
+                                    std::this_thread::sleep_for(10ms);
+                                }
+                                std::cerr << TestControl::FormatFrameDumpDone(frames);
+                                std::cerr.flush();
+                                return;
+                            }
+                            std::this_thread::sleep_for(50ms);
+                        }
+                        std::cerr << TestControl::FrameDumpTimeoutLine;
+                        std::cerr.flush();
+                    }).detach();
+                },
+                [](int frames) {
+                    const u32 id = VideoCore::RequestScreenshotBurst(static_cast<u32>(frames));
+                    std::cerr << TestControl::FormatBurstReply(id, frames);
+                    std::cerr.flush();
+                });
+            if (status == ParseStatus::Disabled) {
+                std::cerr << ";TEST_CONTROL_DISABLED\n";
+            } else if (status == ParseStatus::Invalid) {
+                std::cerr << ";TEST_CONTROL_ERROR invalid\n";
+            }
+            std::cerr.flush();
+        } else if (cmd == "RUN") {
             run_semaphore.release();
         } else if (cmd == "START") {
             start_semaphore.release();

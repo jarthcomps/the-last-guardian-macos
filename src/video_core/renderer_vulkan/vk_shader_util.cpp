@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/shader_diagnostic_names.h"
 
 namespace Vulkan {
 
@@ -160,7 +161,7 @@ bool InitializeCompiler() {
 } // Anonymous namespace
 
 vk::ShaderModule Compile(std::string_view code, vk::ShaderStageFlagBits stage, vk::Device device,
-                         std::vector<std::string> defines) {
+                         std::vector<std::string> defines, std::string_view diagnostic_name) {
     if (!InitializeCompiler()) {
         return {};
     }
@@ -249,6 +250,14 @@ vk::ShaderModule Compile(std::string_view code, vk::ShaderStageFlagBits stage, v
     const std::string spv_messages = logger.getAllMessages();
     if (!spv_messages.empty()) {
         LOG_INFO(Render_Vulkan, "SPIR-V conversion messages: {}", spv_messages);
+    }
+
+    if (!diagnostic_name.empty()) {
+        const auto result = ShaderDiagnostic::SetEntryPointOpName(out_code, diagnostic_name);
+        if (result != ShaderDiagnostic::OpNameResult::Success) {
+            LOG_WARNING(Render_Vulkan, "Could not apply host shader diagnostic name: result {}",
+                        static_cast<int>(result));
+        }
     }
 
     return CompileSPV(out_code, device);

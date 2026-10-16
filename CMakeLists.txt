@@ -39,6 +39,7 @@ cmake_dependent_option(ENABLE_SYSTEM_VULKAN "Enable the system Vulkan driver" OF
 option(ENABLE_DISCORD_RPC "Enable the Discord RPC integration" ON)
 option(ENABLE_UPDATER "Enables the options to updater" ON)
 option(ENABLE_TESTS "Build unit tests (requires GTest)" OFF)
+option(ENABLE_HOST_OPTIMIZATIONS "Optimize the emulator target with O3 and ThinLTO (Clang)" OFF)
 option(ENABLE_SYSTEM_LIBRARIES "Enable building against system libraries" OFF)
 
 # First, determine whether to use CMAKE_OSX_ARCHITECTURES or CMAKE_SYSTEM_PROCESSOR.
@@ -1277,6 +1278,8 @@ add_executable(shadps4
 )
 
 create_target_directory_groups(shadps4)
+include(cmake/HostOptimizations.cmake)
+shadps4_optimize_host_target(shadps4)
 
 target_link_libraries(shadps4 PRIVATE spdlog::spdlog)
 target_link_libraries(shadps4 PRIVATE magic_enum::magic_enum fmt::fmt toml11::toml11 tsl::robin_map xbyak::xbyak Tracy::TracyClient RenderDoc::API FFmpeg::ffmpeg Dear_ImGui ImGuiFileDialog gcn half::half ZLIB::ZLIB PNG::PNG minimp3)

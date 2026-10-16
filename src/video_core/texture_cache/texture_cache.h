@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <span>
+
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -108,6 +110,9 @@ public:
 
     /// Records downloads of all pending images into a batch instead of waiting per image.
     void RecordImageDownloads(ReadbackBatch& batch);
+
+    /// Returns true when one of the given images has a pending GPU readback.
+    bool HasPendingDownloadIn(std::span<const ImageId> image_ids);
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 #include "common/assert.h"
 #include "common/debug.h"
@@ -11,7 +12,9 @@
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/readback_stats.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_encoder_batch.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/barrier_stats.h"
 
 namespace Vulkan {
 
@@ -77,7 +80,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     is_rendering = true;
     render_state = new_state;
     VideoCore::ReadbackStats::NoteMutation(VideoCore::ReadbackStats::Mutation::PassBegin);
-    if (timing_pool) {
+    if (VideoCore::ReadbackStats::IsEnabled()) {
         VideoCore::ReadbackStats::OnRenderPassBegin();
     }
 
@@ -133,6 +136,14 @@ void Scheduler::EndRendering() {
         return;
     }
     is_rendering = false;
+    // KosmicKrisp ends the render encoder with a barrier after all its work.
+    BarrierStats::OnFullSync();
+    const u32 category = VideoCore::ReadbackStats::Detail::cp_current;
+    if (category < pass_end_counts.by_category.size()) {
+        ++pass_end_counts.by_category[category];
+    }
+    ++pass_end_counts.passes;
+    pass_end_counts.draws += std::exchange(pass_draws, 0);
     CommandBuffer().endRendering();
 }
 
@@ -359,16 +370,29 @@ void Scheduler::EncoderThread(std::stop_token stoken) {
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
     };
+#if defined(__APPLE__)
+    constexpr std::size_t default_batch_limit = MaxEncoderBatchSize;
+#else
+    constexpr std::size_t default_batch_limit = 1;
+#endif
+    const auto batch_limit =
+        EncoderBatchLimit(std::getenv("SHADPS4_ENCODER_BATCH_SIZE"), default_batch_limit);
     while (true) {
-        EncoderJob job;
+        std::array<EncoderJob, MaxEncoderBatchSize> batch;
+        std::size_t batch_size{};
         {
             std::unique_lock lk{encoder_mutex};
             encoder_cv.wait(lk, stoken, [this] { return !encoder_jobs.empty(); });
             if (encoder_jobs.empty()) {
                 return; // Stop requested and nothing left to submit.
             }
-            job = std::move(encoder_jobs.front());
-            encoder_jobs.pop_front();
+            // Drain only jobs already available. Waiting to fill a batch could deadlock a guest
+            // that needs the first fence before it can enqueue more work.
+            batch_size = EncoderBatchSize(encoder_jobs, master_semaphore.Handle(), batch_limit);
+            for (std::size_t i = 0; i < batch_size; ++i) {
+                batch[i] = std::move(encoder_jobs.front());
+                encoder_jobs.pop_front();
+            }
         }
         encoder_cv.notify_all();
 
@@ -379,32 +403,43 @@ void Scheduler::EncoderThread(std::stop_token stoken) {
             cmdbuf = command_pool.Commit();
         }
         Check(cmdbuf.begin(begin_info));
-        if (job.timing_slot >= 0) {
-            const u32 slot = static_cast<u32>(job.timing_slot);
-            cmdbuf.resetQueryPool(timing_pool, slot * 2, 2);
-            cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, timing_pool, slot * 2);
-        }
-        const u64 commands = job.list->Size();
-        job.list->Replay(cmdbuf);
-        if (job.timing_slot >= 0) {
-            const u32 slot = static_cast<u32>(job.timing_slot);
-            cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timing_pool,
-                                  slot * 2 + 1);
+        u64 commands{};
+        for (std::size_t i = 0; i < batch_size; ++i) {
+            auto& job = batch[i];
+            if (job.timing_slot >= 0) {
+                const u32 slot = static_cast<u32>(job.timing_slot);
+                cmdbuf.resetQueryPool(timing_pool, slot * 2, 2);
+                cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, timing_pool, slot * 2);
+            }
+            commands += job.list->Size();
+            job.list->Replay(cmdbuf);
+            if (job.timing_slot >= 0) {
+                const u32 slot = static_cast<u32>(job.timing_slot);
+                cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timing_pool,
+                                      slot * 2 + 1);
+            }
         }
         Check(cmdbuf.end());
         {
             // ImGui texture uploads submit to the queue too: done here, the ordering thread
             // never waits for the submit lock while this thread is in the driver.
             std::scoped_lock lk{submit_mutex};
+            // These lists contain guest rendering only. ImGui uses direct presenter command
+            // buffers. Process one texture job per actual submit; delayed destruction retains
+            // resources longer and still waits for device idle before freeing them.
             ImGui::Core::TextureManager::Submit();
-            SubmitCommandBuffer(cmdbuf, job.info);
+            // Signaling the maximum timeline value makes all earlier milestones complete after
+            // the whole batch. Readback callbacks remain FIFO and can never run early.
+            SubmitCommandBuffer(cmdbuf, batch[batch_size - 1].info);
         }
         VideoCore::ReadbackStats::OnCommandReplay(commands,
                                                   VideoCore::ReadbackStats::NowNs() - start);
         {
             std::unique_lock lk{encoder_mutex};
-            free_lists.push_back(std::move(job.list));
-            ++jobs_done;
+            for (std::size_t i = 0; i < batch_size; ++i) {
+                free_lists.push_back(std::move(batch[i].list));
+            }
+            jobs_done += batch_size;
         }
         encoder_cv.notify_all();
     }
@@ -416,7 +451,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     if (use_encoder && !direct_active) {
         const u64 signal_value = master_semaphore.NextTick();
-        if (timing_pool) {
+        if (VideoCore::ReadbackStats::IsEnabled()) {
             VideoCore::ReadbackStats::OnRasterizerSubmit();
         }
         HandOffToEncoder(info, signal_value);
@@ -457,7 +492,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     info.AddSignal(master_semaphore.Handle(), signal_value);
     ImGui::Core::TextureManager::Submit();
-    if (timing_pool) {
+    if (VideoCore::ReadbackStats::IsEnabled()) {
         VideoCore::ReadbackStats::OnRasterizerSubmit();
     }
     SubmitCommandBuffer(current_cmdbuf, info);
@@ -487,6 +522,11 @@ bool Scheduler::OnPriorityThread() noexcept {
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuSchedPriorityPendingOpsRunner");
+#if defined(__APPLE__)
+    if (const u32 priority = EmulatorSettings.GetCpThreadPriority(); priority >= 2) {
+        Common::SetCurrentThreadPriority(static_cast<Common::ThreadPriority>(priority));
+    }
+#endif
     is_priority_thread = true;
 
     while (!stoken.stop_requested()) {
@@ -522,6 +562,9 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
             break;
         }
 
+        // The GPU finished the tick this operation waited for (SHADPS4_EOP_STATS).
+        last_priority_op_start_ns.store(VideoCore::ReadbackStats::NowNs(),
+                                        std::memory_order_relaxed);
         op.callback();
         num_priority_ops.fetch_sub(1, std::memory_order_acq_rel);
         num_priority_ops.notify_all();

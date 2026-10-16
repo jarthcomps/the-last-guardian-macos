@@ -4,6 +4,9 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -13,6 +16,7 @@
 #include "common/assert.h"
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/barrier_stats.h"
 
 #ifdef MemoryBarrier
 #pragma push_macro("MemoryBarrier")
@@ -22,12 +26,23 @@
 
 namespace Vulkan {
 
+class CommandRecorder;
+struct DescriptorPushMemoTestAccess;
+
 /// Vulkan commands recorded as value-captured closures, replayed later into a command buffer.
 /// Everything a command needs (arrays, structures with pointers, strings) is copied into the
 /// list's arena, so the caller's data may change or go away right after recording.
 class CommandList {
 public:
-    CommandList() = default;
+    CommandList() {
+        const char* enabled = std::getenv("SHADPS4_DESCRIPTOR_PUSH_MEMO");
+        if (enabled && enabled[0] == '1' && enabled[1] == '\0') {
+            descriptor_memo = std::make_unique<DescriptorMemo>();
+            const char* diagnostics = std::getenv("SHADPS4_DESCRIPTOR_MEMO_DIAGNOSTICS");
+            descriptor_memo_diagnostics = diagnostics && diagnostics[0] == '1' &&
+                                          diagnostics[1] == '\0';
+        }
+    }
     CommandList(const CommandList&) = delete;
     CommandList& operator=(const CommandList&) = delete;
 
@@ -52,6 +67,35 @@ public:
             static_cast<CommandImpl<Func>*>(self)->func(cmdbuf);
         };
         Link(command);
+    }
+
+    /// Records a pipeline bind unless this list already has that pipeline bound at the bind point.
+    /// The cache is deliberately local to this list and is cleared when it is replayed/reset.
+    void BindPipeline(vk::PipelineBindPoint bind_point, vk::Pipeline pipeline) {
+        size_t cache_index{};
+        switch (bind_point) {
+        case vk::PipelineBindPoint::eGraphics:
+            cache_index = 0;
+            break;
+        case vk::PipelineBindPoint::eCompute:
+            cache_index = 1;
+            break;
+        default:
+            // Keep uncommon/extension bind points on the original, uncached path.
+            Record([=](vk::CommandBuffer c) { c.bindPipeline(bind_point, pipeline); });
+            return;
+        }
+        if (!pipeline) {
+            pipeline_valid[cache_index] = false;
+            Record([=](vk::CommandBuffer c) { c.bindPipeline(bind_point, pipeline); });
+            return;
+        }
+        if (pipeline_valid[cache_index] && pipelines[cache_index] == pipeline) {
+            return;
+        }
+        pipeline_valid[cache_index] = true;
+        pipelines[cache_index] = pipeline;
+        Record([=](vk::CommandBuffer c) { c.bindPipeline(bind_point, pipeline); });
     }
 
     /// Copies an array into the arena. The copy lives until the next replay.
@@ -83,6 +127,226 @@ public:
     }
 
 private:
+    friend class CommandRecorder;
+    friend struct DescriptorPushMemoTestAccess;
+
+    struct DescriptorValue {
+        VkDescriptorType type{};
+        VkSampler sampler{};
+        VkImageView image_view{};
+        VkImageLayout image_layout{};
+        VkBuffer buffer{};
+        VkDeviceSize offset{};
+        VkDeviceSize range{};
+        VkBufferView texel_view{};
+        bool valid{};
+    };
+
+    struct DescriptorBank {
+        std::array<DescriptorValue, 128> bindings{};
+        VkPipelineLayout layout{};
+        bool layout_valid{};
+    };
+
+    struct DescriptorMemo {
+        std::array<DescriptorBank, 2> banks{};
+    };
+
+    static size_t DescriptorBankIndex(vk::PipelineBindPoint bind_point) {
+        switch (bind_point) {
+        case vk::PipelineBindPoint::eGraphics:
+            return 0;
+        case vk::PipelineBindPoint::eCompute:
+            return 1;
+        default:
+            return 2;
+        }
+    }
+
+    static bool SameDescriptorValue(const DescriptorValue& lhs, const DescriptorValue& rhs) {
+        if (!lhs.valid || lhs.type != rhs.type) {
+            return false;
+        }
+        switch (lhs.type) {
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+            return lhs.sampler == rhs.sampler && lhs.image_view == rhs.image_view &&
+                   lhs.image_layout == rhs.image_layout;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            return lhs.buffer == rhs.buffer && lhs.offset == rhs.offset && lhs.range == rhs.range;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+            return lhs.texel_view == rhs.texel_view;
+        default:
+            return false;
+        }
+    }
+
+    static bool ReadDescriptorValue(const vk::WriteDescriptorSet& write, DescriptorValue& value) {
+        value = {};
+        value.type = static_cast<VkDescriptorType>(write.descriptorType);
+        switch (value.type) {
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+            if (!write.pImageInfo || write.pBufferInfo || write.pTexelBufferView) {
+                return false;
+            }
+            value.sampler = static_cast<VkSampler>(write.pImageInfo->sampler);
+            value.image_view = static_cast<VkImageView>(write.pImageInfo->imageView);
+            value.image_layout = static_cast<VkImageLayout>(write.pImageInfo->imageLayout);
+            break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            if (!write.pBufferInfo || write.pImageInfo || write.pTexelBufferView) {
+                return false;
+            }
+            value.buffer = static_cast<VkBuffer>(write.pBufferInfo->buffer);
+            value.offset = write.pBufferInfo->offset;
+            value.range = write.pBufferInfo->range;
+            break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+            if (!write.pTexelBufferView || write.pImageInfo || write.pBufferInfo) {
+                return false;
+            }
+            value.texel_view = static_cast<VkBufferView>(*write.pTexelBufferView);
+            break;
+        default:
+            return false;
+        }
+        value.valid = true;
+        return true;
+    }
+
+    static void Invalidate(DescriptorBank& bank) {
+        bank.layout_valid = false;
+        for (auto& binding : bank.bindings) {
+            binding.valid = false;
+        }
+    }
+
+    void InvalidateDescriptorMemo(vk::PipelineBindPoint bind_point) {
+        if (!descriptor_memo) {
+            return;
+        }
+        const size_t index = DescriptorBankIndex(bind_point);
+        if (index == 2) {
+            for (auto& bank : descriptor_memo->banks) {
+                Invalidate(bank);
+            }
+        } else {
+            Invalidate(descriptor_memo->banks[index]);
+        }
+    }
+
+    void NoteDescriptorSkip(u32 binding, vk::PipelineBindPoint bind_point) const {
+        if (!descriptor_memo_diagnostics) {
+            return;
+        }
+        static std::atomic<u32> diagnostic_count{};
+        if (diagnostic_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+            std::fprintf(stderr, "shadPS4 descriptor push memo skipped bindpoint=%u binding=%u\n",
+                         static_cast<u32>(bind_point), binding);
+        }
+    }
+
+    bool MemoPushDescriptorSet(vk::PipelineBindPoint bind_point, vk::PipelineLayout layout,
+                               u32 set, u32 count,
+                               const vk::WriteDescriptorSet* writes) {
+        if (!descriptor_memo) {
+            return false;
+        }
+        const size_t bank_index = DescriptorBankIndex(bind_point);
+        if (bank_index == 2 || set != 0 || count == 0 || count > 128 || !writes || !layout) {
+            InvalidateDescriptorMemo(bind_point);
+            return false;
+        }
+
+        DescriptorBank& bank = descriptor_memo->banks[bank_index];
+        if (!bank.layout_valid || bank.layout != static_cast<VkPipelineLayout>(layout)) {
+            Invalidate(bank);
+            bank.layout = static_cast<VkPipelineLayout>(layout);
+            bank.layout_valid = true;
+        }
+
+        // Preflight the whole call before touching cached state. Unsupported writes retain the
+        // original command and invalidate this bank, so a later supported write cannot skip over
+        // state changed by an extension descriptor or an unknown write shape.
+        for (u32 i = 0; i < count; ++i) {
+            DescriptorValue value{};
+            if (writes[i].sType != vk::StructureType::eWriteDescriptorSet || writes[i].pNext ||
+                writes[i].dstArrayElement != 0 || writes[i].descriptorCount != 1 ||
+                writes[i].dstBinding >= bank.bindings.size() ||
+                !ReadDescriptorValue(writes[i], value)) {
+                Invalidate(bank);
+                return false;
+            }
+        }
+
+        std::array<bool, 128> changed{};
+        u32 changed_count{};
+        for (u32 i = 0; i < count; ++i) {
+            DescriptorValue value{};
+            ReadDescriptorValue(writes[i], value);
+            const u32 binding = writes[i].dstBinding;
+            if (!SameDescriptorValue(bank.bindings[binding], value)) {
+                changed[i] = true;
+                ++changed_count;
+            } else {
+                NoteDescriptorSkip(binding, bind_point);
+            }
+            bank.bindings[binding] = value;
+        }
+        if (changed_count == 0) {
+            return true;
+        }
+
+        auto* filtered = Copy(writes, count);
+        u32 output_count{};
+        for (u32 i = 0; i < count; ++i) {
+            if (!changed[i]) {
+                continue;
+            }
+            const auto& src = writes[i];
+            auto& dst = filtered[output_count++];
+            dst = src;
+            dst.pImageInfo = nullptr;
+            dst.pBufferInfo = nullptr;
+            dst.pTexelBufferView = nullptr;
+            switch (static_cast<VkDescriptorType>(src.descriptorType)) {
+            case VK_DESCRIPTOR_TYPE_SAMPLER:
+            case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+            case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+            case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+            case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+                dst.pImageInfo = Copy(src.pImageInfo, 1);
+                break;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                dst.pBufferInfo = Copy(src.pBufferInfo, 1);
+                break;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+            case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+                dst.pTexelBufferView = Copy(src.pTexelBufferView, 1);
+                break;
+            default:
+                Invalidate(bank);
+                return false;
+            }
+        }
+        Record([=](vk::CommandBuffer c) {
+            c.pushDescriptorSetKHR(bind_point, layout, set, output_count, filtered);
+        });
+        return true;
+    }
+
     struct Command {
         void (*execute)(Command*, vk::CommandBuffer){};
         Command* next{};
@@ -137,6 +401,13 @@ private:
         chunk_index = 0;
         offset = 0;
         large_blocks.clear();
+        pipeline_valid.fill(false);
+        pipelines.fill(vk::Pipeline{});
+        if (descriptor_memo) {
+            for (auto& bank : descriptor_memo->banks) {
+                Invalidate(bank);
+            }
+        }
     }
 
     std::vector<std::unique_ptr<u8[]>> chunks;
@@ -146,6 +417,10 @@ private:
     Command* head{};
     Command* tail{};
     u64 num_commands{};
+    std::array<vk::Pipeline, 2> pipelines{};
+    std::array<bool, 2> pipeline_valid{};
+    std::unique_ptr<DescriptorMemo> descriptor_memo;
+    bool descriptor_memo_diagnostics{};
 };
 
 /// What the scheduler hands out instead of a raw command buffer. In direct mode every call goes
@@ -168,7 +443,11 @@ public:
     // ---------------------------------------------------------------- binding and state
 
     void bindPipeline(vk::PipelineBindPoint bind_point, vk::Pipeline pipeline) const {
-        Do([=](vk::CommandBuffer c) { c.bindPipeline(bind_point, pipeline); });
+        if (list) {
+            list->BindPipeline(bind_point, pipeline);
+        } else {
+            cmdbuf.bindPipeline(bind_point, pipeline);
+        }
     }
 
     void bindIndexBuffer(vk::Buffer buffer, vk::DeviceSize offset, vk::IndexType type) const {
@@ -239,6 +518,9 @@ public:
             return;
         }
         const u32 count = writes.size();
+        if (list->MemoPushDescriptorSet(bind_point, layout, set, count, writes.data())) {
+            return;
+        }
         auto* w = list->Copy(writes.data(), count);
         for (u32 i = 0; i < count; ++i) {
             ASSERT_MSG(!w[i].pNext, "Recorded descriptor writes can't have a pNext chain");
@@ -261,6 +543,7 @@ public:
             cmdbuf.bindDescriptorSets(bind_point, layout, first_set, sets, dynamic_offsets);
             return;
         }
+        list->InvalidateDescriptorMemo(bind_point);
         const u32 ns = sets.size();
         const u32 no = dynamic_offsets.size();
         const auto* s = list->Copy(sets.data(), ns);
@@ -449,6 +732,9 @@ public:
     // ---------------------------------------------------------------- barriers
 
     void pipelineBarrier2(const vk::DependencyInfo& info) const {
+        if (!BarrierStats::OnBarrier()) {
+            return;
+        }
         if (!list) {
             cmdbuf.pipelineBarrier2(info);
             return;
@@ -468,6 +754,9 @@ public:
                          vk::ArrayProxy<const vk::MemoryBarrier> memory_barriers,
                          vk::ArrayProxy<const vk::BufferMemoryBarrier> buffer_barriers,
                          vk::ArrayProxy<const vk::ImageMemoryBarrier> image_barriers) const {
+        if (!BarrierStats::OnBarrier()) {
+            return;
+        }
         if (!list) {
             cmdbuf.pipelineBarrier(src, dst, flags, memory_barriers, buffer_barriers,
                                    image_barriers);

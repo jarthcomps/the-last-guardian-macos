@@ -209,9 +209,31 @@ void DebugStateImpl::PushRegsDumpCompute(uintptr_t base_addr, uintptr_t header_a
     };
 }
 
+std::filesystem::path DebugStateImpl::FrameDumpPath(u32 frame_id) {
+    return Common::FS::GetUserPath(Common::FS::PathType::LogDir) /
+           fmt::format("frame_dump_{}.csv", frame_id);
+}
+
+std::vector<u32> DebugStateImpl::ExportFinishedFrameDumps() {
+    std::vector<u32> exported;
+    if (!should_show_frame_dump.load() || DumpingCurrentReg()) {
+        return exported;
+    }
+    std::unique_lock lock{frame_dump_list_mutex};
+    if (!should_show_frame_dump.exchange(false)) {
+        return exported; // the devtools layer took the dumps first
+    }
+    while (!frame_dump_list.empty()) {
+        const auto& frame = frame_dump_list.back();
+        ExportFrameDump(frame);
+        exported.push_back(frame.frame_id);
+        frame_dump_list.pop_back();
+    }
+    return exported;
+}
+
 void DebugStateImpl::ExportFrameDump(const FrameDump& frame) const {
-    const auto path = Common::FS::GetUserPath(Common::FS::PathType::LogDir) /
-                      fmt::format("frame_dump_{}.csv", frame.frame_id);
+    const auto path = FrameDumpPath(frame.frame_id);
     std::ofstream out{path};
     if (!out) {
         return;

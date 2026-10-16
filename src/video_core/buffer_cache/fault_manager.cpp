@@ -10,6 +10,7 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
 #include "video_core/host_shaders/fault_buffer_process_comp.h"
+#include "video_core/renderer_vulkan/barrier_stats.h"
 
 namespace VideoCore {
 
@@ -78,6 +79,7 @@ FaultManager::FaultManager(const Vulkan::Instance& instance, Vulkan::Scheduler& 
 }
 
 void FaultManager::ProcessFaultBuffer() {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::FaultBuffer};
     if (u64 wait_tick = fault_areas[current_area]) {
         ReadbackStats::WaitScope wait_scope{ReadbackStats::WaitReason::FaultBuffer};
         scheduler.Wait(wait_tick);

@@ -258,6 +258,8 @@ private:
         ComputeProgram cs_state{};
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};
+    /// When the guest last submitted graphics work (SHADPS4_EOP_STATS).
+    std::atomic<u64> last_gfx_submit_ns{};
     u32 num_mapped_queues{1u}; // GFX is always available
 
     VAddr indirect_args_addr{};

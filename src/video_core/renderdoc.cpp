@@ -147,6 +147,16 @@ void RequestScreenshot(const ScreenshotRequest request) {
     }
 }
 
+static ScreenshotBurstCounter screenshot_burst;
+
+u32 RequestScreenshotBurst(const u32 frames) {
+    return screenshot_burst.Start(frames);
+}
+
+std::optional<BurstFrame> ConsumeBurstFrame() {
+    return screenshot_burst.Next();
+}
+
 u32 ConsumeGameOnlyScreenshotRequests() {
     return screenshot_game_only_count.exchange(0, std::memory_order_acq_rel);
 }

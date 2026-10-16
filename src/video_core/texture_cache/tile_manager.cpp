@@ -5,13 +5,16 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/shader_diagnostic_names.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view.h"
+#include "video_core/texture_cache/single_mip_tiling.h"
 #include "video_core/texture_cache/tile_manager.h"
 
 #include "video_core/host_shaders/tiling_comp.h"
 
+#include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 #include <vk_mem_alloc.h>
 
@@ -98,8 +101,9 @@ TileManager::ScratchBuffer TileManager::GetScratchBuffer(u32 size) {
     return {buffer, allocation};
 }
 
-vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler) {
-    const u32 pl_id = u32(info.tile_mode) * NUM_BPPS + std::bit_width(info.num_bits) - 4;
+vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler, bool single_mip) {
+    const u32 pl_id = u32(info.tile_mode) * NUM_BPPS + std::bit_width(info.num_bits) - 4 +
+                      (single_mip ? AmdGpu::NUM_TILE_MODES * NUM_BPPS : 0);
     auto& tiling_pipelines = is_tiler ? tilers : detilers;
     if (auto pipeline = *tiling_pipelines[pl_id]; pipeline != VK_NULL_HANDLE) {
         return pipeline;
@@ -133,12 +137,28 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
     if (is_tiler) {
         defines.emplace_back(fmt::format("IS_TILER=1"));
     }
+    if (single_mip) {
+        defines.emplace_back("SINGLE_MIP=1");
+    }
 
+    const auto diagnostic_name = Vulkan::ShaderDiagnostic::NamesEnabled()
+                                     ? Vulkan::ShaderDiagnostic::HostTilingName(
+                                           magic_enum::enum_name(info.tile_mode), info.num_bits,
+                                           is_tiler, single_mip)
+                                     : std::string{};
     const auto& module = Vulkan::Compile(HostShaders::TILING_COMP,
-                                         vk::ShaderStageFlagBits::eCompute, device, defines);
-    const auto module_name = fmt::format("{}_{} {}", magic_enum::enum_name(info.tile_mode),
-                                         info.num_bits, is_tiler ? "tiler" : "detiler");
+                                         vk::ShaderStageFlagBits::eCompute, device, defines,
+                                         diagnostic_name);
+    const auto module_name = fmt::format("{}_{} {}{}", magic_enum::enum_name(info.tile_mode),
+                                         info.num_bits, is_tiler ? "tiler" : "detiler",
+                                         single_mip ? " single mip" : "");
     LOG_INFO(Render_Vulkan, "Compiling shader {}", module_name);
+    static const bool specialization_diagnostics =
+        SingleMipTilingEnabled(std::getenv("SHADPS4_TILING_DIAGNOSTICS"));
+    if (single_mip && specialization_diagnostics) {
+        // Report once per compiled variant, never per dispatch.
+        LOG_WARNING(Render_Vulkan, "Single-mip tiling specialization compiled: {}", module_name);
+    }
     for (const auto& def : defines) {
         LOG_INFO(Render_Vulkan, "#define {}", def);
     }
@@ -194,7 +214,11 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     scheduler.EndRendering();
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, GetTilingPipeline(info, false));
+    static const bool single_mip_enabled =
+        SingleMipTilingEnabled(std::getenv("SHADPS4_TILING_SINGLE_MIP"));
+    const bool single_mip = single_mip_enabled &&
+        SingleMipTilingSafe(info.guest_size, params.mips[0].size, info.num_bits, params.num_mips);
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, GetTilingPipeline(info, false, single_mip));
 
     const vk::DescriptorBufferInfo tiled_buffer_info{
         .buffer = in_buffer,
@@ -279,7 +303,11 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     const auto cmdbuf = scheduler.CommandBuffer();
     in_image.Download(buffer_copies, temp_buffer, 0, copy_size);
 
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, GetTilingPipeline(info, true));
+    static const bool single_mip_enabled =
+        SingleMipTilingEnabled(std::getenv("SHADPS4_TILING_SINGLE_MIP"));
+    const bool single_mip = single_mip_enabled &&
+        SingleMipTilingSafe(info.guest_size, params.mips[0].size, info.num_bits, params.num_mips);
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, GetTilingPipeline(info, true, single_mip));
 
     const vk::DescriptorBufferInfo tiled_buffer_info{
         .buffer = out_buffer,

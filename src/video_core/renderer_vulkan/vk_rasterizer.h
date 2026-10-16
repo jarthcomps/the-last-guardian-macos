@@ -7,6 +7,7 @@
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
+#include "video_core/renderer_vulkan/fence_deferral.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -75,6 +76,12 @@ public:
     /// Handles readbacks at an end-of-pipe fence and runs `signal` once their data is in guest
     /// memory. With async fences the GPU thread doesn't wait and `signal` runs on another thread;
     /// `must_sync` forces the blocking path (for fences whose signal needs the GPU thread).
+    /// Records the readback copies and submission of every deferred fence, oldest first. The
+    /// command processor also calls this when a ring yields on a wait or when it runs out of
+    /// work: the guest may be blocked on a deferred fence with nothing else ending the pass.
+    void FlushDeferredFences(FlushReason reason = FlushReason::Submit);
+    /// A guest CS partial flush or AcquireMem (SHADPS4_HONOR_CS_FLUSH, fence_deferral.h).
+    void GuestComputeFlush();
     void OnFence(Common::UniqueFunction<void>&& signal, VideoCore::FenceKind kind,
                  bool must_sync = false);
     bool IsMapped(VAddr addr, u64 size);
@@ -135,6 +142,7 @@ private:
     bool BindResources(const Pipeline* pipeline);
 
     void ResetBindings() {
+        CommitHazards();
         for (auto& image_id : bound_images) {
             texture_cache.GetImage(image_id).binding = {};
         }
@@ -169,6 +177,25 @@ private:
     const bool guest_markers_enabled;
     const bool readback_batching;
     const bool async_fences;
+    /// SHADPS4_DEFER_FENCES_IN_PASS=1: fences arriving inside a render pass wait for the pass to
+    /// end before their readback copies and submission are recorded (fence_deferral.h).
+    const bool defer_fences_in_pass;
+    /// SHADPS4_METAL_ENCODER_ORDERING=1: skip command stream barriers inside a render pass
+    /// (fence_deferral.h, ShouldSkipCommandStreamBarrier).
+    const bool trust_encoder_ordering;
+    /// A draw of the open render pass used a shader that writes memory.
+    bool pass_memory_writes{};
+    /// SHADPS4_HONOR_CS_FLUSH=1 (fence_deferral.h, ShouldRecordGuestComputeBarrier).
+    const bool honor_cs_flush;
+    /// SHADPS4_SERIALIZE_DISPATCHES=1, diagnostics: a full barrier after every dispatch, so no two
+    /// dispatches can overlap on the GPU. Tells GPU races between dispatches apart from others.
+    const bool serialize_dispatches;
+    void SerializeAfterDispatch();
+    u64 last_guest_flush_work{~0ULL};
+    DeferredFenceQueue deferred_fences;
+    DeferralStats deferral_stats;
+    u64 deferral_stats_last_ns{};
+    void ReportDeferralStats();
     u64 recorded_work{};
     u64 last_barrier_work{~0ULL};
 
@@ -187,6 +214,14 @@ private:
     const bool full_eop_fences;
     /// Fence kinds that get full fences (cp_full_fence_kinds).
     const u32 full_fence_kinds;
+
+    /// Image ids bound as attachments of the open render pass.
+    boost::container::static_vector<VideoCore::ImageId, AmdGpu::NUM_COLOR_BUFFERS + 1>
+    PassImages() const;
+    /// True when a stage of the pipeline writes buffers or images from shaders.
+    static bool PipelineWritesMemory(const Pipeline* pipeline);
+    /// The asynchronous fence path shared by direct and deferred fences.
+    void ProcessAsyncFence(Common::UniqueFunction<void>&& signal, VideoCore::FenceKind kind);
     /// True if the inputs match the cached lookup; otherwise stores them for the next draw.
     template <typename... Ts>
     bool TargetInputsMatch(CachedTarget& cache, const Ts&... parts);
@@ -220,6 +255,17 @@ private:
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;
     Pipeline::BufferBarriers buffer_barriers;
+    /// Buffer ranges the draw or dispatch being recorded accesses, committed to each buffer's
+    /// BufferHazardTracker once it is recorded (SHADPS4_PRECISE_BUFFER_HAZARDS).
+    struct PendingHazard {
+        VideoCore::Buffer* buffer;
+        u64 begin;
+        u64 end;
+        bool is_write;
+    };
+    boost::container::small_vector<PendingHazard, 16> pending_hazards;
+    bool binding_compute{};
+    void CommitHazards();
     Shader::PushData push_data;
 
     using BufferBindingInfo = std::tuple<VideoCore::BufferId, AmdGpu::Buffer, u64>;

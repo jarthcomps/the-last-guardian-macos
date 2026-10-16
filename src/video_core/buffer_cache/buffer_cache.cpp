@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <execinfo.h>
+#include <string_view>
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <magic_enum/magic_enum.hpp>
@@ -13,6 +17,8 @@
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/prefetch_unmark_policy.h"
+#include "video_core/buffer_cache/gpu_copy.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/buffer_cache/readback_batch.h"
 #include "video_core/buffer_cache/region_definitions.h"
@@ -21,6 +27,29 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/renderer_vulkan/barrier_stats.h"
+
+namespace {
+/// SHADPS4_CP_FAULT_TRACE=1 (diagnostics): the upload the command processor was doing when it
+/// faulted on a page with a download in flight.
+struct UploadContext {
+    VAddr buffer_addr;
+    u64 buffer_size;
+    VAddr device_addr;
+    u32 size;
+    bool is_written;
+    bool is_texel;
+};
+thread_local const UploadContext* current_upload = nullptr;
+
+bool CpFaultTrace() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_CP_FAULT_TRACE");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    return enabled;
+}
+} // namespace
 
 namespace VideoCore {
 
@@ -37,6 +66,10 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       memory{Core::Memory::Instance()}, texture_cache{texture_cache_},
       stream_reuse_enabled{EmulatorSettings.IsReadbackStreamReuseEnabled()},
       prefetch_mode{EmulatorSettings.GetReadbackPrefetchMode()},
+      strict_prefetch_unmark{[] {
+          const char* value = std::getenv("SHADPS4_PREFETCH_STRICT_UNMARK");
+          return value != nullptr && std::string_view{value} == "1";
+      }()},
       async_guest_faults{EmulatorSettings.IsReadbackAsyncGuestFaultsEnabled()},
       prefetch_lifetime{EmulatorSettings.GetReadbackPrefetchLifetime()},
       fault_manager{instance, scheduler, *this, CACHING_PAGEBITS, CACHING_NUMPAGES},
@@ -126,6 +159,12 @@ void BufferCache::FinishFaultReadback(VAddr device_addr, u64 size, bool is_write
                 bytes += DownloadBufferMemory<false>(other, start, end - start).bytes;
             }
         });
+        if (strict_prefetch_unmark && IsDownloadInFlight(page_start, page_size)) {
+            // Prefetches of this page are still in flight and keep it protected; the faulting
+            // access needs it now, so let them land first.
+            WaitForDownloads(page_start, page_size);
+            ApplyPendingUnmarks();
+        }
         // Downloads of this page have landed by now, so a mark with no GPU write behind it is
         // stale.
         const bool still_marked = memory_tracker->IsRegionGpuModified(page_start, page_size);
@@ -279,6 +318,9 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
             IsDownloadInFlight(page_start, page_size)) {
             // The page has nothing left to download: an asynchronous readback of it was already
             // submitted. Wait for that one to land instead of finishing all GPU work.
+            if (CpFaultTrace() && from_cp) {
+                TraceCpInflightFault(device_addr, size, is_write, page_start, page_size);
+            }
             WaitForDownloads(page_start, page_size);
             ApplyPendingUnmarks();
         }
@@ -400,6 +442,7 @@ Common::UniqueFunction<void> BufferCache::RecordDownloadCopies(Buffer& buffer, V
                                                                u64 size, DownloadCopies&& copies,
                                                                u64 total_size_bytes,
                                                                bool deferred_unmark) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::Download};
     const auto [download, offset] = download_buffer.Map(total_size_bytes);
     for (auto& copy : copies) {
         // Modify copies to have the staging offset in mind
@@ -424,11 +467,23 @@ Common::UniqueFunction<void> BufferCache::RecordDownloadCopies(Buffer& buffer, V
         .pBufferMemoryBarriers = &pre_barrier,
     });
     cmdbuf.copyBuffer(buffer.buffer, download_buffer.Handle(), copies);
+    if (BufferBarrierPolicy::precise_hazards) {
+        // The copy reads these ranges: a later dispatch writing them must wait for it.
+        const u64 epoch = Vulkan::BarrierStats::SyncEpoch();
+        for (const auto& copy : copies) {
+            buffer.hazards.Commit(epoch, copy.srcOffset, copy.srcOffset + copy.size, false);
+        }
+    }
     u64 inflight_id = 0;
     if (deferred_unmark) {
         std::scoped_lock lk{pending_unmarks_mutex};
         inflight_id = ++next_inflight_id;
-        inflight_downloads.push_back({device_addr, size, inflight_id});
+        InflightDownload inflight{device_addr, size, inflight_id, {}};
+        for (const auto& copy : copies) {
+            const VAddr copy_addr = buffer.CpuAddr() + copy.srcOffset;
+            inflight.copies.emplace_back(copy_addr, copy_addr + copy.size);
+        }
+        inflight_downloads.push_back(std::move(inflight));
     }
     return [this, copies = std::move(copies), download = download, offset = offset,
             buffer_addr = buffer.CpuAddr(), device_addr, size, deferred_unmark, inflight_id] {
@@ -476,6 +531,50 @@ bool BufferCache::IsCpuCopyCurrent(VAddr device_addr, u64 size) {
     }
     return !gpu_modified_ranges.Intersects(device_addr, size) &&
            !IsDownloadInFlight(device_addr, size);
+}
+
+void BufferCache::TraceCpInflightFault(VAddr device_addr, u64 size, bool is_write,
+                                       VAddr page_start, u64 page_size) {
+    static std::atomic<u32> num_logged{0};
+    if (num_logged.fetch_add(1, std::memory_order_relaxed) >= 40) {
+        return;
+    }
+    std::string downloads;
+    {
+        std::scoped_lock lk{pending_unmarks_mutex};
+        for (const auto& download : inflight_downloads) {
+            if (download.addr < page_start + page_size && page_start < download.addr + download.size) {
+                bool hits_read = false;
+                for (const auto& [copy_start, copy_end] : download.copies) {
+                    hits_read |= copy_start < device_addr + size && device_addr < copy_end;
+                }
+                downloads += fmt::format(" [{:#x}+{:#x} id {} of {} copies {} hits_read {}]",
+                                         download.addr, download.size, download.id,
+                                         next_inflight_id, download.copies.size(), hits_read);
+            }
+        }
+    }
+    std::string upload = "none";
+    if (current_upload) {
+        upload = fmt::format("buffer {:#x}+{:#x} range {:#x}+{:#x} written {} texel {}",
+                             current_upload->buffer_addr, current_upload->buffer_size,
+                             current_upload->device_addr, current_upload->size,
+                             current_upload->is_written, current_upload->is_texel);
+    }
+    void* frames[24];
+    const int num_frames = backtrace(frames, 24);
+    std::string stack;
+    for (int i = 2; i < num_frames; ++i) {
+        stack += fmt::format(" {}", frames[i]);
+    }
+    LOG_INFO(Render_Vulkan,
+             "CP fault trace: {} {:#x}+{:#x} page cpu {} gpu {} gpu_ranges {} upload {} "
+             "in flight:{} anchor {} stack:{}",
+             is_write ? "write" : "read", device_addr, size,
+             memory_tracker->IsRegionCpuModified(page_start, page_size),
+             memory_tracker->IsRegionGpuModified(page_start, page_size),
+             gpu_modified_ranges.Intersects(page_start, page_size), upload, downloads,
+             reinterpret_cast<void*>(&CpFaultTrace), stack);
 }
 
 bool BufferCache::IsDownloadInFlight(VAddr device_addr, u64 size) {
@@ -611,6 +710,29 @@ void BufferCache::UnmarkSettledPages(VAddr device_addr, u64 size) {
     gpu_modified_ranges.ForEachInRange(start, end - start, [&](VAddr range_start, VAddr range_end) {
         settled.Subtract(range_start, range_end - range_start);
     });
+    if (strict_prefetch_unmark) {
+        // SHADPS4_PREFETCH_STRICT_UNMARK=1: unprotecting a page while a newer download of it is
+        // still in flight lets the game read the older data that landed before (Trico's feathers
+        // then use a stale simulation state for a frame), or write the page and have the newer
+        // download overwrite that write when it lands. Such pages stay protected; the newer
+        // download unprotects them when it lands, and a fault on them waits for it
+        // (FinishFaultReadback).
+        std::vector<AddressRange> in_flight;
+        {
+            std::scoped_lock lk{pending_unmarks_mutex};
+            for (const auto& download : inflight_downloads) {
+                in_flight.push_back({download.addr, download.addr + download.size});
+            }
+        }
+        for (const AddressRange& page :
+             UnmarksWaitingForNewerDownloads({{start, end}}, in_flight, TRACKER_BYTES_PER_PAGE)) {
+            for (VAddr p = page.begin; p < page.end; p += TRACKER_BYTES_PER_PAGE) {
+                if (IsDownloadInFlight(p, TRACKER_BYTES_PER_PAGE)) {
+                    settled.Subtract(p, TRACKER_BYTES_PER_PAGE);
+                }
+            }
+        }
+    }
     // Protection is per page: a page partly outside the settled ranges stays protected.
     settled.ForEach([&](VAddr range_start, VAddr range_end) {
         const VAddr page_start = Common::AlignUp(range_start, TRACKER_BYTES_PER_PAGE);
@@ -779,6 +901,7 @@ void BufferCache::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gd
 }
 
 void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::CopyBuffer};
     if (!dst_gds && !IsRegionGpuModified(dst, num_bytes)) {
         if (!src_gds && !IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {
@@ -871,6 +994,124 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         .bufferMemoryBarrierCount = 2,
         .pBufferMemoryBarriers = buf_barriers_after,
     });
+}
+
+bool BufferCache::CopyBufferGpu(VAddr dst, VAddr src, u32 num_bytes,
+                                u32 source_texel_descriptor_size) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::CopyBufferGpu};
+    if (num_bytes == 0 || dst == 0 || src == 0 ||
+        dst > std::numeric_limits<VAddr>::max() - num_bytes ||
+        src > std::numeric_limits<VAddr>::max() - num_bytes ||
+        (src < dst + num_bytes && dst < src + num_bytes)) {
+        return false;
+    }
+    const auto sync_plan = PlanGpuCopySynchronization(num_bytes, source_texel_descriptor_size);
+    if (!sync_plan || src > std::numeric_limits<VAddr>::max() - sync_plan->source_size ||
+        memory->ClampRangeSize(src, sync_plan->source_size) != sync_plan->source_size) {
+        return false;
+    }
+    // The original storage-buffer binding clamps descriptors at guest mapping boundaries.
+    // Leave partial/unmapped ranges to that path instead of creating a larger GPU destination.
+    if (!CanCopyGpuBufferRanges(0, memory->ClampRangeSize(src, num_bytes), 0,
+                                memory->ClampRangeSize(dst, num_bytes), num_bytes, false)) {
+        return false;
+    }
+
+    // Creating the second range can merge and delete the first range's BufferId. Resolve both
+    // ranges first, then refresh both ids before retaining references.
+    (void)FindBuffer(src, sync_plan->source_size);
+    (void)FindBuffer(dst, num_bytes);
+    const BufferId src_id = FindBuffer(src, sync_plan->source_size);
+    const BufferId dst_id = FindBuffer(dst, num_bytes);
+    Buffer& src_buffer = slot_buffers[src_id];
+    Buffer& dst_buffer = slot_buffers[dst_id];
+
+    const u64 src_offset = src_buffer.Offset(src);
+    const u64 dst_offset = dst_buffer.Offset(dst);
+    if (src_offset > src_buffer.SizeBytes() ||
+        sync_plan->source_size > src_buffer.SizeBytes() - src_offset ||
+        !CanCopyGpuBufferRanges(src_offset, src_buffer.SizeBytes(), dst_offset,
+                                dst_buffer.SizeBytes(), num_bytes,
+                                src_buffer.Handle() == dst_buffer.Handle())) {
+        return false;
+    }
+
+    SynchronizeGpuCopyBindings(
+        *sync_plan,
+        [&](u32 size, bool texel) { SynchronizeBuffer(src_buffer, src, size, false, texel); },
+        [&](u32 size) { SynchronizeBuffer(dst_buffer, dst, size, true, false); },
+        [&](u32 size) { texture_cache.InvalidateMemoryFromGPU(dst, size); });
+
+    const vk::BufferCopy region = {
+        .srcOffset = src_offset,
+        .dstOffset = dst_offset,
+        .size = num_bytes,
+    };
+    const vk::BufferMemoryBarrier2 barriers_before[2] = {
+        {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .buffer = dst_buffer.Handle(),
+            .offset = dst_buffer.Offset(dst),
+            .size = num_bytes,
+        },
+        {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .buffer = src_buffer.Handle(),
+            .offset = src_buffer.Offset(src),
+            .size = num_bytes,
+        },
+    };
+
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = 2,
+        .pBufferMemoryBarriers = barriers_before,
+    });
+    cmdbuf.copyBuffer(src_buffer.Handle(), dst_buffer.Handle(), region);
+
+    const vk::BufferMemoryBarrier2 barriers_after[2] = {
+        {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .buffer = dst_buffer.Handle(),
+            .offset = dst_buffer.Offset(dst),
+            .size = num_bytes,
+        },
+        {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .buffer = src_buffer.Handle(),
+            .offset = src_buffer.Offset(src),
+            .size = num_bytes,
+        },
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = 2,
+        .pBufferMemoryBarriers = barriers_after,
+    });
+
+    gpu_modified_ranges.Add(dst, num_bytes);
+    ReadbackStats::NoteMutation(ReadbackStats::Mutation::BufferGpuMark);
+    if (ReadbackStats::IsEnabled()) {
+        if (auto* events = ReadbackStats::CpEvents()) {
+            events->gpu_marked_bytes += num_bytes;
+        }
+        ReadbackStats::RecordWriter(dst, num_bytes, 0, ReadbackStats::WriterCopy);
+    }
+    return true;
 }
 
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written,
@@ -1065,6 +1306,7 @@ BufferCache::OverlapResult BufferCache::ResolveOverlaps(VAddr device_addr, u32 w
 
 void BufferCache::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
                               bool accumulate_stream_score) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::JoinOverlap};
     Buffer& new_buffer = slot_buffers[new_buffer_id];
     Buffer& overlap = slot_buffers[overlap_id];
     if (accumulate_stream_score) {
@@ -1197,6 +1439,14 @@ void BufferCache::ChangeRegister(BufferId buffer_id) {
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
                                     bool is_texel_buffer) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::Upload};
+    const UploadContext upload_context{buffer.CpuAddr(), buffer.SizeBytes(), device_addr,
+                                       size,            is_written,         is_texel_buffer};
+    const UploadContext* const outer_upload = current_upload;
+    current_upload = &upload_context;
+    SCOPE_EXIT {
+        current_upload = outer_upload;
+    };
     ReadbackStats::CpPhase phase{"buffer upload (SynchronizeBuffer, holds region locks)"};
     ReadbackStats::CpTimer timer{ReadbackStats::CpTime::Upload};
     boost::container::small_vector<vk::BufferCopy, 4> copies;
@@ -1340,6 +1590,11 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
     }
     auto& tile_manager = texture_cache.GetTileManager();
     tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, copy_size);
+    if (BufferBarrierPolicy::precise_hazards) {
+        // The tiling dispatch writes the range without a barrier after it.
+        buffer.hazards.Commit(Vulkan::BarrierStats::SyncEpoch(), buf_offset, buf_offset + copy_size,
+                              true);
+    }
     return true;
 }
 
@@ -1355,6 +1610,7 @@ void BufferCache::SynchronizeBuffersInRange(VAddr device_addr, u64 size) {
 }
 
 void BufferCache::WriteDataBuffer(Buffer& buffer, VAddr address, const void* value, u32 num_bytes) {
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::WriteData};
     vk::BufferCopy copy = {
         .srcOffset = 0,
         .dstOffset = buffer.Offset(address),

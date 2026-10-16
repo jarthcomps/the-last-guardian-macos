@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <array>
+#include <utility>
+
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -14,6 +17,7 @@
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
 #include "video_core/renderer_vulkan/vk_command_recorder.h"
+#include "video_core/renderer_vulkan/vk_fence_submission.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 
@@ -381,6 +385,42 @@ public:
         return render_state;
     }
 
+    /// When the priority thread last started an operation, i.e. right after the GPU reached the
+    /// tick it waited for (diagnostics, SHADPS4_EOP_STATS).
+    static u64 LastPriorityOperationStartNs() noexcept {
+        return last_priority_op_start_ns.load(std::memory_order_relaxed);
+    }
+
+    /// Returns true while a render pass is open.
+    [[nodiscard]] bool IsRendering() const noexcept {
+        return is_rendering;
+    }
+
+    /// The flag behind IsRendering() (BarrierStats::rendering).
+    [[nodiscard]] const bool* RenderingFlag() const noexcept {
+        return &is_rendering;
+    }
+
+    /// Render passes ended per command processor time category (CpTime, valid with
+    /// readback_stats_enabled), and draws of the ended passes. Diagnostics for pass merging.
+    struct PassEndCounts {
+        std::array<u32, 64> by_category{};
+        u32 passes{};
+        u32 draws{};
+    };
+    PassEndCounts TakePassEndCounts() noexcept {
+        return std::exchange(pass_end_counts, {});
+    }
+    void NoteDrawInPass() noexcept {
+        ++pass_draws;
+    }
+
+    /// Returns true when a render pass with exactly this state is open, so BeginRendering with
+    /// it would continue the pass instead of starting a new one.
+    [[nodiscard]] bool IsRenderingState(const RenderState& state) const noexcept {
+        return is_rendering && render_state == state;
+    }
+
     /// Returns the current pipeline dynamic state tracking.
     DynamicState& GetDynamicState() {
         return dynamic_state;
@@ -414,6 +454,11 @@ public:
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {
         return master_semaphore.CurrentTick();
+    }
+
+    [[nodiscard]] bool CanReuseSubmittedFenceTick() const noexcept {
+        return CanReuseSubmittedTick(use_encoder, direct_active, is_rendering,
+                                    current_list->Empty());
     }
 
     /// Returns true when a tick has been triggered by the GPU.
@@ -549,6 +594,9 @@ private:
     u64 last_timing_end{};
     RenderState render_state;
     bool is_rendering = false;
+    static inline std::atomic<u64> last_priority_op_start_ns{};
+    PassEndCounts pass_end_counts{};
+    u32 pass_draws{};
     tracy::VkCtxScope* profiler_scope{};
 };
 

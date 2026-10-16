@@ -209,6 +209,41 @@ TEST(SettingTest, NoGameSpecificDefaultAndGlobalAgree) {
 
 // tests for default settings
 
+TEST_F(EmulatorSettingsTest, ReadbackGpuTimingDefaultsPreserveLegacyProfiling) {
+    EXPECT_FALSE(temp_settings->IsReadbackStatsEnabled());
+    EXPECT_TRUE(temp_settings->IsReadbackStatsGpuTimingEnabled());
+    temp_settings->Save();
+    json config = ReadJson(ConfigJson());
+    config["GPU"].erase("readback_stats_gpu_timing_enabled");
+    config["GPU"]["readback_stats_enabled"] = true;
+    WriteJson(ConfigJson(), config);
+    temp_settings->Load();
+    EXPECT_TRUE(temp_settings->IsReadbackStatsEnabled());
+    EXPECT_TRUE(temp_settings->IsReadbackStatsGpuTimingEnabled());
+}
+
+TEST_F(EmulatorSettingsTest, ReadbackCpuOnlyProfilingRoundTrips) {
+    temp_settings->SetReadbackStatsEnabled(true);
+    temp_settings->SetReadbackStatsGpuTimingEnabled(false);
+    temp_settings->Save();
+    temp_settings->SetReadbackStatsGpuTimingEnabled(true);
+    temp_settings->Load();
+    EXPECT_TRUE(temp_settings->IsReadbackStatsEnabled());
+    EXPECT_FALSE(temp_settings->IsReadbackStatsGpuTimingEnabled());
+}
+
+TEST_F(EmulatorSettingsTest, ReadbackGpuTimingPerGameOverrideLeavesCountersEnabled) {
+    temp_settings->SetReadbackStatsEnabled(true);
+    json game;
+    game["GPU"]["readback_stats_gpu_timing_enabled"] = false;
+    WriteJson(GameConfig("CUSA03745"), game);
+    ASSERT_TRUE(temp_settings->Load("CUSA03745"));
+    EXPECT_TRUE(temp_settings->IsReadbackStatsEnabled());
+    EXPECT_FALSE(temp_settings->IsReadbackStatsGpuTimingEnabled());
+    temp_settings->ClearGameSpecificOverrides();
+    EXPECT_TRUE(temp_settings->IsReadbackStatsGpuTimingEnabled());
+}
+
 TEST_F(EmulatorSettingsTest, SetDefaultValuesResetsAllGroupsToFactory) {
     // set random values
     temp_settings->SetNeo(true);
@@ -840,4 +875,19 @@ TEST_F(EmulatorSettingsTest, DestructorSavesAfterSuccessfulLoad) {
     EmulatorSettingsImpl::SetInstance(verify);
     verify->Load();
     EXPECT_EQ(verify->GetWindowWidth(), 2560);
+}
+
+TEST_F(EmulatorSettingsTest, MutedVolumeRoundTripsAndRestores) {
+    const int original = temp_settings->GetVolumeSlider();
+    temp_settings->SetVolumeSlider(0);
+    temp_settings->Save();
+    EXPECT_EQ(ReadJson(ConfigJson())["General"]["volume_slider"], 0);
+    temp_settings->SetVolumeSlider(original);
+    temp_settings->Load();
+    EXPECT_EQ(temp_settings->GetVolumeSlider(), 0);
+    temp_settings->SetVolumeSlider(original);
+    temp_settings->Save();
+    temp_settings->SetVolumeSlider(0);
+    temp_settings->Load();
+    EXPECT_EQ(temp_settings->GetVolumeSlider(), original);
 }

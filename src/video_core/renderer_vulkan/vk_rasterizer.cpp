@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <magic_enum/magic_enum.hpp>
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -17,6 +18,8 @@
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/renderer_vulkan/barrier_stats.h"
+#include "video_core/texture_cache/image_barrier_policy.h"
 
 #ifdef MemoryBarrier
 #undef MemoryBarrier
@@ -46,6 +49,22 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()},
       readback_batching{EmulatorSettings.IsReadbackBatchingEnabled()},
       async_fences{EmulatorSettings.IsReadbackAsyncFencesEnabled()},
+      defer_fences_in_pass{[] {
+          const char* value = std::getenv("SHADPS4_DEFER_FENCES_IN_PASS");
+          return value != nullptr && std::string_view{value} == "1";
+      }()},
+      trust_encoder_ordering{[] {
+          const char* value = std::getenv("SHADPS4_METAL_ENCODER_ORDERING");
+          return value != nullptr && std::string_view{value} == "1";
+      }()},
+      honor_cs_flush{[] {
+          const char* value = std::getenv("SHADPS4_HONOR_CS_FLUSH");
+          return value != nullptr && std::string_view{value} == "1";
+      }()},
+      serialize_dispatches{[] {
+          const char* value = std::getenv("SHADPS4_SERIALIZE_DISPATCHES");
+          return value != nullptr && std::string_view{value} == "1";
+      }()},
       rt_reuse_enabled{EmulatorSettings.IsRtLookupReuseEnabled()},
       encoder_debug{EmulatorSettings.GetCpEncoderDebug()},
       full_eop_fences{EmulatorSettings.GetCpEncoderMode() >= 2 || (encoder_debug & 4) != 0},
@@ -63,9 +82,56 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
     //         EmulatorSettings.IsShaderBackingVerifyEnabled());
     // }
     scheduler.SetEncoderMode(EmulatorSettings.GetCpEncoderMode());
+    if (defer_fences_in_pass) {
+        LOG_INFO(Render_Vulkan, "Fences inside render passes are deferred to the pass end "
+                                "(SHADPS4_DEFER_FENCES_IN_PASS)");
+        std::fputs("DEFER_FENCES_IN_PASS enabled\n", stderr);
+    }
+    if (trust_encoder_ordering) {
+        LOG_INFO(Render_Vulkan, "Command stream barriers inside render passes are skipped "
+                                "(SHADPS4_METAL_ENCODER_ORDERING)");
+        std::fputs("METAL_ENCODER_ORDERING enabled\n", stderr);
+    }
+    {
+        const char* waw = std::getenv("SHADPS4_WRITE_AFTER_WRITE_BARRIERS");
+        VideoCore::BufferBarrierPolicy::write_after_write =
+            waw != nullptr && std::string_view{waw} == "1";
+        if (VideoCore::BufferBarrierPolicy::write_after_write) {
+            std::fputs("WRITE_AFTER_WRITE_BARRIERS enabled\n", stderr);
+        }
+        const char* rar = std::getenv("SHADPS4_SKIP_READ_READ_BARRIERS");
+        VideoCore::BufferBarrierPolicy::skip_read_after_read =
+            rar != nullptr && std::string_view{rar} == "1";
+        if (VideoCore::BufferBarrierPolicy::skip_read_after_read) {
+            std::fputs("SKIP_READ_READ_BARRIERS enabled\n", stderr);
+        }
+        const char* precise = std::getenv("SHADPS4_PRECISE_BUFFER_HAZARDS");
+        VideoCore::BufferBarrierPolicy::precise_hazards =
+            precise != nullptr &&
+            (std::string_view{precise} == "1" || std::string_view{precise} == "2");
+        VideoCore::BufferBarrierPolicy::precise_draw_hazards =
+            precise != nullptr && std::string_view{precise} == "2";
+        if (VideoCore::BufferBarrierPolicy::precise_hazards) {
+            std::fputs("PRECISE_BUFFER_HAZARDS enabled\n", stderr);
+        }
+        BarrierStats::rendering = scheduler.RenderingFlag();
+        const char* image_rar = std::getenv("SHADPS4_SKIP_IMAGE_READ_READ_BARRIERS");
+        VideoCore::ImageBarrierPolicy::skip_read_after_read =
+            image_rar != nullptr && std::string_view{image_rar} == "1";
+        if (VideoCore::ImageBarrierPolicy::skip_read_after_read) {
+            std::fputs("SKIP_IMAGE_READ_READ_BARRIERS enabled\n", stderr);
+        }
+    }
+    if (honor_cs_flush) {
+        std::fputs("HONOR_CS_FLUSH enabled\n", stderr);
+    }
+    if (serialize_dispatches) {
+        std::fputs("SERIALIZE_DISPATCHES enabled (diagnostics)\n", stderr);
+    }
     memory->SetRasterizer(this);
     VideoCore::ReadbackStats::Start();
-    if (VideoCore::ReadbackStats::IsEnabled()) {
+    if (VideoCore::ReadbackStats::IsEnabled() &&
+        EmulatorSettings.IsReadbackStatsGpuTimingEnabled()) {
         scheduler.EnableGpuTiming();
     }
 }
@@ -75,6 +141,14 @@ Rasterizer::~Rasterizer() {
 }
 
 void Rasterizer::CpSync() {
+    // PfpSyncMe orders earlier shader writes before indirect argument reads. Inside a render
+    // pass the same encoder ordering argument as for command stream barriers applies.
+    if (ShouldSkipCommandStreamBarrier(trust_encoder_ordering, scheduler.IsRendering(),
+                                       pass_memory_writes)) {
+        ++deferral_stats.cp_syncs_skipped;
+        ReportDeferralStats();
+        return;
+    }
     scheduler.EndRendering();
     auto cmdbuf = scheduler.CommandBuffer();
 
@@ -88,6 +162,7 @@ void Rasterizer::CpSync() {
 }
 
 bool Rasterizer::CommandStreamBarrier(u64 producer_tick) {
+    BarrierStats::Scope barrier_scope{BarrierStats::Source::CommandStream};
     if (scheduler.IsFree(producer_tick)) {
         // The producer already finished on the GPU, nothing left to order against.
         return false;
@@ -97,7 +172,17 @@ bool Rasterizer::CommandStreamBarrier(u64 producer_tick) {
         // later command comes after it, so it already orders this wait too.
         return false;
     }
+    if (ShouldSkipCommandStreamBarrier(trust_encoder_ordering, scheduler.IsRendering(),
+                                       pass_memory_writes)) {
+        ++deferral_stats.barriers_skipped;
+        ReportDeferralStats();
+        return false;
+    }
+    if (trust_encoder_ordering && scheduler.IsRendering()) {
+        ++deferral_stats.barriers_kept_memory_writes;
+    }
     last_barrier_work = recorded_work;
+    FlushDeferredFences(FlushReason::Barrier);
     scheduler.EndRendering();
     const vk::MemoryBarrier2 barrier = {
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -503,6 +588,20 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::RenderTargets};
         return BeginRendering(pipeline);
     }();
+    const bool new_pass = !scheduler.IsRenderingState(state);
+    const bool writes_memory = PipelineWritesMemory(pipeline);
+    if (!deferred_fences.Empty()) {
+        // The pass the fences waited for ends here, or this draw may write memory they read.
+        if (new_pass) {
+            FlushDeferredFences(FlushReason::PassChange);
+        } else if (writes_memory) {
+            FlushDeferredFences(FlushReason::MemoryWrite);
+        }
+    }
+    if (new_pass) {
+        pass_memory_writes = false;
+    }
+    pass_memory_writes |= writes_memory;
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::VertexIndex};
@@ -514,7 +613,16 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::Descriptors};
-        pipeline->BindResources(set_writes, buffer_barriers, push_data);
+        // The buffer barriers of a draw describe compute or transfer writes recorded before
+        // the open render encoder, which Metal already orders (fence_deferral.h).
+        const bool skip_barriers =
+            !buffer_barriers.empty() && !new_pass &&
+            ShouldSkipCommandStreamBarrier(trust_encoder_ordering, scheduler.IsRendering(),
+                                           pass_memory_writes);
+        if (skip_barriers) {
+            ++deferral_stats.draw_barriers_skipped;
+        }
+        pipeline->BindResources(set_writes, buffer_barriers, push_data, skip_barriers);
     }
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::DynamicState};
@@ -541,6 +649,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     DebugState.IncDrawCall();
     VideoCore::ReadbackStats::OnDraw();
+    scheduler.NoteDrawInPass();
     ++recorded_work;
     if (shader_call.Active()) {
         shader_call.Record(VideoCore::ReadbackStats::ShaderCallKind::Draw, *pipeline);
@@ -594,6 +703,20 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::RenderTargets};
         return BeginRendering(pipeline);
     }();
+    const bool new_pass = !scheduler.IsRenderingState(state);
+    const bool writes_memory = PipelineWritesMemory(pipeline);
+    if (!deferred_fences.Empty()) {
+        // The pass the fences waited for ends here, or this draw may write memory they read.
+        if (new_pass) {
+            FlushDeferredFences(FlushReason::PassChange);
+        } else if (writes_memory) {
+            FlushDeferredFences(FlushReason::MemoryWrite);
+        }
+    }
+    if (new_pass) {
+        pass_memory_writes = false;
+    }
+    pass_memory_writes |= writes_memory;
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::VertexIndex};
@@ -625,7 +748,16 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::Descriptors};
-        pipeline->BindResources(set_writes, buffer_barriers, push_data);
+        // The buffer barriers of a draw describe compute or transfer writes recorded before
+        // the open render encoder, which Metal already orders (fence_deferral.h).
+        const bool skip_barriers =
+            !buffer_barriers.empty() && !new_pass &&
+            ShouldSkipCommandStreamBarrier(trust_encoder_ordering, scheduler.IsRendering(),
+                                           pass_memory_writes);
+        if (skip_barriers) {
+            ++deferral_stats.draw_barriers_skipped;
+        }
+        pipeline->BindResources(set_writes, buffer_barriers, push_data, skip_barriers);
     }
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::DynamicState};
@@ -708,9 +840,15 @@ void Rasterizer::DispatchDirect() {
     };
 
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+    FlushDeferredFences(FlushReason::Dispatch);
     if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
         record_dispatch(VideoCore::ReadbackStats::ShaderCallKind::DispatchHle,
                         cs_program.NumWorkgroups());
+        // A handled shader can record transfer commands. Subsequent producer waits must not
+        // reuse a barrier from before that work, even when no native dispatch was recorded.
+        ++recorded_work;
+        mutation.Finish(VideoCore::ReadbackStats::CallClass::Dispatch);
+        ResetBindings();
         return;
     }
 
@@ -722,6 +860,7 @@ void Rasterizer::DispatchDirect() {
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::Descriptors};
+        FlushDeferredFences(FlushReason::Dispatch);
         scheduler.EndRendering();
         pipeline->BindResources(set_writes, buffer_barriers, push_data);
     }
@@ -729,6 +868,7 @@ void Rasterizer::DispatchDirect() {
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    SerializeAfterDispatch();
     record_dispatch(VideoCore::ReadbackStats::ShaderCallKind::Dispatch, cs_program.NumWorkgroups());
     DebugState.IncDispatch();
     VideoCore::ReadbackStats::OnDispatch();
@@ -768,9 +908,13 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
                                           vk::PipelineStageFlagBits2::eDrawIndirect)) {
         buffer_barriers.emplace_back(*barrier);
     }
+    if (VideoCore::BufferBarrierPolicy::precise_hazards) {
+        pending_hazards.push_back({buffer, base, base + size, false});
+    }
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::Descriptors};
+        FlushDeferredFences(FlushReason::Dispatch);
         scheduler.EndRendering();
         pipeline->BindResources(set_writes, buffer_barriers, push_data);
     }
@@ -778,6 +922,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
+    SerializeAfterDispatch();
     if (shader_call.Active()) {
         shader_call.Record(VideoCore::ReadbackStats::ShaderCallKind::DispatchIndirect, *pipeline);
         shader_call.call.threads_per_group = u32{cs_program.num_thread_x.full} *
@@ -792,6 +937,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 }
 
 u64 Rasterizer::Flush() {
+    FlushDeferredFences();
     const u64 current_tick = scheduler.CurrentTick();
     SubmitInfo info{};
     scheduler.Flush(info);
@@ -799,6 +945,7 @@ u64 Rasterizer::Flush() {
 }
 
 void Rasterizer::Finish() {
+    FlushDeferredFences();
     scheduler.Finish();
 }
 
@@ -807,6 +954,7 @@ u64 Rasterizer::CurrentTick() const noexcept {
 }
 
 void Rasterizer::OnSubmit() {
+    FlushDeferredFences();
     VideoCore::ReadbackStats::OnSubmit();
     if (encoder_debug & 2) {
         scheduler.SyncEncoder();
@@ -821,6 +969,19 @@ void Rasterizer::OnSubmit() {
     buffer_cache.RunGarbageCollector();
 }
 
+void Rasterizer::CommitHazards() {
+    if (pending_hazards.empty()) {
+        return;
+    }
+    const u64 epoch = BarrierStats::SyncEpoch();
+    for (const auto& access : pending_hazards) {
+        if (!access.buffer->is_deleted) {
+            access.buffer->hazards.Commit(epoch, access.begin, access.end, access.is_write);
+        }
+    }
+    pending_hazards.clear();
+}
+
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::ComputeChecks};
@@ -833,6 +994,8 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     set_write_index = 0;
     set_writes.clear();
     buffer_barriers.clear();
+    pending_hazards.clear();
+    binding_compute = pipeline->IsCompute();
     buffer_infos.clear();
     image_infos.clear();
 
@@ -1123,13 +1286,28 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             }
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
+            const bool precise = VideoCore::BufferBarrierPolicy::precise_hazards;
+            const bool hazard =
+                !precise ||
+                (!binding_compute && !VideoCore::BufferBarrierPolicy::precise_draw_hazards) ||
+                vk_buffer->hazards.Hazard(BarrierStats::SyncEpoch(), offset, offset + size,
+                                          desc.is_written);
             if (auto barrier =
                     vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
                                                           : vk::AccessFlagBits2::eShaderRead,
                                           vk::PipelineStageFlagBits2::eAllCommands)) {
-                VideoCore::ReadbackStats::NoteMutation(
-                    VideoCore::ReadbackStats::Mutation::BufferBarrier);
-                buffer_barriers.emplace_back(*barrier);
+                if (hazard) {
+                    VideoCore::ReadbackStats::NoteMutation(
+                        VideoCore::ReadbackStats::Mutation::BufferBarrier);
+                    buffer_barriers.emplace_back(*barrier);
+                } else {
+                    // Nothing this dispatch touches was accessed since the last full barrier.
+                    VideoCore::BufferBarrierPolicy::precise_hazards_elided.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+            }
+            if (precise) {
+                pending_hazards.push_back({vk_buffer, offset, offset + size, desc.is_written});
             }
             if (desc.is_written && desc.is_formatted) {
                 VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::BufGpuMark};
@@ -1524,12 +1702,19 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
 }
 
 void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
+    if (scheduler.IsRendering()) {
+        ++deferral_stats.dma_fills_in_pass;
+    }
     buffer_cache.FillBuffer(address, num_bytes, value, is_gds);
     ++recorded_work;
 }
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
+    const bool was_rendering = scheduler.IsRendering();
     buffer_cache.CopyBuffer(dst, src, num_bytes, dst_gds, src_gds);
+    if (was_rendering && !scheduler.IsRendering()) {
+        ++deferral_stats.dma_copies_in_pass; // the copy went to the GPU and ended the pass
+    }
     ++recorded_work;
 }
 
@@ -1564,6 +1749,22 @@ void Rasterizer::OnFence(Common::UniqueFunction<void>&& signal, VideoCore::Fence
     if (encoder_debug & 1) {
         scheduler.SyncEncoder();
     }
+    if (defer_fences_in_pass) {
+        const bool rendering = scheduler.IsRendering();
+        const bool attachment = rendering && texture_cache.HasPendingDownloadIn(PassImages());
+        ++deferral_stats.fences;
+        deferral_stats.in_pass += rendering;
+        deferral_stats.kept_attachment += attachment;
+        if (ShouldDeferFence(true, async_fences, rendering, must_sync,
+                             kind == VideoCore::FenceSubmitEnd, attachment)) {
+            ++deferral_stats.deferred;
+            deferred_fences.Push(std::move(signal), kind);
+            ReportDeferralStats();
+            return;
+        }
+    }
+    // Fences are signaled in order: anything deferred comes first.
+    FlushDeferredFences(FlushReason::Fence);
     if (!async_fences || must_sync) {
         // Synchronous path: readbacks complete (and earlier async fences drain, via Finish)
         // before the fence is signaled from the GPU thread.
@@ -1578,7 +1779,138 @@ void Rasterizer::OnFence(Common::UniqueFunction<void>&& signal, VideoCore::Fence
         }
         return;
     }
+    ProcessAsyncFence(std::move(signal), kind);
+}
 
+void Rasterizer::SerializeAfterDispatch() {
+    BarrierStats::Scope barrier_scope{BarrierStats::Source::Serialize};
+    if (!serialize_dispatches) {
+        return;
+    }
+    const vk::MemoryBarrier2 barrier = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+    };
+    scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &barrier,
+    });
+}
+
+void Rasterizer::GuestComputeFlush() {
+    ++deferral_stats.guest_cs_flushes;
+    if (ShouldRecordGuestComputeBarrier(honor_cs_flush, scheduler.IsRendering(),
+                                        last_guest_flush_work != recorded_work)) {
+        last_guest_flush_work = recorded_work;
+        ++deferral_stats.guest_cs_flush_barriers;
+        const vk::MemoryBarrier2 barrier = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader |
+                            vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderWrite |
+                             vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        };
+        scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers = &barrier,
+        });
+    }
+    ReportDeferralStats();
+}
+
+void Rasterizer::ReportDeferralStats() {
+    if (!defer_fences_in_pass && !trust_encoder_ordering && !honor_cs_flush &&
+        !VideoCore::BufferBarrierPolicy::write_after_write) {
+        return;
+    }
+    const u64 now = VideoCore::ReadbackStats::NowNs();
+    if (deferral_stats_last_ns == 0) {
+        deferral_stats_last_ns = now;
+        return;
+    }
+    if (now - deferral_stats_last_ns < 1'000'000'000ULL) {
+        return;
+    }
+    deferral_stats.write_after_write_barriers =
+        VideoCore::BufferBarrierPolicy::write_after_write_barriers.exchange(0);
+    deferral_stats.read_after_read_skipped =
+        VideoCore::BufferBarrierPolicy::read_after_read_skipped.exchange(0);
+    deferral_stats.image_read_after_read_skipped =
+        VideoCore::ImageBarrierPolicy::read_after_read_skipped.exchange(0);
+    deferral_stats.precise_hazards_elided =
+        VideoCore::BufferBarrierPolicy::precise_hazards_elided.exchange(0);
+    std::fputs(deferral_stats.Format((now - deferral_stats_last_ns) / 1e9).c_str(), stderr);
+    const auto ends = scheduler.TakePassEndCounts();
+    std::string line = "ENDPASS_STATS passes=" + std::to_string(ends.passes) +
+                       " draws=" + std::to_string(ends.draws);
+    for (u32 i = 0; i < ends.by_category.size(); ++i) {
+        if (ends.by_category[i] == 0) {
+            continue;
+        }
+        line += ' ';
+        line += magic_enum::enum_name(static_cast<VideoCore::ReadbackStats::CpTime>(i));
+        line += '=';
+        line += std::to_string(ends.by_category[i]);
+    }
+    line += '\n';
+    std::fputs(line.c_str(), stderr);
+    std::fflush(stderr);
+    deferral_stats = {};
+    deferral_stats_last_ns = now;
+}
+
+void Rasterizer::FlushDeferredFences(FlushReason reason) {
+    if (deferred_fences.Empty()) {
+        return;
+    }
+    ++deferral_stats.flushes[static_cast<size_t>(reason)];
+    for (auto& fence : deferred_fences.Take()) {
+        ProcessAsyncFence(std::move(fence.signal), static_cast<VideoCore::FenceKind>(fence.kind));
+    }
+}
+
+boost::container::static_vector<VideoCore::ImageId, AmdGpu::NUM_COLOR_BUFFERS + 1>
+Rasterizer::PassImages() const {
+    boost::container::static_vector<VideoCore::ImageId, AmdGpu::NUM_COLOR_BUFFERS + 1> images;
+    if (!scheduler.IsRendering()) {
+        return images;
+    }
+    const auto& state = scheduler.GetRenderState();
+    for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
+        if (cb_descs[cb].first) {
+            images.push_back(cb_descs[cb].first);
+        }
+    }
+    if (db_desc.first) {
+        images.push_back(db_desc.first);
+    }
+    return images;
+}
+
+bool Rasterizer::PipelineWritesMemory(const Pipeline* pipeline) {
+    for (const auto* info : pipeline->GetStages()) {
+        if (!info) {
+            continue;
+        }
+        for (const auto& buffer : info->buffers) {
+            if (buffer.is_written) {
+                return true;
+            }
+        }
+        for (const auto& image : info->images) {
+            if (image.is_written) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void Rasterizer::ProcessAsyncFence(Common::UniqueFunction<void>&& signal,
+                                   VideoCore::FenceKind kind) {
     // Asynchronous path: record the copies, submit them and return without waiting. The
     // priority thread waits for the GPU, writes the data to guest memory and only then signals
     // the fence, so the guest still never sees the fence before the data. Fences are signaled
@@ -1608,11 +1940,13 @@ void Rasterizer::OnFence(Common::UniqueFunction<void>&& signal, VideoCore::Fence
     // the game see the fence long before that work ran (flickering feathers). Also forced by
     // cp_encoder_debug bit 4. cp_full_fence_kinds limits it to some fence kinds (diagnostic).
     const bool full_eop = full_eop_fences && (full_fence_kinds & kind) != 0;
-    const u64 tick = has_copies || full_eop ? scheduler.CurrentTick() : scheduler.CurrentTick() - 1;
+    const auto submission = PlanFenceSubmission(
+        scheduler.CurrentTick(), has_copies, full_eop, scheduler.CanReuseSubmittedFenceTick(),
+        scheduler.PriorityOperationsNeedSubmit());
     // Submit when this or an earlier operation waits on the current command buffer: the guest
     // may block on this fence without submitting anything else. Otherwise every tick waited on
     // is submitted already and submitting would only cost time.
-    const bool needs_submit = has_copies || full_eop || scheduler.PriorityOperationsNeedSubmit();
+    const bool needs_submit = submission.submit;
     VideoCore::ReadbackStats::OnAsyncFence(kind, needs_submit);
     scheduler.DeferPriorityOperation(
         [callbacks = batch.TakeCallbacks(), signal = std::move(signal)]() mutable {
@@ -1623,7 +1957,7 @@ void Rasterizer::OnFence(Common::UniqueFunction<void>&& signal, VideoCore::Fence
                 signal();
             }
         },
-        tick);
+        submission.tick);
     if (needs_submit) {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::FenceSubmit};
         scheduler.Flush();

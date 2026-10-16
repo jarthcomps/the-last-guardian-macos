@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <optional>
+
+#include "video_core/screenshot_burst.h"
+
 #include <filesystem>
 #include <string>
 #include "common/types.h"
@@ -40,6 +44,14 @@ struct ScreenshotRequests {
 
 /// Queues an in-emulator screenshot request to be consumed by the presenter.
 void RequestScreenshot(ScreenshotRequest request);
+
+/// Requests that the next `frames` presented frames are captured, game output only, as raw RGBA
+/// files in screenshots/burst_<id>/<index>.rgba (diagnostics: temporal flicker detection).
+/// Returns the burst id, or 0 when a burst is still running.
+u32 RequestScreenshotBurst(u32 frames);
+
+/// Called once per presented frame; returns the burst frame to capture, if any.
+std::optional<BurstFrame> ConsumeBurstFrame();
 
 /// Atomically consumes and returns pending "game only" screenshot request counter.
 u32 ConsumeGameOnlyScreenshotRequests();

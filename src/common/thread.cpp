@@ -18,6 +18,7 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
+#include "common/apple_thread_priority.h"
 #elif defined(_WIN32)
 #include <windows.h>
 #include "common/string_util.h"
@@ -132,6 +133,13 @@ bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanosec
 #else
 
 void SetCurrentThreadPriority(ThreadPriority new_priority) {
+#ifdef __APPLE__
+    // The POSIX scheduling API does not express Apple's QoS policy. Do not combine the two:
+    // pthread_setschedparam can opt a thread out of QoS after an explicit QoS request.
+    if (const int error = SetAppleThreadPriority(new_priority); error != 0) {
+        LOG_WARNING(Common, "Could not set thread QoS: {}", error);
+    }
+#else
     pthread_t this_thread = pthread_self();
 
     const auto scheduling_type = SCHED_OTHER;
@@ -147,6 +155,7 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
     }
 
     pthread_setschedparam(this_thread, scheduling_type, &params);
+#endif
 }
 
 bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanoseconds* remaining,

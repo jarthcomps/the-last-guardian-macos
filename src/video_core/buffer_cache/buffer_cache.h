@@ -135,6 +135,11 @@ public:
     /// Performs buffer to buffer data copy on the GPU.
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
 
+    /// Performs a guest-memory buffer copy on the GPU, bypassing the host memcpy shortcut.
+    /// Returns false for empty or overlapping guest ranges.
+    bool CopyBufferGpu(VAddr dst, VAddr src, u32 num_bytes,
+                       u32 source_texel_descriptor_size = 0);
+
     /// Obtains a buffer for the specified region.
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBuffer(VAddr gpu_addr, u32 size, bool is_written,
                                                        bool is_texel_buffer = false,
@@ -187,6 +192,11 @@ public:
 
     /// Returns true if an asynchronous download of part of the range has not landed yet.
     bool IsDownloadInFlight(VAddr device_addr, u64 size);
+
+    /// SHADPS4_CP_FAULT_TRACE=1: logs a command processor fault that waits for an in-flight
+    /// download (page state, the upload being done, the downloads and the native stack).
+    void TraceCpInflightFault(VAddr device_addr, u64 size, bool is_write, VAddr page_start,
+                              u64 page_size);
 
     /// True if guest memory holds the current contents of the range: no GPU write that isn't
     /// downloaded, and no download of it on its way. Command processor thread only.
@@ -289,6 +299,8 @@ private:
         VAddr addr;
         u64 size;
         u64 id;
+        /// The bytes the download copies (GPU-written data), inside [addr, addr + size).
+        boost::container::small_vector<std::pair<VAddr, VAddr>, 2> copies;
     };
     std::vector<InflightDownload> inflight_downloads; // guarded by pending_unmarks_mutex
     // Stream copy sources of the current command buffer (readback stats only).
@@ -300,6 +312,9 @@ private:
     const bool stream_reuse_enabled;
     /// readback_prefetch_mode: 0 = no prefetch, 1 = read and write faults, 2 = read faults only.
     const u32 prefetch_mode;
+    /// SHADPS4_PREFETCH_STRICT_UNMARK=1: pages with a newer download in flight stay protected
+    /// when an older download lands (see UnmarkSettledPages and FinishFaultReadback).
+    const bool strict_prefetch_unmark;
     /// readback_async_guest_faults: guest threads wait for their readbacks themselves.
     const bool async_guest_faults;
     void ReadMemoryForGuest(VAddr device_addr, u64 size, bool is_write);

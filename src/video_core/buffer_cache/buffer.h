@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "video_core/buffer_cache/buffer_barrier_policy.h"
+#include "video_core/buffer_cache/buffer_hazard_tracker.h"
 #include <cstddef>
 #include <optional>
 #include <utility>
@@ -129,8 +131,26 @@ public:
     std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
                                                        vk::PipelineStageFlagBits2 dst_stage,
                                                        u32 offset = 0) {
-        if (dst_acess_mask == access_mask && stage == dst_stage) {
+        constexpr vk::AccessFlags2 write_bits =
+            vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eShaderStorageWrite |
+            vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eTransferWrite;
+        if (!NeedsBufferBarrier(static_cast<u64>(access_mask), static_cast<u64>(stage),
+                                static_cast<u64>(dst_acess_mask), static_cast<u64>(dst_stage),
+                                static_cast<u64>(write_bits), BufferBarrierPolicy::write_after_write,
+                                BufferBarrierPolicy::skip_read_after_read)) {
+            if (dst_acess_mask != access_mask || stage != dst_stage) {
+                // Read after read with another access kind or stage: no barrier, but keep both
+                // reads in the state so a later write synchronizes against all of them.
+                BufferBarrierPolicy::read_after_read_skipped.fetch_add(1,
+                                                                       std::memory_order_relaxed);
+                access_mask |= dst_acess_mask;
+                stage = vk::PipelineStageFlagBits2::eAllCommands;
+            }
             return {};
+        }
+        if (dst_acess_mask == access_mask && stage == dst_stage) {
+            BufferBarrierPolicy::write_after_write_barriers.fetch_add(1,
+                                                                      std::memory_order_relaxed);
         }
 
         DEBUG_ASSERT(offset < size_bytes);
@@ -168,6 +188,8 @@ public:
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
         vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite};
     vk::PipelineStageFlagBits2 stage{vk::PipelineStageFlagBits2::eAllCommands};
+    /// Byte ranges accessed since the last full barrier (SHADPS4_PRECISE_BUFFER_HAZARDS).
+    BufferHazardTracker hazards;
 };
 
 class StreamBuffer : public Buffer {

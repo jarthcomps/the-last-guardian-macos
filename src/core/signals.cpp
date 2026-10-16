@@ -6,6 +6,7 @@
 #include "common/decoder.h"
 #include "common/signal_context.h"
 #include "core/cpu_patches.h" // Windows static guest red-zone protection
+#include "core/lazy_fault_context.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/threads/exception.h"
 #include "core/signals.h"
@@ -16,6 +17,8 @@
 static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
 #else
 #include <csignal>
+#include <cstdlib>
+#include <optional>
 #include <pthread.h>
 #ifdef ARCH_X86_64
 #include <Zydis/Formatter.h>
@@ -149,6 +152,11 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
 
 #else
 
+static const bool lazy_fault_context_enabled = [] {
+    const char* value = std::getenv("SHADPS4_LAZY_FAULT_CONTEXT");
+    return LazyFaultContextRequested(value ? value : "");
+}();
+
 static std::string DisassembleInstruction(void* code_address) {
     char buffer[256] = "<unable to decode>";
 
@@ -252,6 +260,40 @@ void SignalHandler(int sig, siginfo_t* info, void* raw_context) {
 
     auto* code_address = Common::GetRip(raw_context);
 
+    if (IsMemoryFaultSignal(sig, SIGSEGV, SIGBUS)) {
+        const bool is_write = Common::IsWriteError(raw_context);
+        std::optional<Ucontext> context;
+        Siginfo guest_info{};
+        const auto marshal_context = [&] {
+            context.emplace(info, reinterpret_cast<ucontext_t*>(raw_context));
+            if (info) {
+                guest_info = *reinterpret_cast<Siginfo*>(info);
+                guest_info._si_signo = NativeToOrbisSignal(info->si_signo);
+                guest_info._si_errno = NativeToPosixErrno(info->si_errno);
+                guest_info._si_code = NativeSiCodeToGuest(sig, info->si_code);
+                guest_info._si_addr = (void*)context->uc_mcontext.mc_rip;
+            }
+        };
+        const auto fallback = [&] {
+            Siginfo* info_p = info ? &guest_info : nullptr;
+            Ucontext* context_p = raw_context ? &*context : nullptr;
+            if (thread && thread->DispatchSignal(NativeToOrbisSignal(sig), info_p, context_p)) {
+                return true;
+            }
+            return false;
+        };
+        const bool handled = DispatchMemoryFault(
+            ShouldDispatchFaultBeforeContext(sig, lazy_fault_context_enabled, SIGSEGV, SIGBUS),
+            [&] { return signals->DispatchAccessViolation(raw_context, info->si_addr); },
+            marshal_context, fallback);
+        if (!handled) {
+            UNREACHABLE_MSG("Unhandled access violation at code address {}: {} address {}",
+                            fmt::ptr(code_address), is_write ? "Write to" : "Read from",
+                            fmt::ptr(info->si_addr));
+        }
+        return;
+    }
+
     Ucontext context{info, reinterpret_cast<ucontext_t*>(raw_context)};
     Siginfo guest_info{};
     if (info) {
@@ -265,19 +307,6 @@ void SignalHandler(int sig, siginfo_t* info, void* raw_context) {
     Ucontext* context_p = raw_context ? &context : nullptr;
 
     switch (sig) {
-    case SIGSEGV:
-    case SIGBUS: {
-        const bool is_write = Common::IsWriteError(raw_context);
-        if (!signals->DispatchAccessViolation(raw_context, info->si_addr)) {
-            if (thread && thread->DispatchSignal(NativeToOrbisSignal(sig), info_p, context_p)) {
-                return;
-            }
-            UNREACHABLE_MSG("Unhandled access violation at code address {}: {} address {}",
-                            fmt::ptr(code_address), is_write ? "Write to" : "Read from",
-                            fmt::ptr(info->si_addr));
-        }
-        break;
-    }
     case SIGILL:
         if (signals->DispatchIllegalInstruction(raw_context)) {
             return;
