@@ -17,6 +17,7 @@
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
+#include "video_core/renderer_vulkan/push_constant_reuse.h"
 
 #ifdef MemoryBarrier
 #pragma push_macro("MemoryBarrier")
@@ -35,6 +36,13 @@ struct DescriptorPushMemoTestAccess;
 class CommandList {
 public:
     CommandList() {
+        const char* constants = std::getenv("SHADPS4_PUSH_CONSTANT_REUSE");
+        if (constants && constants[0] == '1' && constants[1] == '\0') {
+            constant_memo = std::make_unique<PushConstantReuse<vk::PipelineLayout>>();
+            const char* diagnostics = std::getenv("SHADPS4_CONSTANT_REUSE_DIAGNOSTICS");
+            constant_memo_diagnostics = diagnostics && diagnostics[0] == '1' &&
+                                        diagnostics[1] == '\0';
+        }
         const char* enabled = std::getenv("SHADPS4_DESCRIPTOR_PUSH_MEMO");
         if (enabled && enabled[0] == '1' && enabled[1] == '\0') {
             descriptor_memo = std::make_unique<DescriptorMemo>();
@@ -403,6 +411,9 @@ private:
         large_blocks.clear();
         pipeline_valid.fill(false);
         pipelines.fill(vk::Pipeline{});
+        if (constant_memo) {
+            constant_memo->Reset();
+        }
         if (descriptor_memo) {
             for (auto& bank : descriptor_memo->banks) {
                 Invalidate(bank);
@@ -420,6 +431,8 @@ private:
     std::array<vk::Pipeline, 2> pipelines{};
     std::array<bool, 2> pipeline_valid{};
     std::unique_ptr<DescriptorMemo> descriptor_memo;
+    std::unique_ptr<PushConstantReuse<vk::PipelineLayout>> constant_memo;
+    bool constant_memo_diagnostics{};
     bool descriptor_memo_diagnostics{};
 };
 
@@ -497,6 +510,18 @@ public:
                        const void* values) const {
         if (!list) {
             cmdbuf.pushConstants(layout, stages, offset, size, values);
+            return;
+        }
+        if (list->constant_memo &&
+            list->constant_memo->CanSkip(layout, static_cast<u32>(stages), offset, size, values)) {
+            if (list->constant_memo_diagnostics) {
+                static std::atomic<u64> skipped{};
+                const u64 count = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (count == 1 || count % 100000 == 0) {
+                    std::fprintf(stderr, "shadPS4 constant reuse skipped=%llu\n",
+                                 static_cast<unsigned long long>(count));
+                }
+            }
             return;
         }
         const auto* v = list->Copy(static_cast<const u8*>(values), size);
