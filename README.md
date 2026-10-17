@@ -1,5 +1,7 @@
 # The Last Guardian on macOS
 
+> Note from the developer: This is 100% considered "alpha" software. I really wanted to play this game but it's not supported in shadPS4 yet, so I used LLMs to modify it. If you run into problems while playing, please feel free to report them as Issues here on github. I'll try to take care of any problems asap, but you'll need to be very specific about what went wrong and which exact computer / MacOS version you're on.
+
 Play **The Last Guardian** (PS4) on Mac. This repository contains a small launcher app, plus a build of the [shadPS4](https://github.com/shadps4-emu/shadPS4) emulator tuned for this one game on macOS.
 
 > This project contains **no game files**, no PS4 firmware and no Sony software. You need your own legally obtained, decrypted dump of the game.
@@ -31,7 +33,7 @@ Controllers that macOS recognizes (DualSense, DualShock 4, Xbox) work through SD
 
 ## Performance
 
-On an M2 Max at 720p, the game runs at roughly **27–30 FPS** in demanding areas. It's playable, but not a locked 30. The first time each area loads you'll see some stutter while shaders compile; those are cached for later runs.
+On an M2 Max at 720p, the game runs at roughly **27–32 FPS** in demanding areas. It's playable, but not a locked 30. The first time each area loads you'll see some stutter while shaders compile; those are cached for later runs. On an M4 mac mini, it ran around 24fps in the opening scene.
 
 ## Changelist
 
