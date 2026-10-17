@@ -1,0 +1,715 @@
+diff --git a/src/video_core/buffer_cache/buffer_cache.cpp b/src/video_core/buffer_cache/buffer_cache.cpp
+index 6a794977..6c74f452 100644
+--- a/src/video_core/buffer_cache/buffer_cache.cpp
++++ b/src/video_core/buffer_cache/buffer_cache.cpp
+@@ -1,3 +1,4 @@
++#include "video_core/buffer_cache/download_rescan.h"
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+@@ -20,6 +21,7 @@
+ #include "video_core/buffer_cache/buffer_cache.h"
+ #include "video_core/buffer_cache/download_overlap.h"
+ #include "video_core/buffer_cache/prefetch_unmark_policy.h"
++#include "video_core/buffer_cache/readback_window.h"
+ #include "video_core/buffer_cache/gpu_copy.h"
+ #include "video_core/buffer_cache/memory_tracker.h"
+ #include "video_core/buffer_cache/readback_batch.h"
+@@ -124,13 +126,14 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
+ 
+ std::pair<VAddr, VAddr> BufferCache::ReadbackWindow(const Buffer& buffer, VAddr device_addr,
+                                                     u64 size) const {
+-    constexpr u64 WindowSize = 512_KB;
++    static const u64 WindowSize = [] {
++        const char* value = std::getenv("SHADPS4_READBACK_WINDOW_KB");
++        return ReadbackWindowSize(value ? value : "");
++    }();
+     const VAddr buf_start = buffer.CpuAddr();
+     const VAddr buf_end = buf_start + buffer.SizeBytes();
+-    const VAddr window_start =
+-        std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), buf_start);
+-    const VAddr window_end =
+-        std::min<VAddr>(std::max<VAddr>(window_start + WindowSize, device_addr + size), buf_end);
++    const auto [window_start, window_end] =
++        CalculateReadbackWindow(buf_start, buf_end, device_addr, size, WindowSize);
+     return {window_start, window_end};
+ }
+ 
+@@ -492,6 +495,7 @@ Common::UniqueFunction<void> BufferCache::RecordDownloadCopies(Buffer& buffer, V
+         }
+         if (deferred_unmark) {
+             inflight_downloads.push_back(std::move(inflight));
++            download_changes.fetch_add(1, std::memory_order_release);
+         }
+     }
+     return [this, copies = std::move(copies), download = download, offset = offset,
+@@ -521,6 +525,7 @@ Common::UniqueFunction<void> BufferCache::RecordDownloadCopies(Buffer& buffer, V
+             pending_backing_copies.Remove(inflight_id);
+         }
+         pending_unmarks.emplace_back(device_addr, size);
++        download_changes.fetch_add(1, std::memory_order_release);
+     };
+ }
+ 
+@@ -642,7 +647,13 @@ void BufferCache::WaitForDownloads(VAddr device_addr, u64 size) {
+     }
+     const u64 start = ReadbackStats::NowNs();
+     bool reported = false;
+-    while (IsDownloadInFlight(device_addr, size)) {
++    static const bool reuse = [] {
++        const char* v = std::getenv("SHADPS4_DOWNLOAD_RESCAN_REUSE");
++        return v && std::string_view{v} == "1";
++    }();
++    DownloadRescan rescan;
++    while (rescan.Pending(download_changes, reuse,
++                          [&] { return IsDownloadInFlight(device_addr, size); })) {
+         if (!reported && ReadbackStats::NowNs() - start > 2'000'000'000ULL) {
+             reported = true;
+             LOG_WARNING(Render_Vulkan,
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index 4ac012be..c7178be4 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -6,6 +6,7 @@
+ #include "video_core/buffer_cache/download_overlap.h"
+ 
+ #include <mutex>
++#include <atomic>
+ #include <unordered_map>
+ #include <utility>
+ #include <vector>
+@@ -305,6 +306,7 @@ private:
+         /// The bytes the download copies (GPU-written data), inside [addr, addr + size).
+         boost::container::small_vector<std::pair<VAddr, VAddr>, 2> copies;
+     };
++    std::atomic<std::uint64_t> download_changes{};
+     std::vector<InflightDownload> inflight_downloads; // guarded by pending_unmarks_mutex
+     PendingBackingCopies pending_backing_copies; // all copies; same mutex, independent of unmarks
+     // Stream copy sources of the current command buffer (readback stats only).
+diff --git a/src/video_core/buffer_cache/download_rescan.h b/src/video_core/buffer_cache/download_rescan.h
+new file mode 100644
+index 00000000..b23eef1c
+--- /dev/null
++++ b/src/video_core/buffer_cache/download_rescan.h
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++#include <atomic>
++#include <cstdint>
++
++namespace VideoCore {
++// Load the epoch BEFORE the locked predicate. A completion between the two causes at
++// worst an extra scan, never a missed completion. Mutators publish while holding that lock.
++class DownloadRescan {
++public:
++    bool Pending(const std::atomic<std::uint64_t>& changes, bool enabled, auto&& predicate) {
++        const auto current = changes.load(std::memory_order_acquire);
++        if (!enabled || !initialized || current != observed) {
++            observed = current;
++            initialized = true;
++            pending = predicate();
++        }
++        return pending;
++    }
++private:
++    std::uint64_t observed{};
++    bool initialized{}, pending{};
++};
++} // namespace VideoCore
+diff --git a/src/video_core/buffer_cache/readback_window.h b/src/video_core/buffer_cache/readback_window.h
+new file mode 100644
+index 00000000..85a8bf19
+--- /dev/null
++++ b/src/video_core/buffer_cache/readback_window.h
+@@ -0,0 +1,36 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++#include <limits>
++#include <string_view>
++#include <utility>
++
++namespace VideoCore {
++
++constexpr std::uint64_t ReadbackWindowSize(std::string_view value) {
++    if (value == "64") return 64 * 1024;
++    if (value == "128") return 128 * 1024;
++    if (value == "256") return 256 * 1024;
++    return 512 * 1024;
++}
++
++constexpr std::uint64_t ReadbackWindowEnd(std::uint64_t address, std::uint64_t size) {
++    return address + std::min(size, std::numeric_limits<std::uint64_t>::max() - address);
++}
++
++// The requested bytes remain included even when they exceed the prefetch window.
++// Buffer bounds limit speculative readback; page settlement remains the caller's job.
++constexpr std::pair<std::uint64_t, std::uint64_t> CalculateReadbackWindow(
++    std::uint64_t buffer_start, std::uint64_t buffer_end, std::uint64_t address,
++    std::uint64_t size, std::uint64_t window_size) {
++    const auto start = std::max(address & ~(window_size - 1), buffer_start);
++    const auto end = std::min(std::max(ReadbackWindowEnd(start, window_size),
++                                      ReadbackWindowEnd(address, size)), buffer_end);
++    return {start, end};
++}
++
++} // namespace VideoCore
+diff --git a/src/video_core/coherent_read.h b/src/video_core/coherent_read.h
+new file mode 100644
+index 00000000..b487d831
+--- /dev/null
++++ b/src/video_core/coherent_read.h
+@@ -0,0 +1,23 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <cstdint>
++
++namespace VideoCore {
++
++// The physical alias avoids a page fault only when these exact bytes are current.
++// The backing lookup separately proves that the mapping is actually shared.
++template <typename IsCurrent, typename FindBacking>
++const void* CoherentReadPointer(std::uintptr_t address, std::uint64_t size, bool enabled,
++                                IsCurrent&& is_current, FindBacking&& find_backing) {
++    if (enabled && size != 0 && is_current(address, size)) {
++        if (const void* backing = find_backing(address, size)) {
++            return backing;
++        }
++    }
++    return reinterpret_cast<const void*>(address);
++}
++
++} // namespace VideoCore
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 7526c8ae..388edba9 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -1323,6 +1323,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
+ }
+ 
+ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
++    static const bool reuse = [] {
++        const char* v = std::getenv("SHADPS4_TEXTURE_LOOKUP_REUSE");
++        return v && std::string_view{v} == "1";
++    }();
++    static const bool verify = [] {
++        const char* v = std::getenv("SHADPS4_TEXTURE_LOOKUP_VERIFY");
++        return v && std::string_view{v} == "1";
++    }();
++    auto& lookups = texture_lookups.at(static_cast<size_t>(stage.sw_stage));
++    size_t lookup_slot = 0;
+     image_bindings.clear();
+     const u32 first_image_idx = image_infos.size();
+     // For loading/storing to explicit mip levels, when no native instruction support, bind an array
+@@ -1376,7 +1386,26 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
+ 
+             {
+                 VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::TexFindImage};
+-                image_id = texture_cache.FindImage(desc);
++                if (reuse) {
++                    if (lookup_slot == lookups.size()) {
++                        lookups.emplace_back();
++                    }
++                    const VideoCore::TextureLookupKey key{
++                        .descriptor = std::bit_cast<std::array<u32, 8>>(tsharp),
++                        .specialization = &stage,
++                        .program = stage.pgm_hash,
++                        .resource_flags = u32(image_desc.is_depth) | (u32(image_desc.is_atomic) << 1) |
++                                          (u32(image_desc.is_array) << 2) | (u32(image_desc.is_written) << 3) |
++                                          (u32(image_desc.is_r128) << 4),
++                        .mip_mode = static_cast<u32>(mip_fallback_mode),
++                        .mip_index = image_desc.constant_mip_index,
++                        .binding_index = static_cast<u32>(i),
++                        .alt_tile = desc.info.alt_tile,
++                    };
++                    image_id = texture_cache.FindImageCached(desc, key, lookups[lookup_slot++], verify);
++                } else {
++                    image_id = texture_cache.FindImage(desc);
++                }
+             }
+             auto* image = &texture_cache.GetImage(image_id);
+             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.h b/src/video_core/renderer_vulkan/vk_rasterizer.h
+index bdde707d..e24ccd0b 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.h
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.h
+@@ -209,6 +209,7 @@ private:
+     };
+     std::array<CachedTarget, AmdGpu::NUM_COLOR_BUFFERS + 1> rt_cache{};
+     const bool rt_reuse_enabled;
++    std::array<std::vector<VideoCore::TextureCache::CachedImageLookup>, 8> texture_lookups{};
+     const u32 encoder_debug;
+     /// Encoder thread: fences without readbacks wait for all work recorded before them.
+     const bool full_eop_fences;
+diff --git a/src/video_core/texture_cache/lookup_reuse.h b/src/video_core/texture_cache/lookup_reuse.h
+new file mode 100644
+index 00000000..33d47273
+--- /dev/null
++++ b/src/video_core/texture_cache/lookup_reuse.h
+@@ -0,0 +1,36 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++#include <array>
++#include <cstdint>
++#include <optional>
++#include <utility>
++
++namespace VideoCore {
++struct TextureLookupKey {
++    std::array<std::uint32_t, 8> descriptor{};
++    const void* specialization{};
++    std::uint64_t program{};
++    std::uint32_t resource_flags{}, mip_mode{}, mip_index{}, binding_index{};
++    bool alt_tile{};
++    bool operator==(const TextureLookupKey&) const = default;
++};
++
++// Generation validation and result use must be serialized with image registration/removal.
++template <typename Key, typename Result>
++class LookupReuseEntry {
++public:
++    const Result* Find(const Key& requested, std::uint64_t current_generation) const {
++        return result && generation == current_generation && key == requested ? &*result : nullptr;
++    }
++    void Store(const Key& requested, std::uint64_t current_generation, Result resolved) {
++        key = requested;
++        generation = current_generation;
++        result = std::move(resolved);
++    }
++    void Invalidate() { result.reset(); }
++private:
++    Key key{};
++    std::uint64_t generation{};
++    std::optional<Result> result;
++};
++} // namespace VideoCore
+diff --git a/src/video_core/texture_cache/texture_cache.cpp b/src/video_core/texture_cache/texture_cache.cpp
+index d530f30b..ff21f5ef 100644
+--- a/src/video_core/texture_cache/texture_cache.cpp
++++ b/src/video_core/texture_cache/texture_cache.cpp
+@@ -11,6 +11,7 @@
+ #include "common/scope_exit.h"
+ #include "core/emulator_settings.h"
+ #include "core/memory.h"
++#include "video_core/coherent_read.h"
+ #include "video_core/buffer_cache/buffer_cache.h"
+ #include "video_core/buffer_cache/readback_batch.h"
+ #include "video_core/page_manager.h"
+@@ -581,10 +582,41 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
+ }
+ 
+ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
++    std::scoped_lock lock{mutex};
++    return FindImageLocked(desc, exact_fmt);
++}
++
++ImageId TextureCache::FindImageCached(ImageDesc& desc, const TextureLookupKey& key,
++                                     CachedImageLookup& cached, bool verify) {
++    std::scoped_lock lock{mutex};
++    if (const auto* hit = cached.Find(key, ImageGeneration());
++        hit && !slot_images[hit->id].binding.needs_rebind) {
++        const auto expected = *hit;
++        if (verify) {
++            static u64 verified_hits{};
++            if (++verified_hits == 1 || verified_hits % 100000 == 0) {
++                LOG_INFO(Render_Vulkan, "Texture lookup verification: {} hits", verified_hits);
++            }
++            const auto full = FindImageLocked(desc, false);
++            ASSERT_MSG(full == expected.id && desc.view_info == expected.view,
++                       "texture lookup reuse mismatch");
++        } else {
++            desc.view_info = expected.view;
++            auto& image = slot_images[expected.id];
++            image.tick_accessed_last = gc_tick;
++            TouchImage(image);
++        }
++        return expected.id;
++    }
++    const auto id = FindImageLocked(desc, false);
++    cached.Store(key, ImageGeneration(), {id, desc.view_info});
++    return id;
++}
++
++ImageId TextureCache::FindImageLocked(ImageDesc& desc, bool exact_fmt) {
+     const auto& info = desc.info;
+     ASSERT(info.guest_address != 0);
+ 
+-    std::scoped_lock lock{mutex};
+     ImageIds image_ids;
+     ForEachImageInRegion(info.guest_address, info.guest_size,
+                          [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
+@@ -799,6 +831,30 @@ void TextureCache::RefreshImage(Image& image) {
+         const char* value = std::getenv("SHADPS4_IMAGE_UPLOAD_SKIP_HASH");
+         return value != nullptr && std::string_view{value} == "1";
+     }();
++    static const bool backing_reads = [] {
++        const char* value = std::getenv("SHADPS4_IMAGE_BACKING_READS");
++        return value != nullptr && std::string_view{value} == "1";
++    }();
++    const auto hash_memory = [&](VAddr address, u64 size) {
++        const void* source = CoherentReadPointer(
++            address, size, backing_reads,
++            [&](VAddr addr, u64 length) { return buffer_cache.IsCpuCopyCurrent(addr, length); },
++            [&](VAddr addr, u64 length) { return Core::Memory::Instance()->BackingPointer(addr, length); });
++        const auto hash = XXH3_64bits(source, size);
++        static const bool verify = [] {
++            const char* value = std::getenv("SHADPS4_IMAGE_BACKING_VERIFY");
++            return value && std::string_view{value} == "1";
++        }();
++        if (verify && source != reinterpret_cast<const void*>(address)) {
++            ASSERT_MSG(hash == XXH3_64bits(reinterpret_cast<const void*>(address), size),
++                       "coherent image hash mismatch");
++            static u64 verified_hashes{};
++            if (++verified_hashes == 1 || verified_hashes % 100000 == 0) {
++                LOG_INFO(Render_Vulkan, "Coherent image hash verification: {} reads", verified_hashes);
++            }
++        }
++        return hash;
++    };
+     const bool memory_gpu_modified =
+         skip_hash &&
+         buffer_cache.IsRegionGpuModified(image.info.guest_address, image.info.guest_size);
+@@ -808,14 +864,13 @@ void TextureCache::RefreshImage(Image& image) {
+         // The image size should be less than page size to be considered MaybeCpuDirty
+         // So this calculation should be very uncommon and reasonably fast
+         // For now we'll just check up to 64 first pixels
+-        const auto addr = std::bit_cast<u8*>(image.info.guest_address);
+         const u32 w = std::min(image.info.size.width, u32(8));
+         const u32 h = std::min(image.info.size.height, u32(8));
+ 
+         const u32 s_w = image.info.props.is_block ? Common::DivCeil(w, 4u) : w;
+         const u32 s_h = image.info.props.is_block ? Common::DivCeil(h, 4u) : h;
+         const u32 size = s_w * s_h * (image.info.num_bits / 8);
+-        const u64 hash = XXH3_64bits(addr, size);
++        const u64 hash = hash_memory(image.info.guest_address, size);
+         if (image.hash == hash) {
+             image.flags &= ~ImageFlagBits::MaybeCpuDirty;
+             return;
+@@ -840,8 +895,7 @@ void TextureCache::RefreshImage(Image& image) {
+         // Protect GPU modified resources from accidental CPU reuploads.
+         if (ShouldHashBeforeUpload(is_gpu_modified, is_gpu_dirty, memory_gpu_modified,
+                                    skip_hash)) {
+-            const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
+-            const u64 hash = XXH3_64bits(addr + mip_offset, mip_size);
++            const u64 hash = hash_memory(image.info.guest_address + mip_offset, mip_size);
+             if (image.mip_hashes[m] == hash) {
+                 continue;
+             }
+diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
+index e0bb0803..946fd80d 100644
+--- a/src/video_core/texture_cache/texture_cache.h
++++ b/src/video_core/texture_cache/texture_cache.h
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <span>
++#include "video_core/texture_cache/lookup_reuse.h"
+ 
+ #include <condition_variable>
+ #include <mutex>
+@@ -117,6 +118,11 @@ public:
+     /// Retrieves the image handle of the image with the provided attributes.
+     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
+ 
++    struct CachedImageResult { ImageId id{}; ImageViewInfo view{}; };
++    using CachedImageLookup = LookupReuseEntry<TextureLookupKey, CachedImageResult>;
++    [[nodiscard]] ImageId FindImageCached(ImageDesc& desc, const TextureLookupKey& key,
++                                          CachedImageLookup& cached, bool verify);
++
+     /// Retrieves image whose address matches provided
+     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
+ 
+@@ -138,6 +144,9 @@ public:
+         RefreshImage(image);
+     }
+ 
++    /// Internal lookup; caller holds mutex.
++    [[nodiscard]] ImageId FindImageLocked(ImageDesc& desc, bool exact_fmt);
++
+     /// Resolves overlap between existing cache image and pending merged image
+     [[nodiscard]] std::tuple<ImageId, int, int> ResolveOverlap(const ImageInfo& info,
+                                                                BindingType binding,
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 9b053236..bcdf0822 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -1,7 +1,22 @@
++add_executable(shadps4_coherent_read_test test_coherent_read.cpp)
++target_include_directories(shadps4_coherent_read_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
++add_test(NAME coherent_read COMMAND shadps4_coherent_read_test)
++add_executable(shadps4_combined_readback_test test_combined_readback.cpp)
++target_include_directories(shadps4_combined_readback_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
++add_test(NAME combined_readback COMMAND shadps4_combined_readback_test)
++add_executable(shadps4_lookup_reuse_test test_lookup_reuse.cpp)
++target_include_directories(shadps4_lookup_reuse_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
++add_test(NAME lookup_reuse COMMAND shadps4_lookup_reuse_test)
++add_executable(shadps4_download_rescan_test test_download_rescan.cpp)
++target_include_directories(shadps4_download_rescan_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
++add_test(NAME download_rescan COMMAND shadps4_download_rescan_test)
+ # SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+ # SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ # Find or download Google Test
++add_executable(shadps4_readback_window_test test_readback_window.cpp)
++target_include_directories(shadps4_readback_window_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
++add_test(NAME readback_window COMMAND shadps4_readback_window_test)
+ add_executable(shadps4_backing_range_test test_backing_range.cpp)
+ target_include_directories(shadps4_backing_range_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+ add_test(NAME backing_range COMMAND shadps4_backing_range_test)
+diff --git a/tests/test_coherent_read.cpp b/tests/test_coherent_read.cpp
+new file mode 100644
+index 00000000..6c01668a
+--- /dev/null
++++ b/tests/test_coherent_read.cpp
+@@ -0,0 +1,50 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <array>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include "video_core/coherent_read.h"
++
++#define CHECK(condition) do { if (!(condition)) { \
++    std::fprintf(stderr, "Failed at line %d: %s\n", __LINE__, #condition); std::abort(); \
++} } while (false)
++
++int main() {
++    std::array<unsigned char, 8> guest{1, 2, 3, 4, 5, 6, 7, 8};
++    auto backing = guest;
++    const auto address = reinterpret_cast<std::uintptr_t>(guest.data());
++    int checks = 0;
++    int lookups = 0;
++    bool current = true;
++    bool shared = true;
++    auto is_current = [&](std::uintptr_t a, std::uint64_t size) {
++        ++checks;
++        CHECK(a == address && size == guest.size());
++        return current;
++    };
++    auto find_backing = [&](std::uintptr_t a, std::uint64_t size) -> const void* {
++        ++lookups;
++        CHECK(a == address && size == guest.size());
++        return shared ? backing.data() : nullptr;
++    };
++    using VideoCore::CoherentReadPointer;
++    CHECK(CoherentReadPointer(address, 8, false, is_current, find_backing) == guest.data());
++    CHECK(checks == 0 && lookups == 0);
++    CHECK(CoherentReadPointer(address, 0, true, is_current, find_backing) == guest.data());
++    CHECK(checks == 0 && lookups == 0);
++    current = false; // GPU-dirty bytes or any pending asynchronous copy must use guest reads.
++    CHECK(CoherentReadPointer(address, 8, true, is_current, find_backing) == guest.data());
++    CHECK(checks == 1 && lookups == 0);
++    current = true;
++    shared = false; // Executable, unmapped or noncontiguous physical backing is rejected.
++    CHECK(CoherentReadPointer(address, 8, true, is_current, find_backing) == guest.data());
++    CHECK(checks == 2 && lookups == 1);
++    shared = true;
++    const void* selected = CoherentReadPointer(address, 8, true, is_current, find_backing);
++    CHECK(selected == backing.data());
++    CHECK(checks == 3 && lookups == 2);
++    CHECK(std::memcmp(selected, guest.data(), guest.size()) == 0);
++    return 0;
++}
+diff --git a/tests/test_combined_readback.cpp b/tests/test_combined_readback.cpp
+new file mode 100644
+index 00000000..70616e60
+--- /dev/null
++++ b/tests/test_combined_readback.cpp
+@@ -0,0 +1,50 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <array>
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include "video_core/coherent_read.h"
++#include "video_core/buffer_cache/download_overlap.h"
++#include "video_core/buffer_cache/download_rescan.h"
++#include "video_core/buffer_cache/readback_window.h"
++#include "video_core/texture_cache/lookup_reuse.h"
++#define CHECK(c) do { if (!(c)) {std::fprintf(stderr,"line %d: %s\n",__LINE__,#c);std::abort();} } while(false)
++int main() {
++    using namespace VideoCore;
++    std::array<unsigned char,32> guest{}, backing{};
++    const auto address=reinterpret_cast<std::uintptr_t>(guest.data());
++    PendingBackingCopies copies;
++    bool gpu_dirty=false;
++    auto current=[&](auto addr,auto size){return !gpu_dirty && !copies.Overlaps(addr,size);};
++    auto shared=[&](auto addr,auto size)->const void* {
++        CHECK(addr==address && size==guest.size());return backing.data();
++    };
++    CHECK(CoherentReadPointer(address,guest.size(),true,current,shared)==backing.data());
++    const std::array pending{std::pair{address+8,address+16}};
++    copies.Add(1,pending); // a partial copy blocks hashing the entire image
++    CHECK(CoherentReadPointer(address,guest.size(),true,current,shared)==guest.data());
++    LookupReuseEntry<TextureLookupKey,int> lookup;
++    TextureLookupKey key{};lookup.Store(key,10,42);
++    CHECK(*lookup.Find(key,10)==42); // cache hit must not replace the memory coherency check
++    CHECK(CoherentReadPointer(address,guest.size(),true,current,shared)==guest.data());
++    std::atomic<std::uint64_t> epoch{};
++    DownloadRescan rescan;
++    auto pending_copy=[&]{return copies.Overlaps(address,guest.size());};
++    CHECK(rescan.Pending(epoch,true,pending_copy));
++    copies.Add(2,pending); epoch.fetch_add(1,std::memory_order_release);
++    backing[8]=7;copies.Remove(1);epoch.fetch_add(1,std::memory_order_release);
++    CHECK(rescan.Pending(epoch,true,pending_copy)); // newer overlapping copy still owns bytes
++    CHECK(CoherentReadPointer(address,guest.size(),true,current,shared)==guest.data());
++    guest=backing; copies.Remove(2);epoch.fetch_add(1,std::memory_order_release);
++    CHECK(!rescan.Pending(epoch,true,pending_copy));
++    CHECK(CoherentReadPointer(address,guest.size(),true,current,shared)==backing.data());
++    CHECK(std::memcmp(guest.data(),backing.data(),guest.size())==0);
++    gpu_dirty=true;CHECK(CoherentReadPointer(address,guest.size(),true,current,shared)==guest.data());
++    CHECK(!lookup.Find(key,11)); // replacement invalidates image id even if same address
++    // A smaller transfer window still covers every byte of a cross-boundary request.
++    for(auto window:{64u*1024,512u*1024}) {
++        const auto [begin,end]=CalculateReadbackWindow(0x100000,0x400000,0x10fff8,32,window);
++        CHECK(begin<=0x10fff8 && end>=0x110018);
++    }
++}
+diff --git a/tests/test_download_rescan.cpp b/tests/test_download_rescan.cpp
+new file mode 100644
+index 00000000..60d84acf
+--- /dev/null
++++ b/tests/test_download_rescan.cpp
+@@ -0,0 +1,49 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <cstdio>
++#include <cstdlib>
++#include <mutex>
++#include <thread>
++#include <vector>
++#include "video_core/buffer_cache/download_rescan.h"
++#define CHECK(c) do { if (!(c)) { std::fprintf(stderr,"line %d: %s\n",__LINE__,#c); std::abort(); } } while(false)
++int main() {
++    using namespace VideoCore;
++    std::atomic<std::uint64_t> changes{0};
++    DownloadRescan scan;
++    int calls=0;
++    bool pending=true;
++    auto predicate=[&]{++calls;return pending;};
++    CHECK(scan.Pending(changes,true,predicate));
++    for(int i=0;i<1000;++i) CHECK(scan.Pending(changes,true,predicate));
++    CHECK(calls==1);
++    changes.fetch_add(1,std::memory_order_release); // unrelated completion, overlap remains
++    CHECK(scan.Pending(changes,true,predicate)); CHECK(calls==2);
++    changes.fetch_add(1,std::memory_order_release); // newer overlapping copy added
++    CHECK(scan.Pending(changes,true,predicate)); CHECK(calls==3);
++    pending=false; changes.fetch_add(1,std::memory_order_release);
++    CHECK(!scan.Pending(changes,true,predicate)); CHECK(calls==4);
++    DownloadRescan completed; CHECK(!completed.Pending(changes,true,predicate));
++    completed.Pending(changes,false,predicate); completed.Pending(changes,false,predicate);
++    CHECK(calls==7); // disabled always evaluates original predicate
++    // Completion in the locked predicate between epoch load and next poll is not lost.
++    DownloadRescan race; pending=true;
++    CHECK(race.Pending(changes,true,[&]{pending=false;changes.fetch_add(1,std::memory_order_release);return true;}));
++    CHECK(!race.Pending(changes,true,predicate));
++    // Callback publishes backing data before removing ownership; wait sees every overlapping copy.
++    for(int trial=0;trial<200;++trial) {
++        std::mutex mutex;
++        std::vector<int> downloads{1,2};
++        int backing=0;
++        std::atomic<std::uint64_t> epoch{};
++        std::thread writer([&]{
++            for(int id:{1,2}) {
++                std::scoped_lock lock{mutex};
++                backing+=id; downloads.pop_back();
++                epoch.fetch_add(1,std::memory_order_release);
++            }
++        });
++        DownloadRescan concurrent;
++        while(concurrent.Pending(epoch,true,[&]{std::scoped_lock lock{mutex};return !downloads.empty();})) std::this_thread::yield();
++        CHECK(backing==3); writer.join();
++    }
++}
+diff --git a/tests/test_lookup_reuse.cpp b/tests/test_lookup_reuse.cpp
+new file mode 100644
+index 00000000..12f91d1c
+--- /dev/null
++++ b/tests/test_lookup_reuse.cpp
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <cstdio>
++#include <cstdlib>
++#include "video_core/texture_cache/lookup_reuse.h"
++#define CHECK(c) do { if (!(c)) { std::fprintf(stderr,"line %d: %s\n",__LINE__,#c); std::abort(); } } while(false)
++struct Result { int id, mip, layer; };
++int main() {
++    using namespace VideoCore;
++    LookupReuseEntry<TextureLookupKey, Result> cache;
++    TextureLookupKey key{};
++    key.program = 7;
++    key.specialization = &cache;
++    CHECK(!cache.Find(key, 1));
++    cache.Store(key, 1, {42, 3, 2});
++    auto hit = cache.Find(key, 1);
++    CHECK(hit && hit->id == 42 && hit->mip == 3 && hit->layer == 2);
++    // Every descriptor word participates, including mip, layer, address and view format bits.
++    for (int i=0; i<8; ++i) { auto other=key; other.descriptor[i]^=1; CHECK(!cache.Find(other,1)); }
++    auto other=key; other.specialization=nullptr; CHECK(!cache.Find(other,1));
++    other=key; other.program++; CHECK(!cache.Find(other,1));
++    for (unsigned bit=0;bit<5;++bit) {other=key;other.resource_flags^=1u<<bit;CHECK(!cache.Find(other,1));}
++    other=key; other.mip_mode++; CHECK(!cache.Find(other,1));
++    other=key; other.mip_index++; CHECK(!cache.Find(other,1));
++    other=key; other.binding_index++; CHECK(!cache.Find(other,1));
++    other=key; other.alt_tile=true; CHECK(!cache.Find(other,1));
++    CHECK(!cache.Find(key,2)); // deletion/replacement, even if allocator reuses image id
++    cache.Store(key,2,{42,0,0});
++    CHECK(cache.Find(key,2)->mip==0);
++    cache.Invalidate(); CHECK(!cache.Find(key,2)); // needs_rebind
++    cache.Store(other,3,{17,6,4});
++    CHECK(!cache.Find(key,3)); CHECK(cache.Find(other,3)->layer==4);
++}
+diff --git a/tests/test_readback_window.cpp b/tests/test_readback_window.cpp
+new file mode 100644
+index 00000000..0f93dcd7
+--- /dev/null
++++ b/tests/test_readback_window.cpp
+@@ -0,0 +1,39 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <cstdio>
++#include <cstdlib>
++#include <limits>
++#include "video_core/buffer_cache/readback_window.h"
++
++#define CHECK(condition) do { if (!(condition)) { \
++    std::fprintf(stderr, "Failed at line %d: %s\n", __LINE__, #condition); std::abort(); \
++} } while (false)
++
++int main() {
++    using namespace VideoCore;
++    CHECK(ReadbackWindowSize("") == 512 * 1024);
++    for (auto invalid : {"0", "1", "16", "63", "1024", "-64", "64garbage"}) {
++        CHECK(ReadbackWindowSize(invalid) == 512 * 1024);
++    }
++    CHECK(ReadbackWindowSize("64") == 64 * 1024);
++    CHECK(ReadbackWindowSize("128") == 128 * 1024);
++    CHECK(ReadbackWindowSize("256") == 256 * 1024);
++    for (auto value : {"64", "128", "256", "512"}) {
++        const auto window = ReadbackWindowSize(value);
++        for (std::uint64_t address = 0x100003; address < 0x300000; address += 0x3ff1) {
++            const auto [start, end] = CalculateReadbackWindow(
++                0x100003, 0x400000, address, 0x18000, window);
++            CHECK(start >= 0x100003 && end <= 0x400000);
++            CHECK(start <= address && end >= address + 0x18000);
++        }
++        const auto [start, end] = CalculateReadbackWindow(0x1003, 0x3010, 0x3000, 16, window);
++        CHECK(start == 0x1003 && end == 0x3010);
++    }
++    const auto max = std::numeric_limits<std::uint64_t>::max();
++    CHECK(ReadbackWindowEnd(max - 8, 16) == max);
++    CHECK(ReadbackWindowEnd(0x1000, 0x2000) == 0x3000);
++    const auto [start, end] = CalculateReadbackWindow(max - 0xffff, max, max - 8, 8, 0x10000);
++    CHECK(start == max - 0xffff && end == max);
++    return 0;
++}

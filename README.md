@@ -31,7 +31,7 @@ Controllers that macOS recognizes (DualSense, DualShock 4, Xbox) work through SD
 
 ## What to expect
 
-Performance varies substantially with the area and camera. On an M2 Max at 720p, the tested pool checkpoint ran around **21–26 FPS**, while a later outdoor checkpoint averaged **18.2 FPS** over two minutes with the shader-header readback fix. This is not a locked 30. First visits also stutter while shaders compile; those are cached for later runs. These are checkpoint measurements, not a full-game performance guarantee.
+Performance varies substantially with the area and camera. On an M2 Max at 720p, the tested pool checkpoint ran around **21–26 FPS**, while a later outdoor checkpoint averaged **18.6–20.1 FPS** in three two-minute combined-optimization runs (paired controls: 17.0–17.8 FPS). This is not a locked 30. First visits also stutter while shaders compile; those are cached for later runs. These are checkpoint measurements, not a full-game performance guarantee.
 
 ## What was changed to make it run on a Mac
 
@@ -43,6 +43,8 @@ Performance varies substantially with the area and camera. On an M2 Max at 720p,
 - **Readbacks:** the game reads GPU results back on the CPU every frame. The fork has a precise, asynchronous readback system: async fences, hot-range prefetch at fences, asynchronous guest page faults, and deferred page unprotection. It also adds a GPU command processor encoder thread with command recording, and fixes for Rosetta stores and PM4 address conversion.
 - **Metal render passes:** two macOS 26 index-robustness workarounds in KosmicKrisp unrolled every indirect draw through a compute pass. The launcher turns them off (`MESA_KK_DISABLE_WORKAROUNDS=12,13`). The engine also skips command-stream and draw buffer barriers inside render passes when nothing in the pass writes memory (`SHADPS4_METAL_ENCODER_ORDERING=1`), so passes stay whole on Metal.
 - **Feather flicker fix:** a page whose newer GPU→CPU copy was still in flight could be unprotected early, so the game read the previous feather simulation state. Such pages now stay protected until the newer copy lands (`SHADPS4_PREFETCH_STRICT_UNMARK=1`).
+- **Outdoor CPU reuse:** [`engine-outdoor-combined.patch`](engine-outdoor-combined.patch) adds descriptor-keyed texture lookup reuse, change-triggered pending-download scans, coherent image hash reads, and a 64 KB readback window. The launcher enables the combined profile with Metal tweaks; standalone engine defaults stay unchanged. Three alternating pairs improved FPS by 8.5%, 10.2%, and 12.5%. Separate verification compared more than 4.3 million texture lookups with the original path without mismatches. All effects, precise readbacks, and synchronization remain enabled. This update was promoted at the user's request without an additional gameplay soak.
+
 - **Driver patch** ([`driver/kosmickrisp-tlg.patch`](driver/kosmickrisp-tlg.patch), against KosmicKrisp's Mesa `b628375`): splits render encoders only for barriers that actually involve the encoder's own writes, makes the pipeline cache key include the workaround settings (so changing them can't reuse stale shaders), and adds shader diagnostic names and encoder statistics.
 - **Diagnostics and opt-in experiments,** all off by default: per-frame latency split and GPU backlog (`SHADPS4_EOP_STATS`), guest wait statistics (`SHADPS4_WAIT_STATS`), per-source barrier counts (`SHADPS4_BARRIER_STATS`), and byte-range buffer hazard tracking (`SHADPS4_PRECISE_BUFFER_HAZARDS`; +1.8 FPS on an M4 Mac mini, no change on an M2 Max). The [engine documents](engine/documents/tlg) have the details.
 
@@ -56,6 +58,7 @@ cd the-last-guardian-macos
 1. **Engine** (x86_64, needs Homebrew `cmake` and `ninja`):
    ```sh
    git -C engine apply ../engine-checkpoint-readbacks.patch
+   git -C engine apply ../engine-outdoor-combined.patch
    cmake -S engine -B engine/build-release -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
      -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
      -DENABLE_SYSTEM_VULKAN=ON -DENABLE_UPDATER=OFF -DENABLE_DISCORD_RPC=OFF

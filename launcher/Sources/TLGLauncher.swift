@@ -414,13 +414,7 @@ final class Launcher: ObservableObject {
         // shadPS4 also points the Vulkan loader at the manifest next to its executable.
         env["VK_DRIVER_FILES"] = engineDir.appendingPathComponent("kosmickrisp_mesa_icd.json").path
         env["DYLD_LIBRARY_PATH"] = engineDir.path
-        if settings.metalTweaks {
-            // Keeps render passes whole on Metal and fixes flickering feathers (see README).
-            env["MESA_KK_DISABLE_WORKAROUNDS"] = "12,13"
-            env["SHADPS4_METAL_ENCODER_ORDERING"] = "1"
-            env["SHADPS4_PREFETCH_STRICT_UNMARK"] = "1"
-        }
-        return env
+        return PerformanceEnvironment.apply(to: env, metalTweaks: settings.metalTweaks)
     }
 
     func start(_ arguments: [String], what: String) {
@@ -705,7 +699,9 @@ func selfTest() -> Int32 {
         print("engine: \(launcher.engineDir.appendingPathComponent("shadps4").path)")
         print("arguments: \(args.joined(separator: " "))")
         for key in ["VK_DRIVER_FILES", "DYLD_LIBRARY_PATH", "MESA_KK_DISABLE_WORKAROUNDS",
-                    "SHADPS4_METAL_ENCODER_ORDERING", "SHADPS4_PREFETCH_STRICT_UNMARK"] {
+                    "SHADPS4_METAL_ENCODER_ORDERING", "SHADPS4_PREFETCH_STRICT_UNMARK",
+                    "SHADPS4_TEXTURE_LOOKUP_REUSE", "SHADPS4_DOWNLOAD_RESCAN_REUSE",
+                    "SHADPS4_IMAGE_BACKING_READS", "SHADPS4_READBACK_WINDOW_KB"] {
             print("\(key)=\(env[key] ?? "")")
         }
         print("working directory: \(launcher.dataDir.path)")
