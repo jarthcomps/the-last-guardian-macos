@@ -4,7 +4,7 @@ Play **The Last Guardian** (PS4) on Mac. This repository contains a small launch
 
 > This project contains **no game files**, no PS4 firmware and no Sony software. You need your own legally obtained, decrypted dump of the game.
 
-## Quick install
+## Quick start
 
 **You need:**
 - An Apple Silicon Mac (M1 or newer) running **macOS 26 (Tahoe)** or newer.
@@ -29,11 +29,11 @@ Play **The Last Guardian** (PS4) on Mac. This repository contains a small launch
 
 Controllers that macOS recognizes (DualSense, DualShock 4, Xbox) work through SDL. Keyboard controls can be changed in shadPS4's settings.
 
-## What to expect
+## Performance
 
 On an M2 Max at 720p, the game runs at roughly **27–30 FPS** in demanding areas. It's playable, but not a locked 30. The first time each area loads you'll see some stutter while shaders compile; those are cached for later runs.
 
-## What was changed to make it run on a Mac
+## Changelist
 
 **In plain words.** A PS4 game talks directly to the PS4's graphics chip. On a Mac every one of those instructions is translated twice: from the PS4's language to Vulkan by shadPS4, then from Vulkan to Apple's Metal by a driver called KosmicKrisp. The PS4's processor code also runs under Rosetta 2. Out of the box this ran at around 20 FPS, with Trico's feathers flickering. The work here made the translation keep the Mac's graphics chip busy in larger chunks instead of stopping and starting, fixed a timing bug that let the game read half-finished feather data, and uses a community patch that renders the game at 720p.
 
@@ -84,7 +84,7 @@ This builds entirely on other people's work. Thank you to:
 - **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)** (GPL-2.0-or-later, bundled build from commit `45baeda`), which unpacks the PKG files, built from shadPS4's former PKG code.
 - The libraries shadPS4 uses, including **SDL3**, **Dear ImGui**, **FFmpeg**, **OpenAL Soft**, **Boost**, **fmt**, **glslang**, **sirit**, **Vulkan Memory Allocator**, **Zydis**, **xbyak**, **xxHash** and **zlib-ng** (full list in [`engine/externals`](engine/externals)).
 - **Apple**, for Rosetta 2 and Metal.
-- **Claude** (Anthropic) and **ChatGPT / Codex** (OpenAI), the AI assistants used for the porting, profiling and packaging work.
+- **Claude** (Anthropic) and **ChatGPT / Codex** (OpenAI), the dirty rotten, intellectual-property thieving AI assistants without which the porting, profiling and packaging work could have never taken place.
 - And **genDESIGN, Japan Studio and Sony Interactive Entertainment**, for The Last Guardian.
 
 ## Legal
