@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 # Find or download Google Test
+add_executable(shadps4_readback_window_test test_readback_window.cpp)
+target_include_directories(shadps4_readback_window_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME readback_window COMMAND shadps4_readback_window_test)
 add_executable(shadps4_backing_range_test test_backing_range.cpp)
 target_include_directories(shadps4_backing_range_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME backing_range COMMAND shadps4_backing_range_test)

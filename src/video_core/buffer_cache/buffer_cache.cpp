@@ -20,6 +20,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/download_overlap.h"
 #include "video_core/buffer_cache/prefetch_unmark_policy.h"
+#include "video_core/buffer_cache/readback_window.h"
 #include "video_core/buffer_cache/gpu_copy.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/buffer_cache/readback_batch.h"
@@ -124,13 +125,14 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
 
 std::pair<VAddr, VAddr> BufferCache::ReadbackWindow(const Buffer& buffer, VAddr device_addr,
                                                     u64 size) const {
-    constexpr u64 WindowSize = 512_KB;
+    static const u64 WindowSize = [] {
+        const char* value = std::getenv("SHADPS4_READBACK_WINDOW_KB");
+        return ReadbackWindowSize(value ? value : "");
+    }();
     const VAddr buf_start = buffer.CpuAddr();
     const VAddr buf_end = buf_start + buffer.SizeBytes();
-    const VAddr window_start =
-        std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), buf_start);
-    const VAddr window_end =
-        std::min<VAddr>(std::max<VAddr>(window_start + WindowSize, device_addr + size), buf_end);
+    const auto [window_start, window_end] =
+        CalculateReadbackWindow(buf_start, buf_end, device_addr, size, WindowSize);
     return {window_start, window_end};
 }
 
