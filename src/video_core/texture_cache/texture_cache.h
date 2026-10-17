@@ -4,6 +4,7 @@
 #pragma once
 
 #include <span>
+#include "video_core/texture_cache/lookup_reuse.h"
 
 #include <condition_variable>
 #include <mutex>
@@ -117,6 +118,11 @@ public:
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
 
+    struct CachedImageResult { ImageId id{}; ImageViewInfo view{}; };
+    using CachedImageLookup = LookupReuseEntry<TextureLookupKey, CachedImageResult>;
+    [[nodiscard]] ImageId FindImageCached(ImageDesc& desc, const TextureLookupKey& key,
+                                          CachedImageLookup& cached, bool verify);
+
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 
@@ -137,6 +143,9 @@ public:
         TouchImage(image);
         RefreshImage(image);
     }
+
+    /// Internal lookup; caller holds mutex.
+    [[nodiscard]] ImageId FindImageLocked(ImageDesc& desc, bool exact_fmt);
 
     /// Resolves overlap between existing cache image and pending merged image
     [[nodiscard]] std::tuple<ImageId, int, int> ResolveOverlap(const ImageInfo& info,

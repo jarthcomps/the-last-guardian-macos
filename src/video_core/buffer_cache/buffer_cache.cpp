@@ -1,3 +1,4 @@
+#include "video_core/buffer_cache/download_rescan.h"
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -494,6 +495,7 @@ Common::UniqueFunction<void> BufferCache::RecordDownloadCopies(Buffer& buffer, V
         }
         if (deferred_unmark) {
             inflight_downloads.push_back(std::move(inflight));
+            download_changes.fetch_add(1, std::memory_order_release);
         }
     }
     return [this, copies = std::move(copies), download = download, offset = offset,
@@ -523,6 +525,7 @@ Common::UniqueFunction<void> BufferCache::RecordDownloadCopies(Buffer& buffer, V
             pending_backing_copies.Remove(inflight_id);
         }
         pending_unmarks.emplace_back(device_addr, size);
+        download_changes.fetch_add(1, std::memory_order_release);
     };
 }
 
@@ -644,7 +647,13 @@ void BufferCache::WaitForDownloads(VAddr device_addr, u64 size) {
     }
     const u64 start = ReadbackStats::NowNs();
     bool reported = false;
-    while (IsDownloadInFlight(device_addr, size)) {
+    static const bool reuse = [] {
+        const char* v = std::getenv("SHADPS4_DOWNLOAD_RESCAN_REUSE");
+        return v && std::string_view{v} == "1";
+    }();
+    DownloadRescan rescan;
+    while (rescan.Pending(download_changes, reuse,
+                          [&] { return IsDownloadInFlight(device_addr, size); })) {
         if (!reported && ReadbackStats::NowNs() - start > 2'000'000'000ULL) {
             reported = true;
             LOG_WARNING(Render_Vulkan,

@@ -6,6 +6,7 @@
 #include "video_core/buffer_cache/download_overlap.h"
 
 #include <mutex>
+#include <atomic>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -305,6 +306,7 @@ private:
         /// The bytes the download copies (GPU-written data), inside [addr, addr + size).
         boost::container::small_vector<std::pair<VAddr, VAddr>, 2> copies;
     };
+    std::atomic<std::uint64_t> download_changes{};
     std::vector<InflightDownload> inflight_downloads; // guarded by pending_unmarks_mutex
     PendingBackingCopies pending_backing_copies; // all copies; same mutex, independent of unmarks
     // Stream copy sources of the current command buffer (readback stats only).

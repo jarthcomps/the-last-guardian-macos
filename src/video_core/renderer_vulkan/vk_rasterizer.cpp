@@ -1323,6 +1323,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
 }
 
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
+    static const bool reuse = [] {
+        const char* v = std::getenv("SHADPS4_TEXTURE_LOOKUP_REUSE");
+        return v && std::string_view{v} == "1";
+    }();
+    static const bool verify = [] {
+        const char* v = std::getenv("SHADPS4_TEXTURE_LOOKUP_VERIFY");
+        return v && std::string_view{v} == "1";
+    }();
+    auto& lookups = texture_lookups.at(static_cast<size_t>(stage.sw_stage));
+    size_t lookup_slot = 0;
     image_bindings.clear();
     const u32 first_image_idx = image_infos.size();
     // For loading/storing to explicit mip levels, when no native instruction support, bind an array
@@ -1376,7 +1386,26 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             {
                 VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::TexFindImage};
-                image_id = texture_cache.FindImage(desc);
+                if (reuse) {
+                    if (lookup_slot == lookups.size()) {
+                        lookups.emplace_back();
+                    }
+                    const VideoCore::TextureLookupKey key{
+                        .descriptor = std::bit_cast<std::array<u32, 8>>(tsharp),
+                        .specialization = &stage,
+                        .program = stage.pgm_hash,
+                        .resource_flags = u32(image_desc.is_depth) | (u32(image_desc.is_atomic) << 1) |
+                                          (u32(image_desc.is_array) << 2) | (u32(image_desc.is_written) << 3) |
+                                          (u32(image_desc.is_r128) << 4),
+                        .mip_mode = static_cast<u32>(mip_fallback_mode),
+                        .mip_index = image_desc.constant_mip_index,
+                        .binding_index = static_cast<u32>(i),
+                        .alt_tile = desc.info.alt_tile,
+                    };
+                    image_id = texture_cache.FindImageCached(desc, key, lookups[lookup_slot++], verify);
+                } else {
+                    image_id = texture_cache.FindImage(desc);
+                }
             }
             auto* image = &texture_cache.GetImage(image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {

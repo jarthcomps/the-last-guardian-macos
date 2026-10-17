@@ -581,10 +581,41 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
+    std::scoped_lock lock{mutex};
+    return FindImageLocked(desc, exact_fmt);
+}
+
+ImageId TextureCache::FindImageCached(ImageDesc& desc, const TextureLookupKey& key,
+                                     CachedImageLookup& cached, bool verify) {
+    std::scoped_lock lock{mutex};
+    if (const auto* hit = cached.Find(key, ImageGeneration());
+        hit && !slot_images[hit->id].binding.needs_rebind) {
+        const auto expected = *hit;
+        if (verify) {
+            static u64 verified_hits{};
+            if (++verified_hits == 1 || verified_hits % 100000 == 0) {
+                LOG_INFO(Render_Vulkan, "Texture lookup verification: {} hits", verified_hits);
+            }
+            const auto full = FindImageLocked(desc, false);
+            ASSERT_MSG(full == expected.id && desc.view_info == expected.view,
+                       "texture lookup reuse mismatch");
+        } else {
+            desc.view_info = expected.view;
+            auto& image = slot_images[expected.id];
+            image.tick_accessed_last = gc_tick;
+            TouchImage(image);
+        }
+        return expected.id;
+    }
+    const auto id = FindImageLocked(desc, false);
+    cached.Store(key, ImageGeneration(), {id, desc.view_info});
+    return id;
+}
+
+ImageId TextureCache::FindImageLocked(ImageDesc& desc, bool exact_fmt) {
     const auto& info = desc.info;
     ASSERT(info.guest_address != 0);
 
-    std::scoped_lock lock{mutex};
     ImageIds image_ids;
     ForEachImageInRegion(info.guest_address, info.guest_size,
                          [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });

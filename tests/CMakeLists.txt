@@ -1,3 +1,9 @@
+add_executable(shadps4_lookup_reuse_test test_lookup_reuse.cpp)
+target_include_directories(shadps4_lookup_reuse_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME lookup_reuse COMMAND shadps4_lookup_reuse_test)
+add_executable(shadps4_download_rescan_test test_download_rescan.cpp)
+target_include_directories(shadps4_download_rescan_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME download_rescan COMMAND shadps4_download_rescan_test)
 # SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 

@@ -209,6 +209,7 @@ private:
     };
     std::array<CachedTarget, AmdGpu::NUM_COLOR_BUFFERS + 1> rt_cache{};
     const bool rt_reuse_enabled;
+    std::array<std::vector<VideoCore::TextureCache::CachedImageLookup>, 8> texture_lookups{};
     const u32 encoder_debug;
     /// Encoder thread: fences without readbacks wait for all work recorded before them.
     const bool full_eop_fences;
