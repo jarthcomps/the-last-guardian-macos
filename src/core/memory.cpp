@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
+#include "core/backing_range.h"
 #include "core/emulator_settings.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/memory.h"
@@ -220,31 +221,44 @@ const u8* MemoryManager::BackingPointer(VAddr virtual_addr, u64 size) {
     const u64 generation = mutex.WriteGeneration();
     if ((generation & 1) == 0) {
         for (const auto& area : areas) {
-            if (area.generation == generation && virtual_addr >= area.base &&
-                virtual_addr + size <= area.end) {
+            if (area.generation == generation &&
+                ContainsBackingRequest(area.base, area.end - area.base, virtual_addr, size)) {
                 return area.backing + (virtual_addr - area.base);
             }
         }
     }
 
     std::shared_lock lk{mutex};
-    if (!IsValidMapping(virtual_addr, size)) {
+    if (size == 0 || !IsValidMapping(virtual_addr, size)) {
         return nullptr;
     }
     const auto& vma = FindVMA(virtual_addr)->second;
-    if (!HasPhysicalBacking(vma) || vma.phys_areas.empty()) {
+    if (!vma.IsMapped() || !HasPhysicalBacking(vma) || vma.phys_areas.empty()) {
         return nullptr;
     }
+#ifdef __APPLE__
+    // AddressSpace maps executable guest memory anonymously on macOS, so the physical
+    // allocation recorded in the VMA is not an alias of those guest bytes.
+    if (True(vma.prot & MemoryProt::CpuExec)) {
+        return nullptr;
+    }
+#endif
     auto phys = vma.phys_areas.upper_bound(virtual_addr - vma.base);
     if (phys == vma.phys_areas.begin()) {
         return nullptr;
     }
     phys = std::prev(phys);
-    const VAddr area_base = vma.base + phys->first;
-    const VAddr area_end = area_base + phys->second.size;
-    if (virtual_addr + size > area_end) {
+    if (phys->first >= vma.size || impl.BackingBase() == nullptr) {
         return nullptr;
     }
+    const VAddr area_base = vma.base + phys->first;
+    const u64 area_size = std::min(phys->second.size, vma.size - phys->first);
+    const BackingRange range{area_base, area_size, phys->second.base, true};
+    const auto offset = ResolveBackingOffset(range, impl.BackingLength(), virtual_addr, size);
+    if (!offset) {
+        return nullptr;
+    }
+    const VAddr area_end = area_base + area_size;
     const u8* backing = impl.BackingBase() + phys->second.base;
     // No writer can be active while the shared lock is held, so the generation is stable.
     areas[next_area++ % areas.size()] = {
@@ -253,7 +267,7 @@ const u8* MemoryManager::BackingPointer(VAddr virtual_addr, u64 size) {
         .backing = backing,
         .generation = mutex.WriteGeneration(),
     };
-    return backing + (virtual_addr - area_base);
+    return impl.BackingBase() + *offset;
 }
 
 bool MemoryManager::VerifyBackingRead(VAddr virtual_addr, const u8* backing, u64 size,

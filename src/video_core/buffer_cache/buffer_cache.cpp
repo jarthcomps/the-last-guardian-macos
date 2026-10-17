@@ -14,9 +14,11 @@
 #include "common/alignment.h"
 #include "common/debug.h"
 #include "common/scope_exit.h"
+#include "core/backing_range.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/buffer_cache/download_overlap.h"
 #include "video_core/buffer_cache/prefetch_unmark_policy.h"
 #include "video_core/buffer_cache/gpu_copy.h"
 #include "video_core/buffer_cache/memory_tracker.h"
@@ -65,6 +67,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       memory{Core::Memory::Instance()}, texture_cache{texture_cache_},
       stream_reuse_enabled{EmulatorSettings.IsReadbackStreamReuseEnabled()},
+      shader_backing_reads{EmulatorSettings.IsShaderBackingReadsEnabled()},
       prefetch_mode{EmulatorSettings.GetReadbackPrefetchMode()},
       strict_prefetch_unmark{[] {
           const char* value = std::getenv("SHADPS4_PREFETCH_STRICT_UNMARK");
@@ -475,7 +478,7 @@ Common::UniqueFunction<void> BufferCache::RecordDownloadCopies(Buffer& buffer, V
         }
     }
     u64 inflight_id = 0;
-    if (deferred_unmark) {
+    if (deferred_unmark || shader_backing_reads) {
         std::scoped_lock lk{pending_unmarks_mutex};
         inflight_id = ++next_inflight_id;
         InflightDownload inflight{device_addr, size, inflight_id, {}};
@@ -483,7 +486,13 @@ Common::UniqueFunction<void> BufferCache::RecordDownloadCopies(Buffer& buffer, V
             const VAddr copy_addr = buffer.CpuAddr() + copy.srcOffset;
             inflight.copies.emplace_back(copy_addr, copy_addr + copy.size);
         }
-        inflight_downloads.push_back(std::move(inflight));
+        if (shader_backing_reads) {
+            pending_backing_copies.Add(inflight_id,
+                                      {inflight.copies.data(), inflight.copies.size()});
+        }
+        if (deferred_unmark) {
+            inflight_downloads.push_back(std::move(inflight));
+        }
     }
     return [this, copies = std::move(copies), download = download, offset = offset,
             buffer_addr = buffer.CpuAddr(), device_addr, size, deferred_unmark, inflight_id] {
@@ -496,6 +505,10 @@ Common::UniqueFunction<void> BufferCache::RecordDownloadCopies(Buffer& buffer, V
         }
         if (!deferred_unmark) {
             memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+            if (shader_backing_reads) {
+                std::scoped_lock lk{pending_unmarks_mutex};
+                pending_backing_copies.Remove(inflight_id);
+            }
             return;
         }
         // Running outside the GPU thread. The GPU may have written the range again after the
@@ -504,6 +517,9 @@ Common::UniqueFunction<void> BufferCache::RecordDownloadCopies(Buffer& buffer, V
         std::scoped_lock lk{pending_unmarks_mutex};
         std::erase_if(inflight_downloads,
                       [inflight_id](const auto& download) { return download.id == inflight_id; });
+        if (shader_backing_reads) {
+            pending_backing_copies.Remove(inflight_id);
+        }
         pending_unmarks.emplace_back(device_addr, size);
     };
 }
@@ -526,11 +542,19 @@ void BufferCache::ApplyPendingUnmarks() {
 }
 
 bool BufferCache::IsCpuCopyCurrent(VAddr device_addr, u64 size) {
-    if (!memory_tracker->IsRegionGpuModified(device_addr, size)) {
-        return true;
+    if (!shader_backing_reads) {
+        return false; // Pending byte ownership is not tracked when the feature is disabled.
     }
+    // Internal shaders can live in host memory, above the guest tracker's 40-bit table.
+    // Such addresses have no tracked guest backing; let the caller use its normal read.
+    if (!Core::ContainsBackingRequest(0, u64{1} << MemoryTracker::MAX_CPU_PAGE_BITS,
+                                     device_addr, size)) {
+        return false;
+    }
+    // Page state can already be clear while an asynchronous copy is still pending. Check
+    // byte ownership even then; a pending write to these bytes makes the CPU copy stale.
     return !gpu_modified_ranges.Intersects(device_addr, size) &&
-           !IsDownloadInFlight(device_addr, size);
+           !IsReadbackCopyInFlight(device_addr, size);
 }
 
 void BufferCache::TraceCpInflightFault(VAddr device_addr, u64 size, bool is_write,
@@ -582,6 +606,11 @@ bool BufferCache::IsDownloadInFlight(VAddr device_addr, u64 size) {
     return std::ranges::any_of(inflight_downloads, [&](const InflightDownload& download) {
         return download.addr < device_addr + size && device_addr < download.addr + download.size;
     });
+}
+
+bool BufferCache::IsReadbackCopyInFlight(VAddr device_addr, u64 size) {
+    std::scoped_lock lk{pending_unmarks_mutex};
+    return pending_backing_copies.Overlaps(device_addr, size);
 }
 
 void BufferCache::WaitForDownloads(VAddr device_addr, u64 size) {

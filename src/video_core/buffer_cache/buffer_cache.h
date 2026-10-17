@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "video_core/buffer_cache/download_overlap.h"
+
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -192,6 +194,7 @@ public:
 
     /// Returns true if an asynchronous download of part of the range has not landed yet.
     bool IsDownloadInFlight(VAddr device_addr, u64 size);
+    bool IsReadbackCopyInFlight(VAddr device_addr, u64 size);
 
     /// SHADPS4_CP_FAULT_TRACE=1: logs a command processor fault that waits for an in-flight
     /// download (page state, the upload being done, the downloads and the native stack).
@@ -303,6 +306,7 @@ private:
         boost::container::small_vector<std::pair<VAddr, VAddr>, 2> copies;
     };
     std::vector<InflightDownload> inflight_downloads; // guarded by pending_unmarks_mutex
+    PendingBackingCopies pending_backing_copies; // all copies; same mutex, independent of unmarks
     // Stream copy sources of the current command buffer (readback stats only).
     void NotePendingStreamSource(VAddr device_addr, u64 size);
     bool OverlapsPendingStreamSource(VAddr device_addr, u64 size);
@@ -310,6 +314,7 @@ private:
     /// readback_stream_reuse_enabled: stream copies of the current command buffer by range.
     /// A copy is only reused while the command buffer, and the stream buffer pass, are the same.
     const bool stream_reuse_enabled;
+    const bool shader_backing_reads;
     /// readback_prefetch_mode: 0 = no prefetch, 1 = read and write faults, 2 = read faults only.
     const u32 prefetch_mode;
     /// SHADPS4_PREFETCH_STRICT_UNMARK=1: pages with a newer download in flight stay protected

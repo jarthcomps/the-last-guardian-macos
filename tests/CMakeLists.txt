@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 # Find or download Google Test
+add_executable(shadps4_backing_range_test test_backing_range.cpp)
+target_include_directories(shadps4_backing_range_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME backing_range COMMAND shadps4_backing_range_test)
+add_executable(shadps4_download_overlap_test test_download_overlap.cpp)
+target_include_directories(shadps4_download_overlap_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME download_overlap COMMAND shadps4_download_overlap_test)
 add_executable(shadps4_shader_diagnostic_names_test test_shader_diagnostic_names.cpp)
 target_include_directories(shadps4_shader_diagnostic_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME shader_diagnostic_names COMMAND shadps4_shader_diagnostic_names_test)

@@ -33,6 +33,8 @@ public:
         return backing_base;
     }
 
+    [[nodiscard]] u64 BackingLength() const noexcept;
+
     [[nodiscard]] VAddr SystemManagedVirtualBase() noexcept {
         return reinterpret_cast<VAddr>(system_managed_base);
     }
