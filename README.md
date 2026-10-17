@@ -20,7 +20,7 @@ Play your own copy of **The Last Guardian** (PS4) on an Apple Silicon Mac. This 
 3. Open it the first time by right-clicking the app and choosing **Open**. If macOS still refuses, go to **System Settings → Privacy & Security** and click **Open Anyway**. The app isn't notarized by Apple, which is why this step is needed once.
    - Comfortable with Terminal? This does the same thing: `xattr -dr com.apple.quarantine "/Applications/The Last Guardian.app"`
 4. In the launcher:
-   - **Install from PKG files → Choose PKGs…**: pick the game PKG, then the update PKG (or Cancel to skip it), then a folder to unpack into. Unpacking takes a few minutes and fills in both folders for you.
+   - **Install from PKG files → Choose PKGs…**: pick the game PKG, then the update PKG (or Cancel to skip it), then a folder to unpack into. A progress bar tracks bytes actually unpacked, including progress within large files. It shows the current package (game, then update), bytes, elapsed time, and an estimated time remaining for that package. The bar starts after package scanning and reaches 100% after the installer validates the output. Unpacking fills in both folders for you.
    - Already extracted? Use **Game folder → Choose…** (the folder with `eboot.bin`) and **Update folder → Choose…** instead. An update next to the game named `<game folder>-UPDATE` is found automatically.
    - Optional: **System modules → Import…** copies `.sprx` files from a folder you pick.
    - Pick a resolution (720p is recommended) and press **Play**.
@@ -65,7 +65,7 @@ cd the-last-guardian-macos
      -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
    cmake --build build-driver
    ```
-3. **PKG extractor:** build `ps4-pkg-tool` from [ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools).
+3. **PKG extractor:** check out [ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools) at `45baeda`, apply `launcher/ps4-pkg-tools-progress.patch` with `git apply` from that checkout, and build `ps4-pkg-tool`. This patch reports uncompressed bytes written at most four times per second, flushes progress through pipes, and detects output write failures.
 4. **Launcher and app:** put `shadps4`, `libvulkan.dylib` (the Khronos Vulkan loader), `libvulkan_kosmickrisp.dylib` and `kosmickrisp_mesa_icd.json` in one folder, then run:
    ```sh
    ENGINE_DIR=/path/to/that/folder PKG_TOOL=/path/to/ps4-pkg-tool launcher/build.sh
@@ -74,6 +74,16 @@ cd the-last-guardian-macos
 
 ## Credits
 
+The launcher tests cover live pipe output, split UTF-8/lines, byte totals above 4 GB, package transitions, estimates, completion, and failure. With Xcode and XcodeGen installed:
+
+```sh
+xcodegen generate --spec launcher/project.yml
+xcodebuild test -project launcher/LauncherTests.xcodeproj -scheme TLGLauncher \
+  -destination 'platform=macOS' -derivedDataPath build-tests
+```
+
+This runs unit tests and native UI tests using a small extractor fixture; no game files are needed. The UI test runner uses a dedicated fixture folder under `/private/tmp/guardian-ui-tests/`. The release app does not include the test launch hooks. The extractor patch also adds a CTest `byte_progress` test. For an optional full extraction check with your own PKG, set `TLG_TEST_PKG`, `TLG_TEST_PKG_TOOL`, and `TLG_TEST_REFERENCE` (an already extracted matching folder), then run `python3 launcher/Tests/test_real_pkg_progress.py`. Set `TLG_TEST_LAUNCHER` to an app's `Contents/MacOS/TLGLauncher` to exercise its bundled extractor through `--install-pkg`. It checks live reports and compares every extracted file by SHA-256.
+
 This builds entirely on other people's work. Thank you to:
 
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4)** and its contributors, the PS4 emulator this is built on (GPL-2.0).
@@ -81,7 +91,7 @@ This builds entirely on other people's work. Thank you to:
 - **[KosmicKrisp](https://docs.mesa3d.org/drivers/kosmickrisp.html)** (LunarG and the Mesa developers), the Vulkan driver on Metal that makes shadPS4 possible on macOS, and **[the Mesa 3D project](https://mesa3d.org)**. Also **shadexternals/mesa-kosmickrisp**, the shadPS4 team's packaging of it.
 - **[Khronos Group](https://github.com/KhronosGroup/Vulkan-Loader)** for Vulkan and the Vulkan loader.
 - **illusion** and **kalaposfos**, for the 720p and 540p resolution patches.
-- **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)** (GPL-2.0-or-later, bundled build from commit `45baeda`), which unpacks the PKG files, built from shadPS4's former PKG code.
+- **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)** (GPL-2.0-or-later, commit `45baeda` plus the included byte-progress patch), which unpacks the PKG files, built from shadPS4's former PKG code.
 - The libraries shadPS4 uses, including **SDL3**, **Dear ImGui**, **FFmpeg**, **OpenAL Soft**, **Boost**, **fmt**, **glslang**, **sirit**, **Vulkan Memory Allocator**, **Zydis**, **xbyak**, **xxHash** and **zlib-ng** (full list in [`engine/externals`](engine/externals)).
 - **Apple**, for Rosetta 2 and Metal.
 - **Claude** (Anthropic) and **ChatGPT / Codex** (OpenAI), the AI assistants used for the porting, profiling and packaging work.
@@ -89,6 +99,6 @@ This builds entirely on other people's work. Thank you to:
 
 ## Legal
 
-The Last Guardian is © Sony Interactive Entertainment. PlayStation and PS4 are trademarks of Sony Interactive Entertainment Inc. This project isn't affiliated with or endorsed by Sony, genDESIGN or the shadPS4 team. It ships no game data, firmware or keys of its own; the bundled PKG extractor is the unmodified open-source ps4-pkg-tools. Use it only with games and system files you legally own.
+The Last Guardian is © Sony Interactive Entertainment. PlayStation and PS4 are trademarks of Sony Interactive Entertainment Inc. This project isn't affiliated with or endorsed by Sony, genDESIGN or the shadPS4 team. It ships no game data, firmware or keys of its own; the bundled PKG extractor is open-source ps4-pkg-tools with the included progress-reporting patch. Use it only with games and system files you legally own.
 
 The launcher and engine are licensed under the GPL-2.0 (see [LICENSE](LICENSE)). The bundled KosmicKrisp driver is MIT licensed (Mesa), and the Vulkan loader is Apache-2.0.

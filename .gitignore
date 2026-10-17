@@ -1,3 +1,5 @@
 build/
 launcher/engine-bin/
 .DS_Store
+build-tests/
+launcher/*.xcodeproj/

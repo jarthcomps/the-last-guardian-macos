@@ -1,0 +1,257 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 33e5833..38001e2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -100,6 +100,13 @@ if(MSVC)
+ endif()
+ install(TARGETS ps4-pkg-tool RUNTIME DESTINATION bin)
+ 
++include(CTest)
++if(BUILD_TESTING)
++  add_executable(byte_progress_test tests/byte_progress.cpp)
++  target_include_directories(byte_progress_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
++  add_test(NAME byte_progress COMMAND byte_progress_test)
++endif()
++
+ #---------------------------------------------
+ # Optional minimal Qt GUI frontend
+ #---------------------------------------------
+diff --git a/src/cli/main.cpp b/src/cli/main.cpp
+index 3ee6b75..bef1af0 100644
+--- a/src/cli/main.cpp
++++ b/src/cli/main.cpp
+@@ -3,9 +3,12 @@
+ #include <filesystem>
+ #include <string>
+ #include <vector>
++#include <chrono>
+ #include "pkg_tool/lib.h"
+ 
+ static bool ProcessPkg(const std::filesystem::path& pkgPath, const std::filesystem::path& baseOutDir) {
++    // Pipes are normally block buffered. The launcher must receive progress while we work.
++    std::cout << std::unitbuf;
+     std::cout << "\nProcessing PKG: " << pkgPath.filename() << std::endl;
+     PkgMetadata meta;
+     if (auto err = ReadPkgMetadata(pkgPath, meta)) {
+@@ -20,11 +23,19 @@ static bool ProcessPkg(const std::filesystem::path& pkgPath, const std::filesyst
+     std::cout << "Content Flags: " << meta.flags << "\n";
+     std::cout << "Extracting to: " << actualOutDir << "\n";
+     uint32_t last_report = 0;
++    auto last_bytes_report = std::chrono::steady_clock::time_point::min();
+     auto err = ExtractPkg(pkgPath, actualOutDir, {}, [&](uint32_t extracted, uint32_t total) {
+         if (extracted == total || extracted - last_report >= 10) {
+             std::cout << "Progress: " << extracted << " / " << total << " files\n";
+             last_report = extracted;
+         }
++    }, [&](uint64_t written, uint64_t total) {
++        const auto now = std::chrono::steady_clock::now();
++        if (written == 0 || written == total ||
++            now - last_bytes_report >= std::chrono::milliseconds(250)) {
++            std::cout << "TLG_BYTES " << written << " " << total << "\n";
++            last_bytes_report = now;
++        }
+     });
+     if (err) {
+         std::cerr << "Extraction failed: " << *err << "\n";
+diff --git a/src/core/file_format/pkg.cpp b/src/core/file_format/pkg.cpp
+index 01a5a2c..c0a07bc 100644
+--- a/src/core/file_format/pkg.cpp
++++ b/src/core/file_format/pkg.cpp
+@@ -402,7 +402,12 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+     return true;
+ }
+ 
+-void PKG::ExtractFiles(const int index) {
++u64 PKG::GetFileSize(int index) const {
++    const auto& entry = fsTable.at(index);
++    return entry.type == PFS_FILE ? static_cast<u64>(iNodeBuf.at(entry.inode).Size) : 0;
++}
++
++void PKG::ExtractFiles(const int index, const std::function<void(u64)>& written) {
+     int inode_number = fsTable[index].inode;
+     int inode_type = fsTable[index].type;
+     std::string inode_name = fsTable[index].name;
+@@ -410,15 +415,16 @@ void PKG::ExtractFiles(const int index) {
+     if (inode_type == PFS_FILE) {
+         int sector_loc = iNodeBuf[inode_number].loc;
+         int nblocks = iNodeBuf[inode_number].Blocks;
+-        int bsize = iNodeBuf[inode_number].Size;
++        const s64 bsize = iNodeBuf[inode_number].Size;
+ 
+         Common::FS::IOFile inflated;
+         inflated.Open(extractPaths[inode_number], Common::FS::FileAccessMode::Write);
++        if (!inflated.IsOpen()) throw std::runtime_error("Cannot open output file");
+ 
+         Common::FS::IOFile pkgFile; // Open the file for each iteration to avoid conflict.
+         pkgFile.Open(pkgpath, Common::FS::FileAccessMode::Read);
+ 
+-        int size_decompressed = 0;
++        s64 size_decompressed = 0;
+         std::vector<char> compressedData;
+         std::vector<char> decompressedData(0x10000);
+ 
+@@ -453,15 +459,15 @@ void PKG::ExtractFiles(const int index) {
+ 
+             size_decompressed += 0x10000;
+ 
+-            if (j < nblocks - 1) {
+-                inflated.WriteRaw<u8>(decompressedData.data(), decompressedData.size());
+-            } else {
+-                // This is to remove the zeros at the end of the file.
+-                const u32 write_size = decompressedData.size() - (size_decompressed - bsize);
+-                inflated.WriteRaw<u8>(decompressedData.data(), write_size);
+-            }
++            // Report only successfully written, uncompressed bytes, including a partial last block.
++            const size_t write_size = j < nblocks - 1 ? decompressedData.size()
++                : decompressedData.size() - (size_decompressed - bsize);
++            if (inflated.WriteRaw<u8>(decompressedData.data(), write_size) != write_size)
++                throw std::runtime_error("Cannot write output file (check free disk space)");
++            if (written) written(write_size);
+         }
+         pkgFile.Close();
++        if (!inflated.Flush()) throw std::runtime_error("Cannot flush output file");
+         inflated.Close();
+     }
+ }
+diff --git a/src/core/file_format/pkg.h b/src/core/file_format/pkg.h
+index 8faffe3..5e1459d 100644
+--- a/src/core/file_format/pkg.h
++++ b/src/core/file_format/pkg.h
+@@ -5,6 +5,7 @@
+ 
+ #include <array>
+ #include <filesystem>
++#include <functional>
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
+@@ -103,7 +104,8 @@ public:
+     ~PKG();
+ 
+     bool Open(const std::filesystem::path& filepath, std::string& failreason);
+-    void ExtractFiles(const int index);
++    void ExtractFiles(const int index, const std::function<void(u64)>& written = {});
++    u64 GetFileSize(int index) const;
+     bool Extract(const std::filesystem::path& filepath, const std::filesystem::path& extract,
+                  std::string& failreason);
+ 
+diff --git a/src/pkg_tool/byte_progress.h b/src/pkg_tool/byte_progress.h
+new file mode 100644
+index 0000000..bae7446
+--- /dev/null
++++ b/src/pkg_tool/byte_progress.h
+@@ -0,0 +1,25 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++#include <cstdint>
++#include <functional>
++#include <stdexcept>
++#include <utility>
++
++using ByteProgressCallback = std::function<void(uint64_t written, uint64_t total)>;
++
++// One counter per package; called only after successful output writes.
++class ByteProgress {
++public:
++    ByteProgress(uint64_t total, ByteProgressCallback callback)
++        : total_(total), callback_(std::move(callback)) {
++        if (callback_) callback_(0, total_);
++    }
++    void Written(uint64_t bytes) {
++        if (bytes > total_ - written_) throw std::runtime_error("Invalid extracted byte count");
++        written_ += bytes;
++        if (callback_) callback_(written_, total_);
++    }
++private:
++    uint64_t total_, written_ = 0;
++    ByteProgressCallback callback_;
++};
+diff --git a/src/pkg_tool/lib.cpp b/src/pkg_tool/lib.cpp
+index 0b410e2..667c731 100644
+--- a/src/pkg_tool/lib.cpp
++++ b/src/pkg_tool/lib.cpp
+@@ -24,7 +24,8 @@ std::optional<std::string> ReadPkgMetadata(const std::filesystem::path& pkg_path
+ std::optional<std::string> ExtractPkg(const std::filesystem::path& pkg_path,
+                                       const std::filesystem::path& out_dir,
+                                       const std::vector<int>& indices,
+-                                      const ProgressCallback& progress_cb) {
++                                      const ProgressCallback& progress_cb,
++                                      const ByteProgressCallback& byte_progress_cb) {
+     if (!std::filesystem::exists(pkg_path)) {
+         return std::string("PKG file does not exist: ") + pkg_path.string();
+     }
+@@ -48,10 +49,13 @@ std::optional<std::string> ExtractPkg(const std::filesystem::path& pkg_path,
+         for (uint32_t i = 0; i < total; ++i) list.push_back(static_cast<int>(i));
+     }
+ 
++    uint64_t total_bytes = 0;
++    for (int idx : list) total_bytes += pkg.GetFileSize(idx);
++    ByteProgress bytes(total_bytes, byte_progress_cb);
+     uint32_t extracted = 0;
+     for (int idx : list) {
+         try {
+-            pkg.ExtractFiles(idx);
++            pkg.ExtractFiles(idx, [&](uint64_t written) { bytes.Written(written); });
+         } catch (const std::exception& e) {
+             return std::string("Failed extracting file index ") + std::to_string(idx) + ": " + e.what();
+         } catch (...) {
+diff --git a/src/pkg_tool/lib.h b/src/pkg_tool/lib.h
+index a373755..5165a37 100644
+--- a/src/pkg_tool/lib.h
++++ b/src/pkg_tool/lib.h
+@@ -5,6 +5,7 @@
+ #include <optional>
+ #include <string>
+ #include <vector>
++#include "pkg_tool/byte_progress.h"
+ 
+ struct PkgMetadata {
+     std::string title_id;
+@@ -22,7 +23,8 @@ std::optional<std::string> ReadPkgMetadata(const std::filesystem::path& pkg_path
+ std::optional<std::string> ExtractPkg(const std::filesystem::path& pkg_path,
+                                       const std::filesystem::path& out_dir,
+                                       const std::vector<int>& indices,
+-                                      const ProgressCallback& progress_cb);
++                                      const ProgressCallback& progress_cb,
++                                      const ByteProgressCallback& byte_progress_cb = {});
+ 
+ // Helper to gather .pkg files in a directory (non-recursive or recursive as chosen).
+ std::vector<std::filesystem::path> ListPkgFiles(const std::filesystem::path& dir, bool recursive);
+diff --git a/tests/byte_progress.cpp b/tests/byte_progress.cpp
+new file mode 100644
+index 0000000..174d36f
+--- /dev/null
++++ b/tests/byte_progress.cpp
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "pkg_tool/byte_progress.h"
++#include <cstdlib>
++#include <iostream>
++#include <vector>
++
++void check(bool condition) {
++    if (!condition) { std::cerr << "Byte progress assertion failed\n"; std::exit(1); }
++}
++
++int main() {
++    // Two files, the first bigger than 4 GiB: callbacks must arrive within a file,
++    // accumulate across file boundaries, and count a short final decompression block exactly.
++    constexpr uint64_t big = uint64_t{5} << 30, tail = 17, total = big + tail;
++    std::vector<std::pair<uint64_t, uint64_t>> events;
++    ByteProgress progress(total, [&](auto done, auto size) { events.emplace_back(done, size); });
++    check(events.size() == 1 && events.back() == std::pair<uint64_t, uint64_t>(0, total));
++    progress.Written(65536);
++    check(events.back().first == 65536 && events.back().first < big);
++    progress.Written(big - 65536);
++    check(events.back().first == big);
++    progress.Written(tail);
++    check(events.back().first == total && events.back().second == total);
++    bool rejected = false;
++    try { progress.Written(1); } catch (const std::runtime_error&) { rejected = true; }
++    check(rejected && events.back().first == total);
++    ByteProgress update(100, [&](auto done, auto size) { events.emplace_back(done, size); });
++    check(events.back().first == 0 && events.back().second == 100);
++    ByteProgress empty(0, {});
++    empty.Written(0);
++    std::cout << "Byte progress tests passed\n";
++}

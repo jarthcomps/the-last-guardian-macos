@@ -82,6 +82,7 @@ final class Launcher: ObservableObject {
     @Published var running = false
     @Published var sysModuleCount = 0
     @Published var extracting = false
+    @Published var extractionProgress: ExtractionProgress?
 
     let fm = FileManager.default
     let dataDir: URL
@@ -193,22 +194,26 @@ final class Launcher: ObservableObject {
         process.standardOutput = pipe
         process.standardError = pipe
         try process.run()
-        var log = ""
+        var diagnostic = ""
+        var lines = ExtractionLines()
+        var completed = false
         let handle = pipe.fileHandleForReading
         while true {
             let data = handle.availableData
-            if data.isEmpty { break }
-            let text = String(decoding: data, as: UTF8.self)
-            log += text
-            for line in text.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
-                progress(String(line))
+            for line in lines.append(data, endOfFile: data.isEmpty) {
+                if !line.hasPrefix("TLG_BYTES"), !line.hasPrefix("Progress:") {
+                    diagnostic = String(line.prefix(600))
+                }
+                if line.hasPrefix("Extraction complete.") { completed = true }
+                progress(line)
             }
+            if data.isEmpty { break }
         }
         process.waitUntilExit()
-        guard process.terminationStatus == 0, log.contains("Extraction complete") else {
+        guard process.terminationStatus == 0, completed else {
             throw NSError(domain: "TLGLauncher", code: Int(process.terminationStatus),
                           userInfo: [NSLocalizedDescriptionKey:
-                                        "Extracting \(pkg.lastPathComponent) failed."])
+                                        "Extracting \(pkg.lastPathComponent) failed.\n\(diagnostic)"])
         }
     }
 
@@ -267,30 +272,48 @@ final class Launcher: ObservableObject {
         guard let destination = choose(
             "Choose where to unpack the game. It needs about 27 GB of free space.")
         else { return }
+        startInstall(gamePKG: gamePKG, updatePKG: updatePKG, destination: destination)
+    }
+
+    private enum InstallEvent: Sendable {
+        case progress(String)
+        case success(URL, URL?)
+        case failure(String)
+    }
+
+    func startInstall(gamePKG: URL, updatePKG: URL?, destination: URL, tool: URL? = nil) {
+        guard !extracting, !running else { return }
         extracting = true
-        message = "Unpacking… this takes several minutes."
-        let tool = pkgTool
+        extractionProgress = ExtractionProgress(packageCount: updatePKG == nil ? 1 : 2)
+        message = ""
+        let tool = tool ?? pkgTool
+        let (events, continuation) = AsyncStream<InstallEvent>.makeStream()
         Task.detached {
             do {
                 let result = try Launcher.installPKGs(
                     tool: tool, game: gamePKG, update: updatePKG, destination: destination,
-                    progress: { line in
-                        Task { @MainActor in
-                            if line.hasPrefix("Progress") || line.hasPrefix("Unpacking") {
-                                self.message = line
-                            }
-                        }
-                    })
-                await MainActor.run {
-                    self.settings.gamePath = result.game.path
-                    if let update = result.update { self.settings.updatePath = update.path }
-                    self.extracting = false
-                    self.message = "Unpacked. Ready to play."
-                }
+                    progress: { continuation.yield(.progress($0)) })
+                continuation.yield(.success(result.game, result.update))
             } catch {
-                await MainActor.run {
-                    self.extracting = false
-                    self.message = error.localizedDescription
+                continuation.yield(.failure(error.localizedDescription))
+            }
+            continuation.finish()
+        }
+        // A single consumer preserves order, including the final success/error event.
+        Task {
+            for await event in events {
+                switch event {
+                case .progress(let line): extractionProgress?.receive(line)
+                case .success(let game, let update):
+                    settings.gamePath = game.path
+                    if let update { settings.updatePath = update.path }
+                    extractionProgress?.complete()
+                    extracting = false
+                    message = "Unpacked. Ready to play."
+                case .failure(let error):
+                    extractionProgress?.fail()
+                    extracting = false
+                    message = error
                 }
             }
         }
@@ -481,6 +504,43 @@ final class Launcher: ObservableObject {
 
 // MARK: - Interface
 
+struct ExtractionProgressView: View {
+    let progress: ExtractionProgress
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(progress.title).font(.callout).bold()
+                        .accessibilityLabel(progress.title)
+                        .accessibilityIdentifier("extraction-stage")
+                    Spacer()
+                    Text(progress.percent).monospacedDigit()
+                        .accessibilityLabel(progress.percent)
+                        .accessibilityIdentifier("extraction-percent")
+                }
+                .accessibilityElement(children: .contain)
+                if let fraction = progress.fraction {
+                    ProgressView(value: fraction, total: 1)
+                        .accessibilityLabel("Package extraction")
+                        .accessibilityValue(progress.percent)
+                        .accessibilityIdentifier("extraction-progress")
+                } else {
+                    ProgressView().controlSize(.small)
+                        .accessibilityLabel("Reading package contents")
+                }
+                Text(progress.amount).font(.caption)
+                    .accessibilityLabel(progress.amount)
+                    .accessibilityIdentifier("extraction-amount")
+                Text(progress.timing(now: context.date)).font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel(progress.timing(now: context.date))
+                    .accessibilityIdentifier("extraction-timing")
+            }
+            .accessibilityElement(children: .contain)
+        }
+    }
+}
+
 struct PathRow: View {
     let label: String
     let path: String?
@@ -541,16 +601,22 @@ struct ContentView: View {
                         Spacer()
                         Button(launcher.extracting ? "Unpacking…" : "Choose PKGs…",
                                action: launcher.installFromPKG)
+                            .accessibilityIdentifier("install-pkgs")
                             .disabled(launcher.extracting || launcher.running)
+                    }
+                    if let progress = launcher.extractionProgress {
+                        ExtractionProgressView(progress: progress)
                     }
                     Divider()
                     PathRow(label: "Game folder", path: launcher.settings.gamePath,
                             detail: gameDetail, choose: launcher.chooseGame,
                             clear: { launcher.settings.gamePath = nil })
+                        .disabled(launcher.extracting)
                     Divider()
                     PathRow(label: "Update folder", path: launcher.settings.updatePath,
                             detail: updateDetail, choose: launcher.chooseUpdate,
                             clear: { launcher.settings.updatePath = nil })
+                        .disabled(launcher.extracting)
                     Divider()
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
@@ -591,7 +657,7 @@ struct ContentView: View {
             HStack {
                 Button("Open data folder", action: launcher.openDataFolder)
                 Button("shadPS4 settings…", action: launcher.openShadPS4)
-                    .disabled(launcher.running)
+                    .disabled(launcher.running || launcher.extracting)
                     .help("Opens shadPS4's own interface (big picture mode) with all its settings.")
                 Spacer()
                 if launcher.running {
@@ -602,12 +668,25 @@ struct ContentView: View {
                         .disabled(launcher.blocker != nil || launcher.extracting)
                 }
             }
-            Text(launcher.message.isEmpty ? (launcher.blocker ?? "Ready to play.") : launcher.message)
+            Text(launcher.extracting ? "Your game folders will be filled in when unpacking finishes."
+                 : launcher.message.isEmpty ? (launcher.blocker ?? "Ready to play.") : launcher.message)
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(20)
         .frame(width: 560)
+        #if DEBUG
+        // XCTest uses the real installer and a small deterministic extractor fixture.
+        .task {
+            let env = ProcessInfo.processInfo.environment
+            if let pkg = env["TLG_TEST_GAME_PKG"], let dest = env["TLG_TEST_DESTINATION"],
+               let tool = Bundle.main.url(forResource: "extract-fixture", withExtension: "sh") {
+                launcher.startInstall(gamePKG: URL(fileURLWithPath: pkg),
+                    updatePKG: env["TLG_TEST_UPDATE_PKG"].map { URL(fileURLWithPath: $0) },
+                    destination: URL(fileURLWithPath: dest), tool: tool)
+            }
+        }
+        #endif
     }
 }
 
@@ -654,7 +733,7 @@ struct TLGLauncherApp: App {
                     tool: tool, game: URL(fileURLWithPath: rest[0]),
                     update: rest.count >= 3 ? URL(fileURLWithPath: rest[1]) : nil,
                     destination: URL(fileURLWithPath: rest[rest.count - 1]),
-                    progress: { print($0) })
+                    progress: { print($0); fflush(stdout) })
                 print("game: \(result.game.path)")
                 print("update: \(result.update?.path ?? "none")")
                 exit(0)

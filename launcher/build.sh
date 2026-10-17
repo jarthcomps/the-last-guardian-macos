@@ -21,7 +21,7 @@ done
 rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 for arch in arm64 x86_64; do
   xcrun swiftc -O -parse-as-library -target $arch-apple-macos14.0 \
-    -o "$OUT/TLGLauncher-$arch" "$HERE/Sources/TLGLauncher.swift"
+    -o "$OUT/TLGLauncher-$arch" "$HERE"/Sources/*.swift
 done
 lipo -create "$OUT/TLGLauncher-arm64" "$OUT/TLGLauncher-x86_64" -output "$APP/Contents/MacOS/TLGLauncher"
 rm -f "$OUT"/TLGLauncher-*
