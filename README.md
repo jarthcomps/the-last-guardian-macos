@@ -31,7 +31,7 @@ Controllers that macOS recognizes (DualSense, DualShock 4, Xbox) work through SD
 
 ## What to expect
 
-On an M2 Max at 720p, the game runs at roughly **27–30 FPS** in demanding areas. It's playable, but not a locked 30. The first time each area loads you'll see some stutter while shaders compile; those are cached for later runs.
+Performance varies substantially with the area and camera. On an M2 Max at 720p, the tested pool checkpoint ran around **21–26 FPS**, while a later outdoor checkpoint averaged **18.2 FPS** over two minutes with the shader-header readback fix. This is not a locked 30. First visits also stutter while shaders compile; those are cached for later runs. These are checkpoint measurements, not a full-game performance guarantee.
 
 ## What was changed to make it run on a Mac
 
@@ -39,6 +39,7 @@ On an M2 Max at 720p, the game runs at roughly **27–30 FPS** in demanding area
 
 **For the technically curious:**
 - **Engine:** an x86_64 shadPS4 build running under Rosetta 2, with Vulkan provided by KosmicKrisp (Mesa's Vulkan-on-Metal 4 driver). The source is in [`engine/`](engine), which is the `shadps4-fork` branch of this repository.
+- **Shader header reads:** [`engine-checkpoint-readbacks.patch`](engine-checkpoint-readbacks.patch) avoids waiting for unrelated GPU data on the same memory page. It reads shared CPU backing only when the exact header bytes are current, tracks every pending copy, and rejects host pointers and nonshared mappings. Precise readbacks and feather synchronization remain enabled. The later checkpoint averaged 9.2 FPS with the shortcut disabled and 18.2 FPS enabled in separate runs; animation and camera variation limit an exact comparison.
 - **Readbacks:** the game reads GPU results back on the CPU every frame. The fork has a precise, asynchronous readback system: async fences, hot-range prefetch at fences, asynchronous guest page faults, and deferred page unprotection. It also adds a GPU command processor encoder thread with command recording, and fixes for Rosetta stores and PM4 address conversion.
 - **Metal render passes:** two macOS 26 index-robustness workarounds in KosmicKrisp unrolled every indirect draw through a compute pass. The launcher turns them off (`MESA_KK_DISABLE_WORKAROUNDS=12,13`). The engine also skips command-stream and draw buffer barriers inside render passes when nothing in the pass writes memory (`SHADPS4_METAL_ENCODER_ORDERING=1`), so passes stay whole on Metal.
 - **Feather flicker fix:** a page whose newer GPU→CPU copy was still in flight could be unprotected early, so the game read the previous feather simulation state. Such pages now stay protected until the newer copy lands (`SHADPS4_PREFETCH_STRICT_UNMARK=1`).
@@ -54,6 +55,7 @@ cd the-last-guardian-macos
 
 1. **Engine** (x86_64, needs Homebrew `cmake` and `ninja`):
    ```sh
+   git -C engine apply ../engine-checkpoint-readbacks.patch
    cmake -S engine -B engine/build-release -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
      -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
      -DENABLE_SYSTEM_VULKAN=ON -DENABLE_UPDATER=OFF -DENABLE_DISCORD_RPC=OFF
@@ -83,6 +85,8 @@ xcodebuild test -project launcher/LauncherTests.xcodeproj -scheme TLGLauncher \
 ```
 
 This runs unit tests and native UI tests using a small extractor fixture; no game files are needed. The UI test runner uses a dedicated fixture folder under `/private/tmp/guardian-ui-tests/`. The release app does not include the test launch hooks. The extractor patch also adds a CTest `byte_progress` test. For an optional full extraction check with your own PKG, set `TLG_TEST_PKG`, `TLG_TEST_PKG_TOOL`, and `TLG_TEST_REFERENCE` (an already extracted matching folder), then run `python3 launcher/Tests/test_real_pkg_progress.py`. Set `TLG_TEST_LAUNCHER` to an app's `Contents/MacOS/TLGLauncher` to exercise its bundled extractor through `--install-pkg`. It checks live reports and compares every extracted file by SHA-256.
+
+`python3 launcher/Tests/test_performance_profile.py` checks that the fast shader-header profile preserves precise readbacks and feather synchronization. The engine patch adds CTest targets `backing_range` and `download_overlap`; these cover address bounds, nonshared mappings, exact copy overlap and asynchronous ownership lifetime. The existing `prefetch_unmark_policy` test covers page-unmark ordering. Local validation ran these three tests as both arm64 and x86_64 binaries.
 
 This builds entirely on other people's work. Thank you to:
 

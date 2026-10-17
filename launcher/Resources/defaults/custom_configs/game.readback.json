@@ -1,5 +1,7 @@
 {
   "GPU": {
+    "shader_backing_reads": true,
+    "shader_backing_verify": false,
     "readback_async_fences_enabled": true,
     "readback_batching_enabled": true,
     "readback_fence_wait_shortcut": 3,
