@@ -1,6 +1,6 @@
 # The Last Guardian on macOS
 
-Play your own copy of **The Last Guardian** (PS4) on an Apple Silicon Mac. This repository contains a small launcher app, plus a build of the [shadPS4](https://github.com/shadps4-emu/shadPS4) emulator tuned for this one game on macOS.
+Play **The Last Guardian** (PS4) on Mac. This repository contains a small launcher app, plus a build of the [shadPS4](https://github.com/shadps4-emu/shadPS4) emulator tuned for this one game on macOS.
 
 > This project contains **no game files**, no PS4 firmware and no Sony software. You need your own legally obtained, decrypted dump of the game.
 
