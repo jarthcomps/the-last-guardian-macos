@@ -22,7 +22,7 @@ Play **The Last Guardian** (PS4) on Mac. This repository contains a small launch
 3. Open it the first time by right-clicking the app and choosing **Open**. If macOS still refuses, go to **System Settings → Privacy & Security** and click **Open Anyway**. The app isn't notarized by Apple, which is why this step is needed once.
    - Comfortable with Terminal? This does the same thing: `xattr -dr com.apple.quarantine "/Applications/The Last Guardian.app"`
 4. In the launcher:
-   - **Install from PKG files → Choose PKGs…**: pick the game PKG, then the update PKG (or Cancel to skip it), then a folder to unpack into. Unpacking takes a few minutes and fills in both folders for you.
+   - **Install from PKG files → Choose PKGs…**: pick the game PKG, then the update PKG (or Cancel to skip it), then a folder to unpack into. Unpacking takes a few minutes (be patient!) and fills in both folders for you.
    - Already extracted? Use **Game folder → Choose…** (the folder with `eboot.bin`) and **Update folder → Choose…** instead. An update next to the game named `<game folder>-UPDATE` is found automatically.
    - Optional: **System modules → Import…** copies `.sprx` files from a folder you pick.
    - Pick a resolution (720p is recommended) and press **Play**.
