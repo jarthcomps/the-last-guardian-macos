@@ -6,7 +6,8 @@ final class PerformanceEnvironmentTests: XCTestCase {
         let env = PerformanceEnvironment.apply(to: ["PATH": "/usr/bin"], metalTweaks: true)
         for flag in ["SHADPS4_TEXTURE_LOOKUP_REUSE", "SHADPS4_DOWNLOAD_RESCAN_REUSE",
                      "SHADPS4_IMAGE_BACKING_READS", "SHADPS4_METAL_ENCODER_ORDERING",
-                     "SHADPS4_PREFETCH_STRICT_UNMARK"] {
+                     "SHADPS4_PREFETCH_STRICT_UNMARK", "SHADPS4_DYNAMIC_STATE_REUSE",
+                     "SHADPS4_RANGE_PROTECTION"] {
             XCTAssertEqual(env[flag], "1", flag)
         }
         XCTAssertEqual(env["SHADPS4_READBACK_WINDOW_KB"], "64")
@@ -14,7 +15,8 @@ final class PerformanceEnvironmentTests: XCTestCase {
         XCTAssertEqual(env["PATH"], "/usr/bin")
         for flag in ["SHADPS4_TEXTURE_LOOKUP_VERIFY", "SHADPS4_IMAGE_BACKING_VERIFY",
                      "SHADPS4_PRECISE_BUFFER_HAZARDS", "SHADPS4_ENABLE_A912_COPY_HLE",
-                     "SHADPS4_IMAGE_UPLOAD_SKIP_HASH"] {
+                     "SHADPS4_IMAGE_UPLOAD_SKIP_HASH", "SHADPS4_COMPUTE_DISPATCH_LABELS",
+                     "KK_UPLOAD_CACHE_EXPANDED", "KK_UPLOAD_CACHE_DIAGNOSTICS"] {
             XCTAssertNil(env[flag], flag)
         }
     }
@@ -27,9 +29,13 @@ final class PerformanceEnvironmentTests: XCTestCase {
 
     func testEnabledProfileOverridesStalePerformanceValues() {
         let env = PerformanceEnvironment.apply(to: ["SHADPS4_TEXTURE_LOOKUP_REUSE": "0",
-                                                   "SHADPS4_READBACK_WINDOW_KB": "512"],
+                                                   "SHADPS4_READBACK_WINDOW_KB": "512",
+                                                   "SHADPS4_DYNAMIC_STATE_REUSE": "0",
+                                                   "SHADPS4_RANGE_PROTECTION": "0"],
                                                metalTweaks: true)
         XCTAssertEqual(env["SHADPS4_TEXTURE_LOOKUP_REUSE"], "1")
         XCTAssertEqual(env["SHADPS4_READBACK_WINDOW_KB"], "64")
+        XCTAssertEqual(env["SHADPS4_DYNAMIC_STATE_REUSE"], "1")
+        XCTAssertEqual(env["SHADPS4_RANGE_PROTECTION"], "1")
     }
 }

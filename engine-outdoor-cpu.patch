@@ -1,0 +1,1174 @@
+diff --git a/src/common/bit_array.h b/src/common/bit_array.h
+index e2d111a1..80c58bff 100644
+--- a/src/common/bit_array.h
++++ b/src/common/bit_array.h
+@@ -233,6 +233,22 @@ public:
+         return false;
+     }
+ 
++    // Assigns only the requested bits and returns the exact changed-page mask.
++    BitArray AssignRange(const BitArray& other, size_t start, size_t end) {
++        BitArray changed;
++        if (start >= end || end > N) return changed;
++        const size_t first = start / BITS_PER_WORD;
++        const size_t last = (end - 1) / BITS_PER_WORD;
++        for (size_t word = first; word <= last; ++word) {
++            u64 mask = ~0ULL;
++            if (word == first) mask &= ~0ULL << (start % BITS_PER_WORD);
++            if (word == last) mask &= ~0ULL >> (BITS_PER_WORD - 1 - (end - 1) % BITS_PER_WORD);
++            changed.data[word] = (data[word] ^ other.data[word]) & mask;
++            data[word] ^= changed.data[word];
++        }
++        return changed;
++    }
++
+     Range FirstRangeFrom(size_t start) const {
+         if (start >= N) {
+             return {N, N};
+diff --git a/src/video_core/buffer_cache/memory_tracker.h b/src/video_core/buffer_cache/memory_tracker.h
+index 2d37fa08..ef278d1f 100644
+--- a/src/video_core/buffer_cache/memory_tracker.h
++++ b/src/video_core/buffer_cache/memory_tracker.h
+@@ -5,6 +5,8 @@
+ 
+ #include <algorithm>
+ #include <deque>
++#include <cstdlib>
++#include <string_view>
+ #include <mutex>
+ #include <type_traits>
+ #include <vector>
+@@ -26,7 +28,11 @@ public:
+ public:
+     explicit MemoryTracker(PageManager& tracker_)
+         : tracker{&tracker_},
+-          hot_pages_enabled{EmulatorSettings.IsReadbackHotWritePagesEnabled()} {}
++          hot_pages_enabled{EmulatorSettings.IsReadbackHotWritePagesEnabled()},
++          range_protection_enabled{[] {
++              const char* value = std::getenv("SHADPS4_RANGE_PROTECTION");
++              return value && std::string_view{value} == "1";
++          }()} {}
+ 
+     /// Forgets hot pages everywhere (see RegionManager::DecayHotPages).
+     void DecayHotPages() {
+@@ -201,6 +207,7 @@ private:
+         auto* new_manager = free_managers.back();
+         new_manager->SetCpuAddress(base_cpu_addr);
+         new_manager->SetHotPagesEnabled(hot_pages_enabled);
++        new_manager->SetRangeProtectionEnabled(range_protection_enabled);
+         free_managers.pop_back();
+         top_tier[page_index] = new_manager;
+     }
+@@ -210,6 +217,7 @@ private:
+     std::vector<RegionManager*> free_managers;
+     std::array<RegionManager*, NUM_HIGH_PAGES> top_tier{};
+     bool hot_pages_enabled{};
++    bool range_protection_enabled{};
+ };
+ 
+ } // namespace VideoCore
+diff --git a/src/video_core/buffer_cache/region_manager.h b/src/video_core/buffer_cache/region_manager.h
+index 9063b91c..611f5ec1 100644
+--- a/src/video_core/buffer_cache/region_manager.h
++++ b/src/video_core/buffer_cache/region_manager.h
+@@ -46,6 +46,11 @@ public:
+         cpu_addr = new_cpu_addr;
+     }
+ 
++    /// Configure before tracking begins, under the owning tracker lock.
++    void SetRangeProtectionEnabled(bool enabled) noexcept {
++        range_protection_enabled = enabled;
++    }
++
+     /// Hot pages: pages the CPU rewrites right after nearly every upload. Write-protecting them
+     /// again after each upload only buys a write fault per rewrite, so they stay CPU-modified and
+     /// writable and are uploaded at each use instead. A page used as a GPU write target stops
+@@ -141,7 +146,7 @@ public:
+             bits.UnsetRange(start_page, end_page);
+         }
+         if constexpr (type == Type::CPU) {
+-            UpdateProtection<!enable, false>();
++            UpdateProtection<!enable, false>(start_page, end_page);
+         } else if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise) {
+             UpdateProtection<enable, true>();
+         }
+@@ -189,7 +194,7 @@ public:
+                 } else {
+                     bits.UnsetRange(start_page, end_page);
+                 }
+-                UpdateProtection<true, false>();
++                UpdateProtection<true, false>(start_page, end_page);
+             } else {
+                 bits.UnsetRange(start_page, end_page);
+                 if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
+@@ -236,16 +241,22 @@ private:
+      * @tparam track True when the tracker should start tracking the new pages
+      */
+     template <bool track, bool is_read>
+-    void UpdateProtection() {
++    void UpdateProtection(size_t start = 0, size_t end = NUM_PAGES_PER_REGION) {
+         RENDERER_TRACE;
+-        RegionBits mask = is_read ? (~gpu ^ readable) : (cpu ^ writeable);
++        RegionBits mask;
++        if constexpr (is_read) {
++            mask = ~gpu ^ readable;
++        } else {
++            mask = range_protection_enabled ? writeable.AssignRange(cpu, start, end)
++                                            : (cpu ^ writeable);
++        }
+         if (mask.None()) {
+             return;
+         }
+         if constexpr (is_read) {
+             readable = ~gpu;
+         } else {
+-            writeable = cpu;
++            if (!range_protection_enabled) writeable = cpu;
+         }
+         tracker->UpdatePageWatchersForRegion<track, is_read>(cpu_addr, mask);
+     }
+@@ -260,6 +271,7 @@ private:
+     RegionBits writeable;
+     RegionBits readable;
+     bool hot_pages_enabled{};
++    bool range_protection_enabled{};
+     RegionBits hot{};         ///< Kept CPU-modified and writable (see SetHotPagesEnabled).
+     RegionBits reprotected{}; ///< Write-protected again by an upload, not rewritten since.
+     std::array<u8, NUM_PAGES_PER_REGION> refaults{}; ///< CPU rewrites after an upload.
+diff --git a/src/video_core/renderer_vulkan/push_constant_reuse.h b/src/video_core/renderer_vulkan/push_constant_reuse.h
+new file mode 100644
+index 00000000..163e091f
+--- /dev/null
++++ b/src/video_core/renderer_vulkan/push_constant_reuse.h
+@@ -0,0 +1,47 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <array>
++#include <cstdint>
++#include <cstring>
++
++namespace Vulkan {
++
++/// Remembers only the last complete push call. Any different or unsupported call replaces or
++/// invalidates it, including overlapping partial writes and writes to other shader stages.
++/// This intentionally does not infer pipeline-layout compatibility or merge byte ranges.
++template <typename Layout>
++class PushConstantReuse {
++public:
++    bool CanSkip(Layout layout, std::uint32_t stages, std::uint32_t offset,
++                 std::uint32_t size, const void* data) {
++        if (!layout || !stages || !data || !size || size > bytes.size() ||
++            offset % 4 || size % 4 || offset > UINT32_MAX - size) {
++            Reset();
++            return false;
++        }
++        if (valid && last_layout == layout && last_stages == stages && last_offset == offset &&
++            last_size == size && std::memcmp(bytes.data(), data, size) == 0) {
++            return true;
++        }
++        last_layout = layout;
++        last_stages = stages;
++        last_offset = offset;
++        last_size = size;
++        std::memcpy(bytes.data(), data, size);
++        valid = true;
++        return false;
++    }
++
++    void Reset() { valid = false; }
++
++private:
++    bool valid{};
++    Layout last_layout{};
++    std::uint32_t last_stages{}, last_offset{}, last_size{};
++    std::array<std::uint8_t, 256> bytes{};
++};
++
++} // namespace Vulkan
+diff --git a/src/video_core/renderer_vulkan/vk_command_recorder.h b/src/video_core/renderer_vulkan/vk_command_recorder.h
+index d3a6f2eb..cb469f74 100644
+--- a/src/video_core/renderer_vulkan/vk_command_recorder.h
++++ b/src/video_core/renderer_vulkan/vk_command_recorder.h
+@@ -17,6 +17,8 @@
+ #include "common/types.h"
+ #include "video_core/renderer_vulkan/vk_common.h"
+ #include "video_core/renderer_vulkan/barrier_stats.h"
++#include "video_core/renderer_vulkan/push_constant_reuse.h"
++#include "video_core/renderer_vulkan/dynamic_state_reuse.h"
+ 
+ #ifdef MemoryBarrier
+ #pragma push_macro("MemoryBarrier")
+@@ -35,6 +37,17 @@ struct DescriptorPushMemoTestAccess;
+ class CommandList {
+ public:
+     CommandList() {
++        const char* dynamic = std::getenv("SHADPS4_DYNAMIC_STATE_REUSE");
++        if (dynamic && dynamic[0] == '1' && dynamic[1] == '\0') {
++            dynamic_memo = std::make_unique<DynamicStateReuse>();
++        }
++        const char* constants = std::getenv("SHADPS4_PUSH_CONSTANT_REUSE");
++        if (constants && constants[0] == '1' && constants[1] == '\0') {
++            constant_memo = std::make_unique<PushConstantReuse<vk::PipelineLayout>>();
++            const char* diagnostics = std::getenv("SHADPS4_CONSTANT_REUSE_DIAGNOSTICS");
++            constant_memo_diagnostics = diagnostics && diagnostics[0] == '1' &&
++                                        diagnostics[1] == '\0';
++        }
+         const char* enabled = std::getenv("SHADPS4_DESCRIPTOR_PUSH_MEMO");
+         if (enabled && enabled[0] == '1' && enabled[1] == '\0') {
+             descriptor_memo = std::make_unique<DescriptorMemo>();
+@@ -86,6 +99,7 @@ public:
+             return;
+         }
+         if (!pipeline) {
++            if (cache_index == 0) InvalidateDynamicState();
+             pipeline_valid[cache_index] = false;
+             Record([=](vk::CommandBuffer c) { c.bindPipeline(bind_point, pipeline); });
+             return;
+@@ -93,6 +107,7 @@ public:
+         if (pipeline_valid[cache_index] && pipelines[cache_index] == pipeline) {
+             return;
+         }
++        if (cache_index == 0) InvalidateDynamicState();
+         pipeline_valid[cache_index] = true;
+         pipelines[cache_index] = pipeline;
+         Record([=](vk::CommandBuffer c) { c.bindPipeline(bind_point, pipeline); });
+@@ -394,6 +409,10 @@ private:
+         }
+     }
+ 
++    void InvalidateDynamicState() {
++        if (dynamic_memo) dynamic_memo->Reset();
++    }
++
+     void Reset() {
+         head = nullptr;
+         tail = nullptr;
+@@ -401,8 +420,12 @@ private:
+         chunk_index = 0;
+         offset = 0;
+         large_blocks.clear();
++        InvalidateDynamicState();
+         pipeline_valid.fill(false);
+         pipelines.fill(vk::Pipeline{});
++        if (constant_memo) {
++            constant_memo->Reset();
++        }
+         if (descriptor_memo) {
+             for (auto& bank : descriptor_memo->banks) {
+                 Invalidate(bank);
+@@ -419,7 +442,10 @@ private:
+     u64 num_commands{};
+     std::array<vk::Pipeline, 2> pipelines{};
+     std::array<bool, 2> pipeline_valid{};
++    std::unique_ptr<DynamicStateReuse> dynamic_memo;
+     std::unique_ptr<DescriptorMemo> descriptor_memo;
++    std::unique_ptr<PushConstantReuse<vk::PipelineLayout>> constant_memo;
++    bool constant_memo_diagnostics{};
+     bool descriptor_memo_diagnostics{};
+ };
+ 
+@@ -499,6 +525,18 @@ public:
+             cmdbuf.pushConstants(layout, stages, offset, size, values);
+             return;
+         }
++        if (list->constant_memo &&
++            list->constant_memo->CanSkip(layout, static_cast<u32>(stages), offset, size, values)) {
++            if (list->constant_memo_diagnostics) {
++                static std::atomic<u64> skipped{};
++                const u64 count = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
++                if (count == 1 || count % 100000 == 0) {
++                    std::fprintf(stderr, "shadPS4 constant reuse skipped=%llu\n",
++                                 static_cast<unsigned long long>(count));
++                }
++            }
++            return;
++        }
+         const auto* v = list->Copy(static_cast<const u8*>(values), size);
+         list->Record(
+             [=](vk::CommandBuffer c) { c.pushConstants(layout, stages, offset, size, v); });
+@@ -553,6 +591,18 @@ public:
+         });
+     }
+ 
++private:
++    template <typename T>
++    bool RecordState(DynamicStateReuse::Key key, const T& value) const {
++        static_assert(std::is_trivially_copyable_v<T>);
++        return RecordStateBytes(key, 0, 0, 1, &value, sizeof(value));
++    }
++    bool RecordStateBytes(DynamicStateReuse::Key key, u32 variant, u32 first, u32 count,
++                          const void* value, size_t bytes) const {
++        return !list || !list->dynamic_memo ||
++               list->dynamic_memo->ShouldRecord(key, variant, first, count, value, bytes);
++    }
++public:
+     // ---------------------------------------------------------------- dynamic state
+ 
+     void setViewport(u32 first, vk::ArrayProxy<const vk::Viewport> viewports) const {
+@@ -561,6 +611,8 @@ public:
+             return;
+         }
+         const u32 n = viewports.size();
++        if (!RecordStateBytes(DynamicStateReuse::Key::Viewport, 0, first, n,
++                              viewports.data(), n * sizeof(vk::Viewport))) return;
+         const auto* v = list->Copy(viewports.data(), n);
+         list->Record([=](vk::CommandBuffer c) { c.setViewport(first, n, v); });
+     }
+@@ -571,6 +623,8 @@ public:
+             return;
+         }
+         const u32 n = scissors.size();
++        if (!RecordStateBytes(DynamicStateReuse::Key::Scissor, 0, first, n,
++                              scissors.data(), n * sizeof(vk::Rect2D))) return;
+         const auto* s = list->Copy(scissors.data(), n);
+         list->Record([=](vk::CommandBuffer c) { c.setScissor(first, n, s); });
+     }
+@@ -581,6 +635,8 @@ public:
+             return;
+         }
+         const u32 n = viewports.size();
++        if (!RecordStateBytes(DynamicStateReuse::Key::Viewport, 1, 0, n,
++                              viewports.data(), n * sizeof(vk::Viewport))) return;
+         const auto* v = list->Copy(viewports.data(), n);
+         list->Record([=](vk::CommandBuffer c) { c.setViewportWithCount(n, v); });
+     }
+@@ -591,64 +647,90 @@ public:
+             return;
+         }
+         const u32 n = scissors.size();
++        if (!RecordStateBytes(DynamicStateReuse::Key::Scissor, 1, 0, n,
++                              scissors.data(), n * sizeof(vk::Rect2D))) return;
+         const auto* s = list->Copy(scissors.data(), n);
+         list->Record([=](vk::CommandBuffer c) { c.setScissorWithCount(n, s); });
+     }
+ 
+     void setDepthTestEnable(bool enable) const {
++        if (!RecordState(DynamicStateReuse::Key::DepthTest, enable)) return;
+         Do([=](vk::CommandBuffer c) { c.setDepthTestEnable(enable); });
+     }
+     void setDepthWriteEnable(bool enable) const {
++        if (!RecordState(DynamicStateReuse::Key::DepthWrite, enable)) return;
+         Do([=](vk::CommandBuffer c) { c.setDepthWriteEnable(enable); });
+     }
+     void setDepthCompareOp(vk::CompareOp op) const {
++        if (!RecordState(DynamicStateReuse::Key::DepthCompare, op)) return;
+         Do([=](vk::CommandBuffer c) { c.setDepthCompareOp(op); });
+     }
+     void setDepthBoundsTestEnable(bool enable) const {
++        if (!RecordState(DynamicStateReuse::Key::DepthBoundsTest, enable)) return;
+         Do([=](vk::CommandBuffer c) { c.setDepthBoundsTestEnable(enable); });
+     }
+     void setDepthBounds(float min, float max) const {
++        if (!RecordState(DynamicStateReuse::Key::DepthBounds,
++                         std::array{min, max})) return;
+         Do([=](vk::CommandBuffer c) { c.setDepthBounds(min, max); });
+     }
+     void setDepthBiasEnable(bool enable) const {
++        if (!RecordState(DynamicStateReuse::Key::DepthBiasEnable, enable)) return;
+         Do([=](vk::CommandBuffer c) { c.setDepthBiasEnable(enable); });
+     }
+     void setDepthBias(float constant, float clamp, float slope) const {
++        if (!RecordState(DynamicStateReuse::Key::DepthBias,
++                         std::array{constant, clamp, slope})) return;
+         Do([=](vk::CommandBuffer c) { c.setDepthBias(constant, clamp, slope); });
+     }
+     void setStencilTestEnable(bool enable) const {
++        if (!RecordState(DynamicStateReuse::Key::StencilTest, enable)) return;
+         Do([=](vk::CommandBuffer c) { c.setStencilTestEnable(enable); });
+     }
+     void setStencilOp(vk::StencilFaceFlags faces, vk::StencilOp fail, vk::StencilOp pass,
+                       vk::StencilOp depth_fail, vk::CompareOp compare) const {
++        if (!RecordState(DynamicStateReuse::Key::StencilOp,
++                         std::array<u32, 5>{u32(faces), u32(fail), u32(pass), u32(depth_fail), u32(compare)})) return;
+         Do([=](vk::CommandBuffer c) { c.setStencilOp(faces, fail, pass, depth_fail, compare); });
+     }
+     void setStencilReference(vk::StencilFaceFlags faces, u32 reference) const {
++        if (!RecordState(DynamicStateReuse::Key::StencilReference,
++                         std::array<u32, 2>{u32(faces), reference})) return;
+         Do([=](vk::CommandBuffer c) { c.setStencilReference(faces, reference); });
+     }
+     void setStencilWriteMask(vk::StencilFaceFlags faces, u32 mask) const {
++        if (!RecordState(DynamicStateReuse::Key::StencilWriteMask,
++                         std::array<u32, 2>{u32(faces), mask})) return;
+         Do([=](vk::CommandBuffer c) { c.setStencilWriteMask(faces, mask); });
+     }
+     void setStencilCompareMask(vk::StencilFaceFlags faces, u32 mask) const {
++        if (!RecordState(DynamicStateReuse::Key::StencilCompareMask,
++                         std::array<u32, 2>{u32(faces), mask})) return;
+         Do([=](vk::CommandBuffer c) { c.setStencilCompareMask(faces, mask); });
+     }
+     void setPrimitiveRestartEnable(bool enable) const {
++        if (!RecordState(DynamicStateReuse::Key::PrimitiveRestart, enable)) return;
+         Do([=](vk::CommandBuffer c) { c.setPrimitiveRestartEnable(enable); });
+     }
+     void setRasterizerDiscardEnable(bool enable) const {
++        if (!RecordState(DynamicStateReuse::Key::RasterizerDiscard, enable)) return;
+         Do([=](vk::CommandBuffer c) { c.setRasterizerDiscardEnable(enable); });
+     }
+     void setCullMode(vk::CullModeFlags mode) const {
++        if (!RecordState(DynamicStateReuse::Key::Cull, mode)) return;
+         Do([=](vk::CommandBuffer c) { c.setCullMode(mode); });
+     }
+     void setFrontFace(vk::FrontFace face) const {
++        if (!RecordState(DynamicStateReuse::Key::FrontFace, face)) return;
+         Do([=](vk::CommandBuffer c) { c.setFrontFace(face); });
+     }
+     void setLineWidth(float width) const {
++        if (!RecordState(DynamicStateReuse::Key::LineWidth, width)) return;
+         Do([=](vk::CommandBuffer c) { c.setLineWidth(width); });
+     }
+     void setBlendConstants(const float constants[4]) const {
+         const std::array<float, 4> values{constants[0], constants[1], constants[2], constants[3]};
++        if (!RecordState(DynamicStateReuse::Key::BlendConstants, values)) return;
+         Do([=](vk::CommandBuffer c) { c.setBlendConstants(values.data()); });
+     }
+     void setColorWriteMaskEXT(u32 first,
+@@ -658,10 +740,13 @@ public:
+             return;
+         }
+         const u32 n = masks.size();
++        if (!RecordStateBytes(DynamicStateReuse::Key::ColorWriteMask, 0, first, n,
++                              masks.data(), n * sizeof(vk::ColorComponentFlags))) return;
+         const auto* m = list->Copy(masks.data(), n);
+         list->Record([=](vk::CommandBuffer c) { c.setColorWriteMaskEXT(first, n, m); });
+     }
+     void setAttachmentFeedbackLoopEnableEXT(vk::ImageAspectFlags aspects) const {
++        if (!RecordState(DynamicStateReuse::Key::FeedbackLoop, aspects)) return;
+         Do([=](vk::CommandBuffer c) { c.setAttachmentFeedbackLoopEnableEXT(aspects); });
+     }
+ 
+@@ -672,6 +757,7 @@ public:
+             cmdbuf.beginRendering(info);
+             return;
+         }
++        list->InvalidateDynamicState();
+         ASSERT_MSG(!info.pNext, "Recorded rendering info can't have a pNext chain");
+         auto* copy = list->Copy(&info, 1);
+         copy->pColorAttachments = list->Copy(info.pColorAttachments, info.colorAttachmentCount);
+@@ -683,6 +769,7 @@ public:
+     }
+ 
+     void endRendering() const {
++        if (list) list->InvalidateDynamicState();
+         Do([](vk::CommandBuffer c) { c.endRendering(); });
+     }
+ 
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 388edba9..7bac68d9 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -14,6 +14,7 @@
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+ #include "video_core/renderer_vulkan/vk_rasterizer.h"
++#include "video_core/renderer_vulkan/compute_dispatch_labels.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+ #include "video_core/renderer_vulkan/vk_shader_hle.h"
+ #include "video_core/texture_cache/image_view.h"
+@@ -863,7 +864,15 @@ void Rasterizer::DispatchDirect() {
+ 
+     const auto cmdbuf = scheduler.CommandBuffer();
+     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+-    cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
++    {
++        const auto label = ComputeDiagnostic::Enabled()
++            ? ComputeDiagnostic::GuestLabel(cs.pgm_hash, false,
++                  {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z},
++                  {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
++                   cs_program.num_thread_z.full}) : std::string{};
++        ComputeDiagnostic::Scope scope{cmdbuf, label};
++        cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
++    }
+     SerializeAfterDispatch();
+     record_dispatch(VideoCore::ReadbackStats::ShaderCallKind::Dispatch, cs_program.NumWorkgroups());
+     DebugState.IncDispatch();
+@@ -917,7 +926,15 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
+ 
+     const auto cmdbuf = scheduler.CommandBuffer();
+     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+-    cmdbuf.dispatchIndirect(buffer->Handle(), base);
++    {
++        const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
++        const auto label = ComputeDiagnostic::Enabled()
++            ? ComputeDiagnostic::GuestLabel(cs.pgm_hash, true, {0, 0, 0},
++                  {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
++                   cs_program.num_thread_z.full}) : std::string{};
++        ComputeDiagnostic::Scope scope{cmdbuf, label};
++        cmdbuf.dispatchIndirect(buffer->Handle(), base);
++    }
+     SerializeAfterDispatch();
+     if (shader_call.Active()) {
+         shader_call.Record(VideoCore::ReadbackStats::ShaderCallKind::DispatchIndirect, *pipeline);
+diff --git a/src/video_core/texture_cache/tile_manager.cpp b/src/video_core/texture_cache/tile_manager.cpp
+index d0e8868f..3302c4b4 100644
+--- a/src/video_core/texture_cache/tile_manager.cpp
++++ b/src/video_core/texture_cache/tile_manager.cpp
+@@ -4,6 +4,7 @@
+ #include "video_core/buffer_cache/buffer.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
++#include "video_core/renderer_vulkan/compute_dispatch_labels.h"
+ #include "video_core/renderer_vulkan/vk_shader_util.h"
+ #include "video_core/renderer_vulkan/shader_diagnostic_names.h"
+ #include "video_core/texture_cache/image.h"
+@@ -261,7 +262,13 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
+     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
+ 
+     const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
+-    cmdbuf.dispatch(dim_x, 1, 1);
++    {
++        const auto label = Vulkan::ComputeDiagnostic::Enabled()
++            ? Vulkan::ComputeDiagnostic::TilingLabel(false, u32(info.tile_mode), info.num_bits,
++                  params.num_mips, params.num_slices, dim_x) : std::string{};
++        Vulkan::ComputeDiagnostic::Scope scope{cmdbuf, label};
++        cmdbuf.dispatch(dim_x, 1, 1);
++    }
+     return {out_buffer, 0};
+ }
+ 
+@@ -350,7 +357,13 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
+     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
+ 
+     const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
+-    cmdbuf.dispatch(dim_x, 1, 1);
++    {
++        const auto label = Vulkan::ComputeDiagnostic::Enabled()
++            ? Vulkan::ComputeDiagnostic::TilingLabel(true, u32(info.tile_mode), info.num_bits,
++                  params.num_mips, params.num_slices, dim_x) : std::string{};
++        Vulkan::ComputeDiagnostic::Scope scope{cmdbuf, label};
++        cmdbuf.dispatch(dim_x, 1, 1);
++    }
+ }
+ 
+ } // namespace VideoCore
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index bcdf0822..f9746c73 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -1,3 +1,10 @@
++add_executable(shadps4_push_constant_recorder_test test_push_constant_recorder.cpp)
++target_include_directories(shadps4_push_constant_recorder_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
++target_link_libraries(shadps4_push_constant_recorder_test PRIVATE Vulkan::Headers spdlog::spdlog)
++add_test(NAME push_constant_recorder COMMAND shadps4_push_constant_recorder_test)
++add_executable(shadps4_push_constant_reuse_test test_push_constant_reuse.cpp)
++target_include_directories(shadps4_push_constant_reuse_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
++add_test(NAME push_constant_reuse COMMAND shadps4_push_constant_reuse_test)
+ add_executable(shadps4_coherent_read_test test_coherent_read.cpp)
+ target_include_directories(shadps4_coherent_read_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+ add_test(NAME coherent_read COMMAND shadps4_coherent_read_test)
+@@ -450,3 +457,20 @@ add_test(NAME image_barrier_policy COMMAND shadps4_image_barrier_policy_test)
+ add_executable(shadps4_buffer_hazard_tracker_test test_buffer_hazard_tracker.cpp)
+ target_include_directories(shadps4_buffer_hazard_tracker_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+ add_test(NAME buffer_hazard_tracker COMMAND shadps4_buffer_hazard_tracker_test)
++
++foreach(experiment dynamic_state_reuse compute_dispatch_labels range_protection)
++    add_executable(shadps4_${experiment}_test test_${experiment}.cpp)
++    target_include_directories(shadps4_${experiment}_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
++    target_link_libraries(shadps4_${experiment}_test PRIVATE
++        Vulkan::Headers spdlog::spdlog nlohmann_json::nlohmann_json Tracy::TracyClient)
++    target_compile_options(shadps4_${experiment}_test PRIVATE -UNDEBUG)
++    add_test(NAME ${experiment} COMMAND shadps4_${experiment}_test)
++endforeach()
++add_test(NAME compute_dispatch_labels_disabled COMMAND shadps4_compute_dispatch_labels_test disabled)
++if(EXISTS "${CMAKE_SOURCE_DIR}/externals/mesa-kosmickrisp/externals/mesa/src/kosmickrisp/vulkan/kk_upload_cache_policy.h")
++    add_executable(shadps4_upload_cache_policy_test test_upload_cache_policy.c)
++    target_include_directories(shadps4_upload_cache_policy_test PRIVATE
++        ${CMAKE_SOURCE_DIR}/externals/mesa-kosmickrisp/externals/mesa/src/kosmickrisp/vulkan)
++    target_compile_options(shadps4_upload_cache_policy_test PRIVATE -UNDEBUG)
++    add_test(NAME upload_cache_policy COMMAND shadps4_upload_cache_policy_test)
++endif()
+diff --git a/tests/test_push_constant_recorder.cpp b/tests/test_push_constant_recorder.cpp
+new file mode 100644
+index 00000000..e01aad2b
+--- /dev/null
++++ b/tests/test_push_constant_recorder.cpp
+@@ -0,0 +1,79 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <array>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <type_traits>
++#include <unordered_map>
++#include <vector>
++#include "video_core/renderer_vulkan/vk_command_recorder.h"
++VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
++void assert_fail_impl() { std::abort(); }
++namespace Common { std::string GetCurrentThreadName() { return "constant-recorder-test"; } }
++namespace Common::Log { std::unordered_map<std::string_view, std::shared_ptr<spdlog::logger>> ALL_LOGGERS; }
++namespace {
++struct Call { VkPipelineLayout layout; VkShaderStageFlags stages; unsigned offset; std::vector<unsigned char> bytes; };
++std::vector<Call> calls;
++VKAPI_ATTR void VKAPI_CALL Push(VkCommandBuffer, VkPipelineLayout layout,
++    VkShaderStageFlags stages, uint32_t offset, uint32_t size, const void* data) {
++    const auto* p = static_cast<const unsigned char*>(data);
++    calls.push_back({layout, stages, offset, {p, p + size}});
++}
++template <typename T> T Handle(std::uintptr_t value) {
++    if constexpr (std::is_pointer_v<T>) return reinterpret_cast<T>(value);
++    else return static_cast<T>(value);
++}
++}
++#define CHECK(x) do { if (!(x)) return __LINE__; } while (false)
++int main() {
++    vk::detail::defaultDispatchLoaderDynamic.vkCmdPushConstants = Push;
++    const vk::CommandBuffer cb{Handle<VkCommandBuffer>(1)};
++    const vk::PipelineLayout layout{Handle<VkPipelineLayout>(2)};
++    const auto stage = vk::ShaderStageFlagBits::eVertex;
++    std::array<uint32_t, 4> data{1,2,3,4};
++    unsetenv("SHADPS4_PUSH_CONSTANT_REUSE");
++    Vulkan::CommandList disabled;
++    Vulkan::CommandRecorder baseline{cb, &disabled};
++    baseline.pushConstants(layout, stage, 0, 16, data.data());
++    baseline.pushConstants(layout, stage, 0, 16, data.data());
++    CHECK(disabled.Size() == 2);
++    disabled.Replay(cb);
++    CHECK(calls.size() == 2);
++    calls.clear();
++    setenv("SHADPS4_PUSH_CONSTANT_REUSE", "1", 1);
++    unsetenv("SHADPS4_CONSTANT_REUSE_DIAGNOSTICS");
++    Vulkan::CommandList list;
++    Vulkan::CommandRecorder recorder{cb, &list};
++    recorder.pushConstants(layout, stage, 0, 16, data.data());
++    recorder.pushConstants(layout, stage, 0, 16, data.data());
++    CHECK(list.Size() == 1);
++    data[0] = 7;
++    recorder.pushConstants(layout, stage, 0, 16, data.data());
++    CHECK(list.Size() == 2);
++    data[0] = 99; // Queued commands and remembered bytes own their contents.
++    list.Replay(cb);
++    CHECK(calls.size() == 2 && calls[0].bytes[0] == 1 && calls[1].bytes[0] == 7);
++    calls.clear();
++    data[0] = 7;
++    recorder.pushConstants(layout, stage, 0, 16, data.data());
++    CHECK(list.Size() == 1); // Replay reset.
++    recorder.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, 16, data.data());
++    recorder.pushConstants(layout, stage, 0, 16, data.data());
++    recorder.pushConstants(layout, stage, 4, 4, data.data());
++    recorder.pushConstants(layout, stage, 0, 16, data.data());
++    recorder.pushConstants(vk::PipelineLayout{Handle<VkPipelineLayout>(3)}, stage, 0, 16, data.data());
++    CHECK(list.Size() == 6);
++    list.Replay(cb);
++    CHECK(calls.size() == 6 && calls[3].offset == 4 && calls[3].bytes.size() == 4);
++    Vulkan::CommandList second;
++    Vulkan::CommandRecorder another{cb, &second};
++    another.pushConstants(layout, stage, 0, 16, data.data());
++    CHECK(second.Size() == 1);
++    calls.clear();
++    Vulkan::CommandRecorder direct{cb};
++    direct.pushConstants(layout, stage, 0, 16, data.data());
++    direct.pushConstants(layout, stage, 0, 16, data.data());
++    CHECK(calls.size() == 2);
++    return 0;
++}
+diff --git a/tests/test_push_constant_reuse.cpp b/tests/test_push_constant_reuse.cpp
+new file mode 100644
+index 00000000..0fd9e13f
+--- /dev/null
++++ b/tests/test_push_constant_reuse.cpp
+@@ -0,0 +1,46 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#include <array>
++#include <cstdint>
++#include "video_core/renderer_vulkan/push_constant_reuse.h"
++
++#define CHECK(x) do { if (!(x)) return __LINE__; } while (false)
++
++int main() {
++    Vulkan::PushConstantReuse<std::uintptr_t> memo;
++    std::array<std::uint32_t, 65> data{};
++    CHECK(!memo.CanSkip(1, 1, 0, 16, data.data()));
++    CHECK(memo.CanSkip(1, 1, 0, 16, data.data()));
++    // Caller storage is copied. A changed byte at either end needs another command.
++    data[0] = 1;
++    CHECK(!memo.CanSkip(1, 1, 0, 16, data.data()));
++    CHECK(memo.CanSkip(1, 1, 0, 16, data.data()));
++    data[3] = 2;
++    CHECK(!memo.CanSkip(1, 1, 0, 16, data.data()));
++    // Layouts, stages, byte offsets, lengths and intervening partial writes are independent.
++    CHECK(!memo.CanSkip(2, 1, 0, 16, data.data()));
++    CHECK(!memo.CanSkip(2, 2, 0, 16, data.data()));
++    CHECK(!memo.CanSkip(2, 2, 4, 16, data.data()));
++    CHECK(!memo.CanSkip(2, 2, 4, 12, data.data()));
++    CHECK(!memo.CanSkip(2, 2, 0, 16, data.data()));
++    CHECK(memo.CanSkip(2, 2, 0, 16, data.data()));
++    memo.Reset();
++    CHECK(!memo.CanSkip(2, 2, 0, 16, data.data()));
++    // Unsupported calls invalidate the remembered state instead of skipping over a write.
++    for (auto [layout, stages, offset, size] : std::array<std::array<std::uint32_t, 4>, 7>{{
++             {0, 2, 0, 16}, {2, 0, 0, 16}, {2, 2, 1, 16}, {2, 2, 0, 15},
++             {2, 2, 0, 0}, {2, 2, 0, 260}, {2, 2, UINT32_MAX - 3, 16}}}) {
++        CHECK(!memo.CanSkip(layout, stages, offset, size, data.data()));
++        CHECK(!memo.CanSkip(2, 2, 0, 16, data.data()));
++        CHECK(memo.CanSkip(2, 2, 0, 16, data.data()));
++    }
++    CHECK(!memo.CanSkip(2, 2, 0, 16, nullptr));
++    CHECK(!memo.CanSkip(2, 2, 0, 16, data.data()));
++    Vulkan::PushConstantReuse<std::uintptr_t> other;
++    CHECK(!other.CanSkip(2, 2, 0, 16, data.data()));
++    CHECK(memo.CanSkip(2, 2, 0, 16, data.data()));
++    CHECK(!memo.CanSkip(1, 1, 0, 256, data.data()));
++    CHECK(memo.CanSkip(1, 1, 0, 256, data.data()));
++    return 0;
++}
+diff --git a/docs/outdoor-timeline-experiments.md b/docs/outdoor-timeline-experiments.md
+new file mode 100644
+index 00000000..53e6e1d7
+--- /dev/null
++++ b/docs/outdoor-timeline-experiments.md
+@@ -0,0 +1,35 @@
++# Outdoor timeline experiments
++
++Private branch: `outdoor-timeline-experiments`, based on `c6671a01`.
++Each new flag requires the exact value `1`; all default off. No launcher changes.
++
++| Target | Flag | Implementation |
++| --- | --- | --- |
++| Upload allocation churn | `KK_UPLOAD_CACHE_EXPANDED=1` | Retain up to 128 returned 128 KiB upload blocks per command pool (16 MiB), versus the existing effective 33. Keep the original return lifecycle and ownership. Requires the rebuilt driver. |
++| Unchanged draw state | `SHADPS4_DYNAMIC_STATE_REUSE=1` | Skip byte-identical repeated setters per deferred command list. Reset on actual graphics pipeline binds, render boundaries and replay. Partial arrays/stencil faces use conservative exact-last-call matching. Direct mode stays unconditional. |
++| Fault/tracker bookkeeping | `SHADPS4_RANGE_PROTECTION=1` | Compute CPU-write protection differences within the affected page range. Preserve watcher callbacks and ordering. GPU/read protection keeps the full-region path. Remove no faults, waits, uploads or GPU-generation checks. |
++| Compute attribution | `SHADPS4_COMPUTE_DISPATCH_LABELS=1` | Balanced debug groups for guest direct/indirect compute and host tiling/detiling. Include shader hash, group/local sizes, or layout/bit depth/mips/slices. No waits, timestamps or forced encoder boundaries. |
++
++`KK_UPLOAD_CACHE_DIAGNOSTICS=1` prints created/reused/destroyed block counters at pool destruction. Counters are independent of the larger cache flag. Free-block accounting is initialized on creation and reset on trim/destruction.
++
++Compute attribution is instrumentation, not a proven kernel optimization. The previous trace did not identify a specific hot kernel. Native Metal capture/debug groups provide the next evidence. Indirect group counts are unknown (shown as zero), without reading guest/GPU memory. Driver-generated graphics-emulation kernels are outside guest compute groups; distinguish them using existing pipeline/kernel names. Debug-utils absence disables labels safely. Keep labels and counters off during FPS measurements. No old HLE/single-mip experiments are enabled.
++
++## Validation
++
++All four implementations and their tests were written before starting builds/tests. Focused tests exercise the real recorder through fake Vulkan dispatch, actual region tracking through captured watcher callbacks, randomized range-mask equivalence and upload policy limits. Policy tests do not establish GPU completion safety or gameplay correctness.
++
++From the engine root (separate architecture build directories):
++
++```sh
++cmake -S tests/outdoor_experiments -B /private/tmp/guardian-outdoor-unit-arm64 -G Ninja -DCMAKE_OSX_ARCHITECTURES=arm64
++cmake --build /private/tmp/guardian-outdoor-unit-arm64 -j 6
++ctest --test-dir /private/tmp/guardian-outdoor-unit-arm64 --output-on-failure
++cmake -S tests/outdoor_experiments -B /private/tmp/guardian-outdoor-unit-x86_64 -G Ninja -DCMAKE_OSX_ARCHITECTURES=x86_64
++cmake --build /private/tmp/guardian-outdoor-unit-x86_64 -j 6
++ctest --test-dir /private/tmp/guardian-outdoor-unit-x86_64 --output-on-failure
++cmake --build build-macos --target shadps4 -j 6
++```
++
++Assertions remain active in the focused suite. Preserve the copied outdoor save, guarded runner, SOTC exclusion and owned-process cleanup for native trials. Test independently before combining. Retain 720p, effects, precise readbacks, VBlank 120 and the installed four combined flags. Validate outdoor/pool rendering, Trico/feather behavior, movement, transitions and save/reload before promotion.
++
++Results, patches and hashes: `logs/outdoor-four-experiments-20261017/` (in the maintainer's workspace).
+diff --git a/src/video_core/renderer_vulkan/compute_dispatch_labels.h b/src/video_core/renderer_vulkan/compute_dispatch_labels.h
+new file mode 100644
+index 00000000..0bfdb0d9
+--- /dev/null
++++ b/src/video_core/renderer_vulkan/compute_dispatch_labels.h
+@@ -0,0 +1,49 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++#include <array>
++#include <cstdio>
++#include <cstdlib>
++#include <string>
++#include <string_view>
++#include "video_core/renderer_vulkan/vk_command_recorder.h"
++
++namespace Vulkan::ComputeDiagnostic {
++inline bool Enabled() {
++    static const bool enabled = [] {
++        const char* value = std::getenv("SHADPS4_COMPUTE_DISPATCH_LABELS");
++        return value && std::string_view{value} == "1";
++    }();
++    return enabled;
++}
++inline std::string GuestLabel(uint64_t hash, bool indirect, std::array<u32, 3> groups,
++                              std::array<u32, 3> local) {
++    char text[192];
++    std::snprintf(text, sizeof(text),
++                  "guest_cs_%016llx %s groups=%ux%ux%u local=%ux%ux%u",
++                  static_cast<unsigned long long>(hash), indirect ? "indirect" : "direct",
++                  groups[0], groups[1], groups[2], local[0], local[1], local[2]);
++    return text;
++}
++inline std::string TilingLabel(bool tiler, u32 mode, u32 bits, u32 mips, u32 slices, u32 groups) {
++    char text[192];
++    std::snprintf(text, sizeof(text), "host_%s mode=%u bits=%u mips=%u slices=%u groups=%u",
++                  tiler ? "tiler" : "detiler", mode, bits, mips, slices, groups);
++    return text;
++}
++class Scope {
++public:
++    Scope(CommandRecorder recorder_, const std::string& label) : recorder{recorder_} {
++        active = !label.empty() &&
++                 vk::detail::defaultDispatchLoaderDynamic.vkCmdBeginDebugUtilsLabelEXT &&
++                 vk::detail::defaultDispatchLoaderDynamic.vkCmdEndDebugUtilsLabelEXT;
++        if (active) recorder.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{.pLabelName = label.c_str()});
++    }
++    ~Scope() { if (active) recorder.endDebugUtilsLabelEXT(); }
++    Scope(const Scope&) = delete;
++    Scope& operator=(const Scope&) = delete;
++private:
++    CommandRecorder recorder;
++    bool active{};
++};
++} // namespace Vulkan::ComputeDiagnostic
+diff --git a/src/video_core/renderer_vulkan/dynamic_state_reuse.h b/src/video_core/renderer_vulkan/dynamic_state_reuse.h
+new file mode 100644
+index 00000000..55ef0cf7
+--- /dev/null
++++ b/src/video_core/renderer_vulkan/dynamic_state_reuse.h
+@@ -0,0 +1,53 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++
++namespace Vulkan {
++class DynamicStateReuse {
++public:
++    enum class Key : size_t {
++        Viewport, Scissor, DepthTest, DepthWrite, DepthCompare, DepthBoundsTest,
++        DepthBounds, DepthBiasEnable, DepthBias, StencilTest, StencilOp,
++        StencilReference, StencilWriteMask, StencilCompareMask, PrimitiveRestart,
++        RasterizerDiscard, Cull, FrontFace, LineWidth, BlendConstants, ColorWriteMask,
++        FeedbackLoop, Count
++    };
++    // A single entry per state is conservative for partial/overlapping array and face updates:
++    // only an exact repeat of the last setter can be suppressed.
++    bool ShouldRecord(Key key, uint32_t variant, uint32_t first, uint32_t count,
++                      const void* values, size_t size) {
++        auto& entry = entries[static_cast<size_t>(key)];
++        if (!values || size == 0 || size > entry.bytes.size()) {
++            entry.valid = false;
++            return true;
++        }
++        if (entry.valid && entry.variant == variant && entry.first == first &&
++            entry.count == count && entry.size == size &&
++            std::memcmp(entry.bytes.data(), values, size) == 0) {
++            return false;
++        }
++        entry.valid = true;
++        entry.variant = variant;
++        entry.first = first;
++        entry.count = count;
++        entry.size = size;
++        std::memcpy(entry.bytes.data(), values, size);
++        return true;
++    }
++    void Reset() {
++        for (auto& entry : entries) entry.valid = false;
++    }
++private:
++    struct Entry {
++        std::array<std::byte, 512> bytes{};
++        size_t size{};
++        uint32_t variant{}, first{}, count{};
++        bool valid{};
++    };
++    std::array<Entry, static_cast<size_t>(Key::Count)> entries{};
++};
++} // namespace Vulkan
+diff --git a/tests/outdoor_experiments/CMakeLists.txt b/tests/outdoor_experiments/CMakeLists.txt
+new file mode 100644
+index 00000000..0321156c
+--- /dev/null
++++ b/tests/outdoor_experiments/CMakeLists.txt
+@@ -0,0 +1,27 @@
++cmake_minimum_required(VERSION 3.25)
++project(OutdoorExperiments LANGUAGES C CXX)
++set(CMAKE_CXX_STANDARD 23)
++enable_testing()
++get_filename_component(ENGINE "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
++set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
++set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
++set(FMT_TEST OFF CACHE BOOL "" FORCE)
++set(FETCHCONTENT_SOURCE_DIR_FMT "${ENGINE}/externals/fmt" CACHE PATH "" FORCE)
++add_subdirectory("${ENGINE}/externals/spdlog" spdlog)
++foreach(name dynamic_state_reuse compute_dispatch_labels range_protection hot_write_pages
++             descriptor_push_memo pipeline_bind_cache push_constant_reuse push_constant_recorder
++             backing_range download_overlap prefetch_unmark_policy readback_window)
++    add_executable(${name} "${ENGINE}/tests/test_${name}.cpp")
++    target_include_directories(${name} PRIVATE "${ENGINE}/src"
++      "${ENGINE}/externals/Vulkan-Headers/include" "${ENGINE}/externals/tracy/public"
++      "${ENGINE}/externals/json/include")
++    target_compile_options(${name} PRIVATE -UNDEBUG)
++    target_link_libraries(${name} PRIVATE spdlog::spdlog)
++    add_test(NAME ${name} COMMAND ${name})
++endforeach()
++add_test(NAME compute_labels_disabled COMMAND compute_dispatch_labels disabled)
++add_executable(upload_cache_policy "${ENGINE}/tests/test_upload_cache_policy.c")
++target_include_directories(upload_cache_policy PRIVATE
++  "${ENGINE}/externals/mesa-kosmickrisp/externals/mesa/src/kosmickrisp/vulkan")
++target_compile_options(upload_cache_policy PRIVATE -UNDEBUG)
++add_test(NAME upload_cache_policy COMMAND upload_cache_policy)
+diff --git a/tests/test_compute_dispatch_labels.cpp b/tests/test_compute_dispatch_labels.cpp
+new file mode 100644
+index 00000000..5c290a68
+--- /dev/null
++++ b/tests/test_compute_dispatch_labels.cpp
+@@ -0,0 +1,49 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <cassert>
++#include <cstdlib>
++#include <string>
++#include <unordered_map>
++#include <vector>
++#include "video_core/renderer_vulkan/compute_dispatch_labels.h"
++VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
++void assert_fail_impl() { std::abort(); }
++namespace Common { std::string GetCurrentThreadName() { return "compute-label-test"; } }
++namespace Common::Log { std::unordered_map<std::string_view, std::shared_ptr<spdlog::logger>> ALL_LOGGERS; }
++namespace {
++std::vector<std::string> events;
++VKAPI_ATTR void VKAPI_CALL Begin(VkCommandBuffer, const VkDebugUtilsLabelEXT* l) { events.push_back(l->pLabelName); }
++VKAPI_ATTR void VKAPI_CALL End(VkCommandBuffer) { events.push_back("end"); }
++VKAPI_ATTR void VKAPI_CALL Dispatch(VkCommandBuffer, uint32_t x, uint32_t y, uint32_t z) {
++    assert(x == 3 && y == 4 && z == 5); events.push_back("dispatch");
++}
++}
++int main(int argc, char**) {
++    using namespace Vulkan;
++    using namespace ComputeDiagnostic;
++    if (argc > 1) { unsetenv("SHADPS4_COMPUTE_DISPATCH_LABELS"); assert(!Enabled()); return 0; }
++    setenv("SHADPS4_COMPUTE_DISPATCH_LABELS", "1", 1); assert(Enabled());
++    auto& d = vk::detail::defaultDispatchLoaderDynamic;
++    d.vkCmdBeginDebugUtilsLabelEXT = Begin; d.vkCmdEndDebugUtilsLabelEXT = End;
++    d.vkCmdDispatch = Dispatch;
++    const auto label = GuestLabel(0x123, false, {3,4,5}, {64,1,1});
++    assert(label == "guest_cs_0000000000000123 direct groups=3x4x5 local=64x1x1");
++    const auto indirect = GuestLabel(~uint64_t{}, true, {0,0,0}, {32,2,1});
++    assert(indirect.find("indirect") != std::string::npos);
++    assert(TilingLabel(false, 2, 32, 4, 3, 70) == "host_detiler mode=2 bits=32 mips=4 slices=3 groups=70");
++    assert(TilingLabel(true, 2, 32, 1, 1, 70).starts_with("host_tiler "));
++    const vk::CommandBuffer cb{reinterpret_cast<VkCommandBuffer>(1)};
++    CommandList list;
++    CommandRecorder r{cb, &list};
++    { std::string ephemeral = label; Scope scope{r, ephemeral}; r.dispatch(3,4,5); ephemeral = "changed"; }
++    assert(events.empty() && list.Size() == 3);
++    list.Replay(cb); assert((events == std::vector<std::string>{label, "dispatch", "end"}));
++    events.clear(); { Scope disabled{r, ""}; r.dispatch(3,4,5); }
++    list.Replay(cb); assert((events == std::vector<std::string>{"dispatch"}));
++    events.clear(); { Scope direct{CommandRecorder{cb}, label}; CommandRecorder{cb}.dispatch(3,4,5); }
++    assert((events == std::vector<std::string>{label, "dispatch", "end"}));
++    events.clear(); d.vkCmdBeginDebugUtilsLabelEXT = nullptr;
++    { Scope unsupported{r, label}; r.dispatch(3,4,5); }
++    list.Replay(cb); assert((events == std::vector<std::string>{"dispatch"}));
++    return 0;
++}
+diff --git a/tests/test_dynamic_state_reuse.cpp b/tests/test_dynamic_state_reuse.cpp
+new file mode 100644
+index 00000000..54cfc33a
+--- /dev/null
++++ b/tests/test_dynamic_state_reuse.cpp
+@@ -0,0 +1,99 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <array>
++#include <bit>
++#include <cassert>
++#include <cstdlib>
++#include <string>
++#include <unordered_map>
++#include <vector>
++#include "video_core/renderer_vulkan/vk_command_recorder.h"
++VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
++void assert_fail_impl() { std::abort(); }
++namespace Common { std::string GetCurrentThreadName() { return "dynamic-state-test"; } }
++namespace Common::Log { std::unordered_map<std::string_view, std::shared_ptr<spdlog::logger>> ALL_LOGGERS; }
++namespace {
++std::vector<float> widths;
++unsigned state_calls{}, viewport_calls{}, scissor_calls{}, pipeline_calls{}, render_calls{};
++VKAPI_ATTR void VKAPI_CALL Width(VkCommandBuffer, float v) { widths.push_back(v); }
++VKAPI_ATTR void VKAPI_CALL Depth(VkCommandBuffer, VkBool32) { ++state_calls; }
++VKAPI_ATTR void VKAPI_CALL Viewports(VkCommandBuffer, uint32_t, uint32_t, const VkViewport*) { ++viewport_calls; }
++VKAPI_ATTR void VKAPI_CALL CountedViewports(VkCommandBuffer, uint32_t, const VkViewport*) { ++viewport_calls; }
++VKAPI_ATTR void VKAPI_CALL Scissors(VkCommandBuffer, uint32_t, uint32_t, const VkRect2D*) { ++scissor_calls; }
++VKAPI_ATTR void VKAPI_CALL Pipeline(VkCommandBuffer, VkPipelineBindPoint, VkPipeline) { ++pipeline_calls; }
++VKAPI_ATTR void VKAPI_CALL Begin(VkCommandBuffer, const VkRenderingInfo*) { ++render_calls; }
++VKAPI_ATTR void VKAPI_CALL End(VkCommandBuffer) { ++render_calls; }
++}
++int main() {
++    auto& d = vk::detail::defaultDispatchLoaderDynamic;
++    d.vkCmdSetLineWidth = Width; d.vkCmdSetDepthTestEnable = Depth;
++    d.vkCmdSetViewport = Viewports; d.vkCmdSetViewportWithCount = CountedViewports;
++    d.vkCmdSetScissor = Scissors; d.vkCmdBindPipeline = Pipeline;
++    d.vkCmdBeginRendering = Begin; d.vkCmdEndRendering = End;
++    const vk::CommandBuffer cb{reinterpret_cast<VkCommandBuffer>(1)};
++    unsetenv("SHADPS4_DYNAMIC_STATE_REUSE");
++    Vulkan::CommandList baseline;
++    Vulkan::CommandRecorder disabled{cb, &baseline};
++    disabled.setLineWidth(1); disabled.setLineWidth(1);
++    assert(baseline.Size() == 2); baseline.Replay(cb);
++    setenv("SHADPS4_DYNAMIC_STATE_REUSE", "1", 1);
++    Vulkan::CommandList list;
++    Vulkan::CommandRecorder r{cb, &list};
++    r.setLineWidth(1); r.setLineWidth(1); r.setLineWidth(2); r.setLineWidth(1);
++    assert(list.Size() == 3);
++    r.setDepthTestEnable(true); r.setDepthTestEnable(true);
++    assert(list.Size() == 4);
++    std::array<vk::Viewport, 2> v{vk::Viewport{0,0,100,100,0,1}, vk::Viewport{1,1,90,90,0,1}};
++    r.setViewport(0, v); r.setViewport(0, v);
++    assert(list.Size() == 5);
++    r.setViewport(1, vk::ArrayProxy<const vk::Viewport>{1, v.data()});
++    r.setViewport(0, v);
++    r.setViewportWithCount(v); r.setViewportWithCount(v); r.setViewport(0, v);
++    assert(list.Size() == 9);
++    r.setScissor(0, vk::Rect2D{{0,0},{100,100}});
++    r.setScissor(0, vk::Rect2D{{0,0},{100,100}});
++    assert(list.Size() == 10);
++    v[0].width = 999; // The queued viewport owns the original array.
++    list.Replay(cb);
++    assert(viewport_calls == 5 && scissor_calls == 1 && state_calls == 1);
++    r.setLineWidth(1); assert(list.Size() == 1);
++    r.bindPipeline(vk::PipelineBindPoint::eGraphics, vk::Pipeline{reinterpret_cast<VkPipeline>(2)});
++    r.setLineWidth(1); assert(list.Size() == 3);
++    r.bindPipeline(vk::PipelineBindPoint::eGraphics, vk::Pipeline{reinterpret_cast<VkPipeline>(2)});
++    r.setLineWidth(1); assert(list.Size() == 3);
++    r.beginRendering(vk::RenderingInfo{}); r.setLineWidth(1);
++    r.endRendering(); r.setLineWidth(1);
++    assert(list.Size() == 7); list.Replay(cb);
++    assert(pipeline_calls == 1 && render_calls == 2);
++    Vulkan::CommandList other;
++    Vulkan::CommandRecorder{cb, &other}.setLineWidth(1);
++    assert(other.Size() == 1);
++    const auto before = widths.size();
++    Vulkan::CommandRecorder{cb}.setLineWidth(1); Vulkan::CommandRecorder{cb}.setLineWidth(1);
++    assert(widths.size() == before + 2);
++
++    Vulkan::DynamicStateReuse memo;
++    using K = Vulkan::DynamicStateReuse::Key;
++    std::array<unsigned, 5> faces{1,2,3,4,5};
++    assert(memo.ShouldRecord(K::StencilOp, 0, 0, 1, faces.data(), sizeof(faces)));
++    assert(!memo.ShouldRecord(K::StencilOp, 0, 0, 1, faces.data(), sizeof(faces)));
++    faces[0] = 2;
++    assert(memo.ShouldRecord(K::StencilOp, 0, 0, 1, faces.data(), sizeof(faces)));
++    faces[0] = 1;
++    assert(memo.ShouldRecord(K::StencilOp, 0, 0, 1, faces.data(), sizeof(faces)));
++    for (size_t key = 0; key < static_cast<size_t>(K::Count); ++key) {
++        auto k = static_cast<K>(key);
++        memo.Reset(); unsigned value = 0;
++        assert(memo.ShouldRecord(k, 0, 0, 1, &value, sizeof(value)));
++        assert(!memo.ShouldRecord(k, 0, 0, 1, &value, sizeof(value)));
++        ++value; assert(memo.ShouldRecord(k, 0, 0, 1, &value, sizeof(value)));
++        memo.Reset(); assert(memo.ShouldRecord(k, 0, 0, 1, &value, sizeof(value)));
++    }
++    const unsigned minus_zero = 0x80000000, plus_zero = 0;
++    assert(memo.ShouldRecord(K::LineWidth, 0, 0, 1, &plus_zero, 4));
++    assert(memo.ShouldRecord(K::LineWidth, 0, 0, 1, &minus_zero, 4));
++    std::array<unsigned char, 513> large{};
++    assert(memo.ShouldRecord(K::Viewport, 0, 0, 1, large.data(), large.size()));
++    assert(memo.ShouldRecord(K::Viewport, 0, 0, 1, large.data(), large.size()));
++    return 0;
++}
+diff --git a/tests/test_range_protection.cpp b/tests/test_range_protection.cpp
+new file mode 100644
+index 00000000..fc897e61
+--- /dev/null
++++ b/tests/test_range_protection.cpp
+@@ -0,0 +1,71 @@
++// SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <array>
++#include <cassert>
++#include <random>
++#include <vector>
++#include "video_core/buffer_cache/region_manager.h"
++namespace {
++struct Event { bool track; VideoCore::RegionBits mask; bool operator==(const Event&) const = default; };
++std::vector<Event> events;
++}
++namespace VideoCore {
++struct PageManager::Impl {};
++PageManager::PageManager(Vulkan::Rasterizer*) : impl{std::make_unique<Impl>()} {}
++PageManager::~PageManager() = default;
++template <> void PageManager::UpdatePageWatchersForRegion<true, false>(VAddr, RegionBits& mask) const { events.push_back({true, mask}); }
++template <> void PageManager::UpdatePageWatchersForRegion<false, false>(VAddr, RegionBits& mask) const { events.push_back({false, mask}); }
++}
++int main() {
++    using namespace VideoCore;
++    std::mt19937 random(41);
++    RegionBits a, b;
++    for (unsigned i = 0; i < NUM_PAGES_PER_REGION; ++i) {
++        if (random() & 1) a.Set(i);
++        if (random() & 1) b.Set(i);
++    }
++    for (size_t start = 0; start <= NUM_PAGES_PER_REGION; ++start) {
++        for (size_t length : {0u, 1u, 2u, 63u, 64u, 65u, 1024u}) {
++            const auto end = std::min(start + length, size_t(NUM_PAGES_PER_REGION));
++            auto updated = a;
++            const RegionBits expected(a ^ b, start, end);
++            assert(updated.AssignRange(b, start, end) == expected);
++            assert(updated == (a ^ expected));
++            assert(updated.AssignRange(b, start, end).None());
++        }
++    }
++    assert(a.AssignRange(b, 5, 4).None());
++    assert(a.AssignRange(b, 0, NUM_PAGES_PER_REGION + 1).None());
++    PageManager tracker{nullptr};
++    constexpr VAddr base = 0x10000000;
++    RegionManager baseline{&tracker, base}, candidate{&tracker, base};
++    candidate.SetRangeProtectionEnabled(true);
++    baseline.SetHotPagesEnabled(true); candidate.SetHotPagesEnabled(true);
++    baseline.GetRegionBits<Type::GPU>().Set(64);
++    candidate.GetRegionBits<Type::GPU>().Set(64);
++    auto mutate = [&](RegionManager& m, unsigned op, size_t first, size_t count) {
++        const auto address = base + first * TRACKER_BYTES_PER_PAGE + 1;
++        const auto bytes = count * TRACKER_BYTES_PER_PAGE - 2;
++        switch (op) {
++        case 0: m.NoteCpuWrite(address, bytes);
++                m.ChangeRegionState<Type::CPU, true>(address, bytes); break;
++        case 1: m.ChangeRegionState<Type::CPU, false>(address, bytes); break;
++        case 2: m.ForEachModifiedRange<Type::CPU, true>(address, bytes, [](VAddr, u64){}, true); break;
++        case 3: m.ForEachModifiedRange<Type::CPU, true>(address, bytes, [](VAddr, u64){}, false); break;
++        case 4: m.DecayHotPages(); break;
++        }
++    };
++    for (unsigned i = 0; i < 6000; ++i) {
++        const size_t first = random() % NUM_PAGES_PER_REGION;
++        const size_t count = std::min<size_t>(1 + random() % 130, NUM_PAGES_PER_REGION - first);
++        const unsigned op = random() % 5;
++        events.clear(); mutate(baseline, op, first, count); const auto expected = events;
++        events.clear(); mutate(candidate, op, first, count); assert(events == expected);
++        assert(baseline.GetRegionBits<Type::CPU>() == candidate.GetRegionBits<Type::CPU>());
++        assert(baseline.GetRegionBits<Type::GPU>() == candidate.GetRegionBits<Type::GPU>());
++    }
++    // Repeated invalidation of an already writable page must emit no new protection request.
++    mutate(candidate, 0, 63, 2); events.clear(); mutate(candidate, 0, 63, 2);
++    assert(events.empty());
++    return 0;
++}
+diff --git a/tests/test_upload_cache_policy.c b/tests/test_upload_cache_policy.c
+new file mode 100644
+index 00000000..513449ad
+--- /dev/null
++++ b/tests/test_upload_cache_policy.c
+@@ -0,0 +1,24 @@
++#include <assert.h>
++#include "kk_upload_cache_policy.h"
++int main(void) {
++   assert(!kk_upload_cache_enabled(0));
++   assert(!kk_upload_cache_enabled("0"));
++   assert(!kk_upload_cache_enabled("10"));
++   assert(kk_upload_cache_enabled("1"));
++   for (unsigned expanded = 0; expanded < 2; ++expanded) {
++      unsigned cached = 0, destroyed = 0;
++      for (unsigned completed = 0; completed < 300; ++completed) {
++         if (kk_upload_cache_keep(cached, expanded)) ++cached;
++         else ++destroyed;
++      }
++      assert(cached == (expanded ? 128 : 33));
++      assert(cached + destroyed == 300);
++      while (cached) --cached;
++      assert(kk_upload_cache_keep(cached, expanded));
++   }
++   assert(kk_upload_cache_keep(32, false));
++   assert(!kk_upload_cache_keep(33, false));
++   assert(kk_upload_cache_keep(127, true));
++   assert(!kk_upload_cache_keep(128, true));
++   return 0;
++}

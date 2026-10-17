@@ -701,7 +701,8 @@ func selfTest() -> Int32 {
         for key in ["VK_DRIVER_FILES", "DYLD_LIBRARY_PATH", "MESA_KK_DISABLE_WORKAROUNDS",
                     "SHADPS4_METAL_ENCODER_ORDERING", "SHADPS4_PREFETCH_STRICT_UNMARK",
                     "SHADPS4_TEXTURE_LOOKUP_REUSE", "SHADPS4_DOWNLOAD_RESCAN_REUSE",
-                    "SHADPS4_IMAGE_BACKING_READS", "SHADPS4_READBACK_WINDOW_KB"] {
+                    "SHADPS4_IMAGE_BACKING_READS", "SHADPS4_READBACK_WINDOW_KB",
+                    "SHADPS4_DYNAMIC_STATE_REUSE", "SHADPS4_RANGE_PROTECTION"] {
             print("\(key)=\(env[key] ?? "")")
         }
         print("working directory: \(launcher.dataDir.path)")
