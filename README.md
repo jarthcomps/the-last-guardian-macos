@@ -6,7 +6,7 @@ Play **The Last Guardian** (PS4) on Mac. This repository contains a small launch
 
 ## Quick start
 
-**You need:**
+**Requirements:**
 - An Apple Silicon Mac (M1 or newer) running **macOS 26 (Tahoe)** or newer.
 - **Rosetta 2**. The launcher offers to install it if it's missing.
 - Your own copy of The Last Guardian, either as the game **PKG** file or as an already extracted folder (the one with `eboot.bin` and `sce_sys/`). The US release `CUSA03745` is tested; the other regions (`CUSA03627`, `CUSA04936`, `CUSA05152`) should work but are untested.
