@@ -11,6 +11,7 @@
 #include "common/scope_exit.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
+#include "video_core/coherent_read.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/readback_batch.h"
 #include "video_core/page_manager.h"
@@ -830,6 +831,30 @@ void TextureCache::RefreshImage(Image& image) {
         const char* value = std::getenv("SHADPS4_IMAGE_UPLOAD_SKIP_HASH");
         return value != nullptr && std::string_view{value} == "1";
     }();
+    static const bool backing_reads = [] {
+        const char* value = std::getenv("SHADPS4_IMAGE_BACKING_READS");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    const auto hash_memory = [&](VAddr address, u64 size) {
+        const void* source = CoherentReadPointer(
+            address, size, backing_reads,
+            [&](VAddr addr, u64 length) { return buffer_cache.IsCpuCopyCurrent(addr, length); },
+            [&](VAddr addr, u64 length) { return Core::Memory::Instance()->BackingPointer(addr, length); });
+        const auto hash = XXH3_64bits(source, size);
+        static const bool verify = [] {
+            const char* value = std::getenv("SHADPS4_IMAGE_BACKING_VERIFY");
+            return value && std::string_view{value} == "1";
+        }();
+        if (verify && source != reinterpret_cast<const void*>(address)) {
+            ASSERT_MSG(hash == XXH3_64bits(reinterpret_cast<const void*>(address), size),
+                       "coherent image hash mismatch");
+            static u64 verified_hashes{};
+            if (++verified_hashes == 1 || verified_hashes % 100000 == 0) {
+                LOG_INFO(Render_Vulkan, "Coherent image hash verification: {} reads", verified_hashes);
+            }
+        }
+        return hash;
+    };
     const bool memory_gpu_modified =
         skip_hash &&
         buffer_cache.IsRegionGpuModified(image.info.guest_address, image.info.guest_size);
@@ -839,14 +864,13 @@ void TextureCache::RefreshImage(Image& image) {
         // The image size should be less than page size to be considered MaybeCpuDirty
         // So this calculation should be very uncommon and reasonably fast
         // For now we'll just check up to 64 first pixels
-        const auto addr = std::bit_cast<u8*>(image.info.guest_address);
         const u32 w = std::min(image.info.size.width, u32(8));
         const u32 h = std::min(image.info.size.height, u32(8));
 
         const u32 s_w = image.info.props.is_block ? Common::DivCeil(w, 4u) : w;
         const u32 s_h = image.info.props.is_block ? Common::DivCeil(h, 4u) : h;
         const u32 size = s_w * s_h * (image.info.num_bits / 8);
-        const u64 hash = XXH3_64bits(addr, size);
+        const u64 hash = hash_memory(image.info.guest_address, size);
         if (image.hash == hash) {
             image.flags &= ~ImageFlagBits::MaybeCpuDirty;
             return;
@@ -871,8 +895,7 @@ void TextureCache::RefreshImage(Image& image) {
         // Protect GPU modified resources from accidental CPU reuploads.
         if (ShouldHashBeforeUpload(is_gpu_modified, is_gpu_dirty, memory_gpu_modified,
                                    skip_hash)) {
-            const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
-            const u64 hash = XXH3_64bits(addr + mip_offset, mip_size);
+            const u64 hash = hash_memory(image.info.guest_address + mip_offset, mip_size);
             if (image.mip_hashes[m] == hash) {
                 continue;
             }
