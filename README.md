@@ -1,6 +1,6 @@
 # The Last Guardian on macOS
 
-> Note from the developer: This is 100% considered "alpha" software. I really wanted to play this game but it's not supported in shadPS4 yet, so I used LLMs to modify it. If you run into problems while playing, please feel free to report them as Issues here on github. I'll try to take care of any problems asap, but you'll need to be very specific about what went wrong and which exact computer / MacOS version you're on.
+> Note from the developer: This is 100% considered "alpha" software. I really wanted to play this game on my macbook but it's not supported in shadPS4 yet, so I used LLMs to modify it. If you run into problems while playing, please feel free to report them as Issues here on github. I'll try to take care of any problems asap, but you'll need to be very specific about what went wrong and which exact computer / MacOS version you're on.
 
 Play **The Last Guardian** (PS4) on Mac. This repository contains a small launcher app, plus a build of the [shadPS4](https://github.com/shadps4-emu/shadPS4) emulator tuned for this one game on macOS.
 
