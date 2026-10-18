@@ -1,7 +1,8 @@
-diff -ruN a/src/kosmickrisp/compiler/meson.build b/src/kosmickrisp/compiler/meson.build
+diff --git a/src/kosmickrisp/compiler/meson.build b/src/kosmickrisp/compiler/meson.build
+index 91cb3f9..8ace1ae 100644
 --- a/src/kosmickrisp/compiler/meson.build
 +++ b/src/kosmickrisp/compiler/meson.build
-@@ -35,3 +35,10 @@
+@@ -35,3 +35,10 @@ idep_msl_to_nir = declare_dependency(
    link_with : libmsl_compiler,
  )
  
@@ -12,7 +13,8 @@ diff -ruN a/src/kosmickrisp/compiler/meson.build b/src/kosmickrisp/compiler/meso
 +  ))
 +endif
 +
-diff -ruN a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+index 63d2ec1..6dbf7e6 100644
 --- a/src/kosmickrisp/compiler/nir_to_msl.c
 +++ b/src/kosmickrisp/compiler/nir_to_msl.c
 @@ -8,6 +8,7 @@
@@ -23,7 +25,7 @@ diff -ruN a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir
  
  static const char *
  get_stage_string(mesa_shader_stage stage)
-@@ -2197,6 +2198,8 @@
+@@ -2197,6 +2198,8 @@ rename_main_entrypoint(struct nir_shader *nir)
     const char *entrypoint_name = "main_entrypoint";
     nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
     struct nir_function *function = entrypoint->function;
@@ -32,8 +34,10 @@ diff -ruN a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir
     ralloc_free((void *)function->name);
     function->name = ralloc_strdup(function, entrypoint_name);
  }
-diff -ruN a/src/kosmickrisp/compiler/shadps4_diagnostic_name.h b/src/kosmickrisp/compiler/shadps4_diagnostic_name.h
---- a/src/kosmickrisp/compiler/shadps4_diagnostic_name.h
+diff --git a/src/kosmickrisp/compiler/shadps4_diagnostic_name.h b/src/kosmickrisp/compiler/shadps4_diagnostic_name.h
+new file mode 100644
+index 0000000..d413071
+--- /dev/null
 +++ b/src/kosmickrisp/compiler/shadps4_diagnostic_name.h
 @@ -0,0 +1,42 @@
 +/* SPDX-License-Identifier: MIT */
@@ -78,8 +82,10 @@ diff -ruN a/src/kosmickrisp/compiler/shadps4_diagnostic_name.h b/src/kosmickrisp
 +}
 +
 +#endif
-diff -ruN a/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c b/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c
---- a/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c
+diff --git a/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c b/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c
+new file mode 100644
+index 0000000..9755f34
+--- /dev/null
 +++ b/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c
 @@ -0,0 +1,44 @@
 +/* SPDX-License-Identifier: MIT */
@@ -126,15 +132,16 @@ diff -ruN a/src/kosmickrisp/compiler/test_shadps4_diagnostic_name.c b/src/kosmic
 +   puts("Diagnostic shader name tests passed");
 +   return 0;
 +}
-diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index 22f4bf7..81bd807 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
-@@ -24,7 +24,60 @@
+@@ -24,6 +24,59 @@
  #include "vk_common_entrypoints.h"
  #include "vk_format.h"
  #include "vk_pipeline_layout.h"
 +#include <stdlib.h>
- 
++
 +#include "util/os_time.h"
 +#include "util/u_atomic.h"
 +
@@ -186,11 +193,10 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_c
 +   last_ns = now;
 +   last = current;
 +}
-+
+ 
  static void
  kk_descriptor_state_fini(struct kk_cmd_buffer *cmd,
-                          struct kk_descriptor_state *desc)
-@@ -67,6 +120,10 @@
+@@ -67,6 +120,10 @@ end_recording(struct kk_cmd_buffer *cmd)
  
     cs_end(cmd);
     mtl_end_command_buffer(cmd->metal.cmd_buf);
@@ -201,7 +207,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_c
     kk_cmd_pool_return_allocator(kk_cmd_buffer_pool(cmd), cmd->metal.allocator);
     cmd->metal.allocator = NULL;
  }
-@@ -269,13 +326,19 @@
+@@ -269,13 +326,19 @@ cs_start_render(struct kk_cmd_buffer *cmd)
  
     cmd->metal.render = mtl_new_render_command_encoder_with_descriptor(
        cmd->metal.cmd_buf, state->render_pass_descriptor);
@@ -224,7 +230,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_c
  
     uint32_t layer_ids[KK_MAX_MULTIVIEW_VIEW_COUNT] = {};
     uint32_t count = 0u;
-@@ -315,10 +378,14 @@
+@@ -315,10 +378,14 @@ cs_get_compute(struct kk_cmd_buffer *cmd)
  {
     /* If we are inside render, we need to force a restart later */
     if (cmd->metal.render) {
@@ -239,10 +245,11 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_c
     }
  
     if (cmd->metal.compute == NULL) {
-@@ -406,53 +473,66 @@
+@@ -405,54 +472,67 @@ kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd, uint64_t addr)
+  * attachment memory. Meaning there was no write to the attachment and therefore
   * no split is needed.
   */
- static bool
++static bool
 +kk_image_is_encoder_attachment(const struct kk_rendering_state *render,
 +                               const struct vk_image *image)
 +{
@@ -268,7 +275,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_c
 +   return false;
 +}
 +
-+static bool
+ static bool
  kk_barrier_requires_encoder_split(struct kk_cmd_buffer *cmd,
                                    const VkDependencyInfo *dep)
  {
@@ -335,7 +342,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_c
  }
  
  VKAPI_ATTR void VKAPI_CALL
-@@ -465,19 +545,31 @@
+@@ -465,19 +545,31 @@ kk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
      * barrier. To take advantage of this we need to remove the chaining of
      * encoders. */
     if (cmd->metal.render) {
@@ -367,7 +374,8 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_c
        /* We chain encoders, so an intra-encoder barrier is enough here:
         * no need to tear down and recreate the encoder.
         */
-diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+index dcd0983..1903616 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 @@ -9,6 +9,9 @@
@@ -380,7 +388,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_c
  
  #include "kk_descriptor_set.h"
  #include "kk_image.h"
-@@ -124,10 +127,12 @@
+@@ -124,10 +127,12 @@ struct kk_rendering_state {
     struct kk_attachment fsr_att;
  
     bool ms_bresenham_lines;
@@ -397,7 +405,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_c
     bool sample_locations_enable;
     uint32_t sample_locations_count;
     VkSampleLocationEXT sample_locations[KK_MAX_SAMPLES];
-@@ -153,6 +158,8 @@
+@@ -153,6 +158,8 @@ struct kk_graphics_state {
     bool is_depth_stencil_dynamic;
     bool is_cull_front_and_back;
     bool need_to_start_render_pass;
@@ -406,7 +414,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_c
  
     enum kk_dirty dirty;
     uint32_t pipeline_sample_count;
-@@ -314,6 +321,17 @@
+@@ -314,6 +321,17 @@ kk_get_descriptors_state(struct kk_cmd_buffer *cmd,
  
  void cs_start_render(struct kk_cmd_buffer *cmd);
  mtl_render_encoder *cs_get_render(struct kk_cmd_buffer *cmd);
@@ -424,10 +432,11 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_c
  mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd);
  void cs_end(struct kk_cmd_buffer *cmd);
  void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
-diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_dispatch.c b/src/kosmickrisp/vulkan/kk_cmd_dispatch.c
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_dispatch.c b/src/kosmickrisp/vulkan/kk_cmd_dispatch.c
+index 4df22e7..1a3d4c4 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_dispatch.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_dispatch.c
-@@ -21,6 +21,7 @@
+@@ -21,6 +21,7 @@ static void
  kk_flush_compute_state(struct kk_cmd_buffer *cmd)
  {
     mtl_compute_encoder *encoder = cs_get_compute(cmd);
@@ -435,7 +444,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_dispatch.c b/src/kosmickrisp/vulkan/kk
  
     // Fill Metal argument buffer with descriptor set addresses
     struct kk_descriptor_state *desc = &cmd->state.cs.descriptors;
-@@ -81,6 +82,7 @@
+@@ -81,6 +82,7 @@ kk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
     struct mtl_size local_size = cs->info.cs.local_size;
  
     mtl_compute_encoder *encoder = cs_get_compute(cmd);
@@ -443,7 +452,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_dispatch.c b/src/kosmickrisp/vulkan/kk
     if (cmd->state.cond_render.enabled) {
        /* Convert to indirect for predication */
        VkDispatchIndirectCommand indirect = {
-@@ -130,6 +132,7 @@
+@@ -130,6 +132,7 @@ kk_CmdDispatchIndirect2KHR(VkCommandBuffer commandBuffer,
     struct mtl_size local_size = cs->info.cs.local_size;
  
     mtl_compute_encoder *encoder = cs_get_compute(cmd);
@@ -451,10 +460,11 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_dispatch.c b/src/kosmickrisp/vulkan/kk
     if (cmd->state.cond_render.enabled) {
        struct kk_ptr patched =
           kk_pool_alloc(cmd, sizeof(VkDispatchIndirectCommand), 4u);
-diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 24f05de..d0a81c8 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
-@@ -466,6 +466,7 @@
+@@ -466,6 +466,7 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
           attachment_descriptor, MTL_LOAD_ACTION_LOAD);
     }
     cmd->state.gfx.need_to_start_render_pass = no_framebuffer;
@@ -462,7 +472,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd
  
     kk_cmd_buffer_dirty_all_gfx(cmd);
  
-@@ -628,6 +629,13 @@
+@@ -628,6 +629,13 @@ kk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
  
     kk_apply_attachment_store_ops(cmd, false);
  
@@ -476,7 +486,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd
     /* Clean up previous encoder */
     cs_end(cmd);
     mtl_release(cmd->state.gfx.render_pass_descriptor);
-@@ -971,6 +979,7 @@
+@@ -971,6 +979,7 @@ kk_flush_render_pass(struct kk_cmd_buffer *cmd)
        cs_end(cmd);
        kk_cmd_buffer_dirty_all_gfx(cmd);
        cmd->state.gfx.need_to_start_render_pass = true;
@@ -484,12 +494,12 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd
     }
  }
  
-@@ -1527,7 +1536,21 @@
+@@ -1527,6 +1536,20 @@ kk_flush_gfx_state(struct kk_cmd_buffer *cmd)
  
     kk_flush_render_pass(cmd);
     kk_flush_pipeline(cmd);
 +   KK_SHADPS4_STAT(draws);
- 
++
 +   /* Barriers recorded later in this encoder may name writes of these
 +    * draws only if one of their shaders writes memory. */
 +   if (!gfx->render.encoder_may_write_memory) {
@@ -502,11 +512,10 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd
 +         }
 +      }
 +   }
-+
+ 
     if (desc->push_dirty)
        kk_cmd_buffer_flush_push_descriptors(cmd, desc);
- 
-@@ -1971,14 +1994,29 @@
+@@ -1971,14 +1994,29 @@ requires_unroll(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
        return false;
  
     /* Metal does not support triangle fans */
@@ -541,7 +550,105 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd
  }
  
  static uint64_t
-diff -ruN a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_pool.c b/src/kosmickrisp/vulkan/kk_cmd_pool.c
+index e2c2fc8..ae2f15d 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_pool.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_pool.c
+@@ -6,6 +6,9 @@
+  */
+ 
+ #include "kk_cmd_pool.h"
++#include "kk_upload_cache_policy.h"
++#include <stdio.h>
++#include <stdlib.h>
+ 
+ #include "kk_device.h"
+ #include "kk_entrypoints.h"
+@@ -32,6 +35,8 @@ kk_cmd_bo_create(struct kk_cmd_pool *pool, struct kk_cmd_bo **bo_out)
+       return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    }
+ 
++   if (pool->upload_cache_diagnostics)
++      pool->upload_created++;
+    *bo_out = bo;
+    return VK_SUCCESS;
+ }
+@@ -40,6 +45,8 @@ static void
+ kk_cmd_bo_destroy(struct kk_cmd_pool *pool, struct kk_cmd_bo *bo)
+ {
+    struct kk_device *dev = kk_cmd_pool_device(pool);
++   if (pool->upload_cache_diagnostics)
++      pool->upload_destroyed++;
+    kk_destroy_bo(dev, bo->bo);
+    vk_free(&pool->vk.alloc, bo);
+ }
+@@ -51,6 +58,7 @@ kk_cmd_pool_destroy_bos(struct kk_cmd_pool *pool)
+       kk_cmd_bo_destroy(pool, bo);
+ 
+    list_inithead(&pool->free_bos);
++   pool->num_free_bos = 0;
+ }
+ 
+ VkResult
+@@ -60,6 +68,8 @@ kk_cmd_pool_alloc_bo(struct kk_cmd_pool *pool, struct kk_cmd_bo **bo_out)
+    if (!list_is_empty(&pool->free_bos)) {
+       bo = list_first_entry(&pool->free_bos, struct kk_cmd_bo, link);
+       pool->num_free_bos--;
++      if (pool->upload_cache_diagnostics)
++         pool->upload_reused++;
+    }
+ 
+    if (bo) {
+@@ -76,7 +86,7 @@ kk_cmd_pool_free_bo_list(struct kk_cmd_pool *pool, struct list_head *bos)
+ {
+    list_for_each_entry_safe(struct kk_cmd_bo, bo, bos, link) {
+       list_del(&bo->link);
+-      if (pool->num_free_bos > KK_CMD_POOL_BO_MAX) {
++      if (!kk_upload_cache_keep(pool->num_free_bos, pool->expanded_upload_cache)) {
+          kk_cmd_bo_destroy(pool, bo);
+       } else {
+          list_addtail(&bo->link, &pool->free_bos);
+@@ -144,6 +154,12 @@ kk_CreateCommandPool(VkDevice _device,
+       return result;
+    }
+ 
++   pool->num_free_bos = 0;
++   pool->expanded_upload_cache =
++      kk_upload_cache_enabled(getenv("KK_UPLOAD_CACHE_EXPANDED"));
++   pool->upload_cache_diagnostics =
++      kk_upload_cache_enabled(getenv("KK_UPLOAD_CACHE_DIAGNOSTICS"));
++   pool->upload_created = pool->upload_reused = pool->upload_destroyed = 0;
+    pool->metal.free_allocators = UTIL_DYNARRAY_INIT;
+    pool->metal.free_cmd_bufs = UTIL_DYNARRAY_INIT;
+ 
+@@ -183,6 +199,11 @@ kk_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool,
+    vk_command_pool_finish(&pool->vk);
+    kk_cmd_pool_destroy_bos(pool);
+    kk_cmd_pool_release_mtl_objects(pool);
++   if (pool->upload_cache_diagnostics)
++      fprintf(stderr, "KK_UPLOAD_CACHE expanded=%u created=%llu reused=%llu destroyed=%llu\n",
++              pool->expanded_upload_cache, (unsigned long long)pool->upload_created,
++              (unsigned long long)pool->upload_reused,
++              (unsigned long long)pool->upload_destroyed);
+    util_dynarray_fini(&pool->metal.free_allocators);
+    util_dynarray_fini(&pool->metal.free_cmd_bufs);
+    vk_free2(&device->vk.alloc, pAllocator, pool);
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_pool.h b/src/kosmickrisp/vulkan/kk_cmd_pool.h
+index 479e70e..5573221 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_pool.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_pool.h
+@@ -31,6 +31,9 @@ struct kk_cmd_pool {
+    /** List of kk_cmd_bo */
+    struct list_head free_bos;
+    uint32_t num_free_bos;
++   bool expanded_upload_cache;
++   bool upload_cache_diagnostics;
++   uint64_t upload_created, upload_reused, upload_destroyed;
+ 
+    struct {
+       struct util_dynarray free_allocators;
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 613977a..5dbec0b 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
 +++ b/src/kosmickrisp/vulkan/kk_physical_device.c
 @@ -6,6 +6,7 @@
@@ -552,7 +659,7 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan
  
  #include "kk_debug.h"
  #include "kk_entrypoints.h"
-@@ -979,6 +980,9 @@
+@@ -979,6 +980,9 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
  
     _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
                         sizeof(instance->driver_build_sha));
@@ -562,10 +669,11 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan
  
     unsigned char blake3[BLAKE3_KEY_LEN];
     _mesa_blake3_final(&blake3_ctx, blake3);
-diff -ruN a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 362739c..eadf52c 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
-@@ -899,11 +899,28 @@
+@@ -899,11 +899,28 @@ fs_uses_flat_varying(nir_shader *nir)
     return false;
  }
  
@@ -594,10 +702,11 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shade
     shader->info.uses_per_draw_data = msl_gather_uses_per_draw_data(nir);
     shader->info.num_cull_distances = nir->info.cull_distance_array_size;
     if (nir->info.stage == MESA_SHADER_VERTEX) {
-diff -ruN a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+index 296f9ff..c29140b 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.h
 +++ b/src/kosmickrisp/vulkan/kk_shader.h
-@@ -54,6 +54,11 @@
+@@ -54,6 +54,11 @@ struct kk_shader_info {
     /* Required for fragment shader cull distance discards. */
     uint8_t num_cull_distances;
  
@@ -609,10 +718,37 @@ diff -ruN a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shade
     union {
        /* Vertex shader is the pipeline, store all relevant data here. */
        struct {
-diff -ruN a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+diff --git a/src/kosmickrisp/vulkan/kk_upload_cache_policy.h b/src/kosmickrisp/vulkan/kk_upload_cache_policy.h
+new file mode 100644
+index 0000000..dde2f1f
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/kk_upload_cache_policy.h
+@@ -0,0 +1,20 @@
++#ifndef KK_UPLOAD_CACHE_POLICY_H
++#define KK_UPLOAD_CACHE_POLICY_H
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++static inline bool
++kk_upload_cache_enabled(const char *value)
++{
++   return value && strcmp(value, "1") == 0;
++}
++
++static inline bool
++kk_upload_cache_keep(uint32_t cached, bool expanded)
++{
++   return expanded ? cached < 128 : cached <= 32;
++}
++
++#endif
+diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+index f82e80f..1b042ed 100644
 --- a/src/kosmickrisp/vulkan/meson.build
 +++ b/src/kosmickrisp/vulkan/meson.build
-@@ -202,3 +202,25 @@
+@@ -202,3 +202,25 @@ kosmickrisp_icd = custom_target(
  )
  
  devenv.append('VK_DRIVER_FILES', kosmickrisp_icd.full_path())
@@ -638,8 +774,10 @@ diff -ruN a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.bu
 +    'test_shadps4_cache_key.c',
 +  ))
 +endif
-diff -ruN a/src/kosmickrisp/vulkan/shadps4_barrier_split.h b/src/kosmickrisp/vulkan/shadps4_barrier_split.h
---- a/src/kosmickrisp/vulkan/shadps4_barrier_split.h
+diff --git a/src/kosmickrisp/vulkan/shadps4_barrier_split.h b/src/kosmickrisp/vulkan/shadps4_barrier_split.h
+new file mode 100644
+index 0000000..e65a59b
+--- /dev/null
 +++ b/src/kosmickrisp/vulkan/shadps4_barrier_split.h
 @@ -0,0 +1,136 @@
 +/* SPDX-License-Identifier: MIT */
@@ -778,8 +916,10 @@ diff -ruN a/src/kosmickrisp/vulkan/shadps4_barrier_split.h b/src/kosmickrisp/vul
 +}
 +
 +#endif /* SHADPS4_BARRIER_SPLIT_H */
-diff -ruN a/src/kosmickrisp/vulkan/shadps4_cache_key.h b/src/kosmickrisp/vulkan/shadps4_cache_key.h
---- a/src/kosmickrisp/vulkan/shadps4_cache_key.h
+diff --git a/src/kosmickrisp/vulkan/shadps4_cache_key.h b/src/kosmickrisp/vulkan/shadps4_cache_key.h
+new file mode 100644
+index 0000000..e997128
+--- /dev/null
 +++ b/src/kosmickrisp/vulkan/shadps4_cache_key.h
 @@ -0,0 +1,30 @@
 +/* SPDX-License-Identifier: MIT */
@@ -812,8 +952,10 @@ diff -ruN a/src/kosmickrisp/vulkan/shadps4_cache_key.h b/src/kosmickrisp/vulkan/
 +}
 +
 +#endif /* SHADPS4_CACHE_KEY_H */
-diff -ruN a/src/kosmickrisp/vulkan/shadps4_encoder_stats.h b/src/kosmickrisp/vulkan/shadps4_encoder_stats.h
---- a/src/kosmickrisp/vulkan/shadps4_encoder_stats.h
+diff --git a/src/kosmickrisp/vulkan/shadps4_encoder_stats.h b/src/kosmickrisp/vulkan/shadps4_encoder_stats.h
+new file mode 100644
+index 0000000..3221daa
+--- /dev/null
 +++ b/src/kosmickrisp/vulkan/shadps4_encoder_stats.h
 @@ -0,0 +1,145 @@
 +/* SPDX-License-Identifier: MIT */
@@ -961,8 +1103,10 @@ diff -ruN a/src/kosmickrisp/vulkan/shadps4_encoder_stats.h b/src/kosmickrisp/vul
 +}
 +
 +#endif /* SHADPS4_ENCODER_STATS_H */
-diff -ruN a/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c b/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c
---- a/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c
+diff --git a/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c b/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c
+new file mode 100644
+index 0000000..32a12cf
+--- /dev/null
 +++ b/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c
 @@ -0,0 +1,156 @@
 +/* SPDX-License-Identifier: MIT */
@@ -1121,8 +1265,10 @@ diff -ruN a/src/kosmickrisp/vulkan/test_shadps4_barrier_split.c b/src/kosmickris
 +   puts("Barrier split tests passed");
 +   return EXIT_SUCCESS;
 +}
-diff -ruN a/src/kosmickrisp/vulkan/test_shadps4_cache_key.c b/src/kosmickrisp/vulkan/test_shadps4_cache_key.c
---- a/src/kosmickrisp/vulkan/test_shadps4_cache_key.c
+diff --git a/src/kosmickrisp/vulkan/test_shadps4_cache_key.c b/src/kosmickrisp/vulkan/test_shadps4_cache_key.c
+new file mode 100644
+index 0000000..4becf61
+--- /dev/null
 +++ b/src/kosmickrisp/vulkan/test_shadps4_cache_key.c
 @@ -0,0 +1,21 @@
 +/* SPDX-License-Identifier: MIT */
@@ -1146,8 +1292,10 @@ diff -ruN a/src/kosmickrisp/vulkan/test_shadps4_cache_key.c b/src/kosmickrisp/vu
 +   puts("Cache key tests passed");
 +   return EXIT_SUCCESS;
 +}
-diff -ruN a/src/kosmickrisp/vulkan/test_shadps4_encoder_stats.c b/src/kosmickrisp/vulkan/test_shadps4_encoder_stats.c
---- a/src/kosmickrisp/vulkan/test_shadps4_encoder_stats.c
+diff --git a/src/kosmickrisp/vulkan/test_shadps4_encoder_stats.c b/src/kosmickrisp/vulkan/test_shadps4_encoder_stats.c
+new file mode 100644
+index 0000000..c49f2e0
+--- /dev/null
 +++ b/src/kosmickrisp/vulkan/test_shadps4_encoder_stats.c
 @@ -0,0 +1,91 @@
 +/* SPDX-License-Identifier: MIT */
