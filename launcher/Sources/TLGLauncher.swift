@@ -702,7 +702,8 @@ func selfTest() -> Int32 {
                     "SHADPS4_METAL_ENCODER_ORDERING", "SHADPS4_PREFETCH_STRICT_UNMARK",
                     "SHADPS4_TEXTURE_LOOKUP_REUSE", "SHADPS4_DOWNLOAD_RESCAN_REUSE",
                     "SHADPS4_IMAGE_BACKING_READS", "SHADPS4_READBACK_WINDOW_KB",
-                    "SHADPS4_DYNAMIC_STATE_REUSE", "SHADPS4_RANGE_PROTECTION"] {
+                    "SHADPS4_DYNAMIC_STATE_REUSE", "SHADPS4_RANGE_PROTECTION",
+                    "KK_UPLOAD_CACHE_EXPANDED"] {
             print("\(key)=\(env[key] ?? "")")
         }
         print("working directory: \(launcher.dataDir.path)")

@@ -12,6 +12,7 @@ enum PerformanceEnvironment {
             env["SHADPS4_READBACK_WINDOW_KB"] = "64"
             env["SHADPS4_DYNAMIC_STATE_REUSE"] = "1"
             env["SHADPS4_RANGE_PROTECTION"] = "1"
+            env["KK_UPLOAD_CACHE_EXPANDED"] = "1"
         }
         return env
     }

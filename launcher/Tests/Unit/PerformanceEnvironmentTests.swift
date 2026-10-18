@@ -7,7 +7,7 @@ final class PerformanceEnvironmentTests: XCTestCase {
         for flag in ["SHADPS4_TEXTURE_LOOKUP_REUSE", "SHADPS4_DOWNLOAD_RESCAN_REUSE",
                      "SHADPS4_IMAGE_BACKING_READS", "SHADPS4_METAL_ENCODER_ORDERING",
                      "SHADPS4_PREFETCH_STRICT_UNMARK", "SHADPS4_DYNAMIC_STATE_REUSE",
-                     "SHADPS4_RANGE_PROTECTION"] {
+                     "SHADPS4_RANGE_PROTECTION", "KK_UPLOAD_CACHE_EXPANDED"] {
             XCTAssertEqual(env[flag], "1", flag)
         }
         XCTAssertEqual(env["SHADPS4_READBACK_WINDOW_KB"], "64")
@@ -16,7 +16,8 @@ final class PerformanceEnvironmentTests: XCTestCase {
         for flag in ["SHADPS4_TEXTURE_LOOKUP_VERIFY", "SHADPS4_IMAGE_BACKING_VERIFY",
                      "SHADPS4_PRECISE_BUFFER_HAZARDS", "SHADPS4_ENABLE_A912_COPY_HLE",
                      "SHADPS4_IMAGE_UPLOAD_SKIP_HASH", "SHADPS4_COMPUTE_DISPATCH_LABELS",
-                     "KK_UPLOAD_CACHE_EXPANDED", "KK_UPLOAD_CACHE_DIAGNOSTICS"] {
+                     "KK_UPLOAD_CACHE_DIAGNOSTICS", "MESA_KK_ICB_BATCHING",
+                     "MESA_KK_TESS_PACKED", "MESA_KK_COMPUTE_PROFILE"] {
             XCTAssertNil(env[flag], flag)
         }
     }
@@ -25,6 +26,13 @@ final class PerformanceEnvironmentTests: XCTestCase {
         let inherited = ["PATH": "/bin", "SHADPS4_READBACK_WINDOW_KB": "128"]
         XCTAssertEqual(PerformanceEnvironment.apply(to: inherited, metalTweaks: false), inherited)
         XCTAssertTrue(PerformanceEnvironment.apply(to: [:], metalTweaks: false).isEmpty)
+    }
+
+    func testUploadCacheOnlyEnabledByMetalProfile() {
+        XCTAssertNil(PerformanceEnvironment.apply(to: [:], metalTweaks: false)["KK_UPLOAD_CACHE_EXPANDED"])
+        let inherited = ["KK_UPLOAD_CACHE_EXPANDED": "0", "PATH": "/bin"]
+        XCTAssertEqual(PerformanceEnvironment.apply(to: inherited, metalTweaks: false), inherited)
+        XCTAssertEqual(PerformanceEnvironment.apply(to: inherited, metalTweaks: true)["KK_UPLOAD_CACHE_EXPANDED"], "1")
     }
 
     func testEnabledProfileOverridesStalePerformanceValues() {
