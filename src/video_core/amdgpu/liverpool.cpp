@@ -6,6 +6,7 @@
 #include <cstdio>
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/amdgpu/eop_latency_stats.h"
+#include "video_core/frame_path_stats.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
 #include <boost/preprocessor/stringize.hpp>
 
@@ -1014,6 +1015,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     eop_stats && event_eop->int_sel.Value() != InterruptSelect::None
                         ? VideoCore::ReadbackStats::NowNs()
                         : 0;
+                if (VideoCore::FramePathStats::Enabled()) {
+                    const auto path_report = VideoCore::FramePathStats::Global().TakeReport(
+                        VideoCore::FramePathStats::NowNs());
+                    if (!path_report.empty()) {
+                        std::fputs(path_report.c_str(), stderr);
+                        std::fflush(stderr);
+                    }
+                }
                 if (eop_cp_ns != 0) {
                     if (rasterizer) {
                         auto* semaphore = rasterizer->GetScheduler().GetMasterSemaphore();
@@ -1187,7 +1196,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
                     VideoCore::ReadbackStats::CpTimer timer{
                         VideoCore::ReadbackStats::CpTime::FlipSleep};
+                    const bool path_stats = VideoCore::FramePathStats::Enabled();
+                    const u64 sleep_start = path_stats ? VideoCore::FramePathStats::NowNs() : 0;
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
+                    if (path_stats) {
+                        VideoCore::FramePathStats::Global().OnVoWait(
+                            true, VideoCore::FramePathStats::NowNs() - sleep_start);
+                    }
                     break;
                 }
                 if (!wait_reg_mem->Test(regs.reg_array)) {
@@ -1218,6 +1233,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         VideoCore::ReadbackStats::OnCommandWait(
                             false, wait_reg_mem->Address<VAddr>(), wait_class,
                             blocked ? VideoCore::ReadbackStats::NowNs() - wait_start : 0);
+                    }
+                    if (blocked && vo_port->IsVoLabel(wait_addr) &&
+                        VideoCore::FramePathStats::Enabled()) {
+                        VideoCore::FramePathStats::Global().OnVoWait(
+                            false, VideoCore::ReadbackStats::NowNs() - wait_start);
                     }
                 }
                 break;

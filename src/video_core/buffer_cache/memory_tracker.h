@@ -16,6 +16,7 @@
 #include "core/emulator_settings.h"
 #include "video_core/buffer_cache/region_manager.h"
 #include "video_core/readback_stats.h"
+#include "video_core/frame_path_stats.h"
 
 namespace VideoCore {
 
@@ -101,6 +102,10 @@ public:
                     if (const u32 new_hot =
                             manager->NoteCpuWrite(manager->GetCpuAddr() + offset, size)) {
                         ReadbackStats::OnHotPages(new_hot);
+                        if (FramePathStats::Enabled()) {
+                            FramePathStats::Global().new_hot_pages.fetch_add(
+                                new_hot, std::memory_order_relaxed);
+                        }
                     }
                     manager->template ChangeRegionState<Type::CPU, true>(
                         manager->GetCpuAddr() + offset, size);

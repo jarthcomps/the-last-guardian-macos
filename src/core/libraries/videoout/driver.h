@@ -6,6 +6,7 @@
 #include "common/debug.h"
 #include "common/logging/log.h"
 #include "common/polyfill_thread.h"
+#include "core/libraries/videoout/early_label_release.h"
 #include "core/libraries/videoout/video_out.h"
 
 #include <chrono>
@@ -35,6 +36,7 @@ struct VideoOutPort {
     std::condition_variable vblank_cv;
     int flip_rate = 0;
     int prev_index = -1;
+    EarlyLabelRelease early_release; ///< SHADPS4_EARLY_VO_LABEL
     bool is_open = false;
     bool is_hdr = false;
 

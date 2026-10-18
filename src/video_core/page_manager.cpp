@@ -34,6 +34,7 @@
 #else
 #include "common/spin_lock.h"
 #endif
+#include "video_core/frame_path_stats.h"
 
 namespace VideoCore {
 
@@ -229,8 +230,13 @@ struct PageManager::Impl {
         if (auto* events = ReadbackStats::CpEvents()) {
             ++events->faults;
         }
+        const bool path_stats = FramePathStats::Enabled();
+        const u64 path_start = path_stats ? FramePathStats::NowNs() : 0;
         const bool handled =
             is_write ? rasterizer->InvalidateMemory(addr, 8) : rasterizer->ReadMemory(addr, 8);
+        if (path_stats && handled) {
+            FramePathStats::Global().OnFault(is_write, FramePathStats::NowNs() - path_start);
+        }
         if (stats && handled) {
             ReadbackStats::OnFault(is_write, ReadbackStats::NowNs() - start);
         }

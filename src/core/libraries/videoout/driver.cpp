@@ -66,6 +66,7 @@ void VideoOutDriver::Close(s32 handle) {
     main_port.is_open = false;
     main_port.flip_rate = 0;
     main_port.prev_index = -1;
+    main_port.early_release = {};
 
     // Clear port information
     std::memset(main_port.buffer_labels.data(), 0, sizeof(main_port.buffer_labels));
@@ -268,8 +269,8 @@ void VideoOutDriver::Flip(const Request& req) {
         }
     }
 
-    // Reset prev flip label
-    if (port->prev_index != -1) {
+    // Reset prev flip label (already done when the next flip was prepared with early release)
+    if (port->prev_index != -1 && !EarlyVoLabelEnabled()) {
         port->buffer_labels[port->prev_index] = 0;
         port->SignalVoLabel();
     }
@@ -324,6 +325,15 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         ASSERT_MSG(buffer.group_index >= 0, "Trying to flip an unregistered buffer!");
         const auto& group = port->groups[buffer.group_index];
         frame = presenter->PrepareFrame(group, buffer.address_left);
+    }
+    if (EarlyVoLabelEnabled()) {
+        // The flipped buffer was copied for presentation in the game's command stream, so the
+        // buffer flipped before it is no longer read (see early_label_release.h).
+        const s32 release = port->early_release.OnPrepared(index);
+        if (release >= 0) {
+            port->buffer_labels[release] = 0;
+            port->SignalVoLabel();
+        }
     }
 
     std::scoped_lock lock{mutex};
