@@ -62,8 +62,11 @@ endif()
 
 if (ARCHITECTURE STREQUAL "x86_64")
     # Target x86-64-v3 CPU architecture as this is a good balance between supporting performance critical
-    # instructions like AVX2 and maintaining support for older CPUs.
-    add_compile_options(-march=x86-64-v3)
+    # instructions like AVX2 and maintaining support for older CPUs. Under Rosetta on Apple silicon,
+    # 256-bit AVX2 code is emulated with pairs of 128-bit operations and runs slower than SSE code;
+    # SHADPS4_X86_MARCH=x86-64-v2 builds the emulator for Rosetta without AVX.
+    set(SHADPS4_X86_MARCH "x86-64-v3" CACHE STRING "x86-64 -march level for the emulator (x86-64-v2 for Rosetta)")
+    add_compile_options(-march=${SHADPS4_X86_MARCH})
 endif()
 
 cmake_host_system_information(RESULT PROC_INFO QUERY PROCESSOR_DESCRIPTION)
