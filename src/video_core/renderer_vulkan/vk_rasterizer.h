@@ -83,7 +83,7 @@ public:
     /// A guest CS partial flush or AcquireMem (SHADPS4_HONOR_CS_FLUSH, fence_deferral.h).
     void GuestComputeFlush();
     void OnFence(Common::UniqueFunction<void>&& signal, VideoCore::FenceKind kind,
-                 bool must_sync = false);
+                 bool must_sync = false, bool interrupting = false);
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void UnmapMemory(VAddr addr, u64 size);
@@ -213,6 +213,8 @@ private:
     const u32 encoder_debug;
     /// Encoder thread: fences without readbacks wait for all work recorded before them.
     const bool full_eop_fences;
+    /// SHADPS4_EARLY_EOP=1: interrupting EOPs signal at the command processor (experiment).
+    const bool early_eop;
     /// Fence kinds that get full fences (cp_full_fence_kinds).
     const u32 full_fence_kinds;
 
@@ -222,7 +224,8 @@ private:
     /// True when a stage of the pipeline writes buffers or images from shaders.
     static bool PipelineWritesMemory(const Pipeline* pipeline);
     /// The asynchronous fence path shared by direct and deferred fences.
-    void ProcessAsyncFence(Common::UniqueFunction<void>&& signal, VideoCore::FenceKind kind);
+    void ProcessAsyncFence(Common::UniqueFunction<void>&& signal, VideoCore::FenceKind kind,
+                           bool interrupting = false);
     /// True if the inputs match the cached lookup; otherwise stores them for the next draw.
     template <typename... Ts>
     bool TargetInputsMatch(CachedTarget& cache, const Ts&... parts);

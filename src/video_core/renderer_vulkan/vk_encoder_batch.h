@@ -5,7 +5,10 @@
 
 #include <algorithm>
 #include <charconv>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdint>
+#include <mutex>
 #include <limits>
 #include <string_view>
 
@@ -26,6 +29,53 @@ inline std::size_t EncoderBatchLimit(const char* setting, std::size_t default_li
     }
     return limit;
 }
+
+/// Encoder threads replaying command lists in parallel (SHADPS4_ENCODER_THREADS, 1 to
+/// MaxEncoderThreads, default 1). Each replays a batch into its own command buffer; the
+/// batches are still submitted in the order the command processor recorded them.
+inline constexpr std::size_t MaxEncoderThreads = 4;
+
+inline std::size_t EncoderThreadCount(const char* setting) {
+    if (!setting) {
+        return 1;
+    }
+    const std::string_view value{setting};
+    std::size_t count{};
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), count);
+    if (error != std::errc{} || end != value.data() + value.size() || count == 0) {
+        return 1;
+    }
+    return std::min(count, MaxEncoderThreads);
+}
+
+/// Lets parallel encoder threads submit in ticket order: Take() hands out tickets while the
+/// job queue is locked, Enter(ticket) waits until every earlier ticket has left.
+class SubmitTurnstile {
+public:
+    std::uint64_t Take() {
+        return next_ticket++;
+    }
+
+    template <typename Body>
+    void Enter(std::uint64_t ticket, Body&& body) {
+        {
+            std::unique_lock lk{mutex};
+            cv.wait(lk, [&] { return serving == ticket; });
+        }
+        body();
+        {
+            std::scoped_lock lk{mutex};
+            ++serving;
+        }
+        cv.notify_all();
+    }
+
+private:
+    std::uint64_t next_ticket{}; ///< guarded by the caller's job-queue lock
+    std::uint64_t serving{};
+    std::mutex mutex;
+    std::condition_variable cv;
+};
 
 // Only coalesce a consecutive prefix that signals this scheduler's timeline alone. External
 // waits, presentation signals, and fences keep their original submission boundaries.

@@ -15,12 +15,13 @@ int main() {
     stats.OnSubmit(46'000'000);                         // later submits of the same frame: ignored
     stats.Add(100, 50, 40, 30);                         // clock skew counts as 0
     stats.OnCpTicks(10, 9);                             // first EOP: no previous tick yet
-    stats.OnCpTicks(16, 12);                            // 6 submits, GPU 3 behind (13..15)
-    stats.OnCpTicks(20, 19);                            // 4 submits, GPU caught up
+    stats.OnCpTicks(16, 12, 2);                         // 6 submits, GPU 3 behind, 2 unencoded
+    stats.OnCpTicks(20, 19, 1);                         // 4 submits, GPU caught up
     assert(stats.TakeReport(1000 + 999'999'999).empty());
     const std::string line = stats.TakeReport(1000 + 1'000'000'000ULL);
     assert(line == "EOP_STATS n=3 submit_to_cp_ms=8.6 cp_to_gpu_ms=13.3 gpu_to_signal_ms=1.3 "
-                   "signal_to_submit_ms=6.5 guest_submits=0.6 vk_submits=5.0 gpu_backlog=1.5\n");
+                   "signal_to_submit_ms=6.5 guest_submits=0.6 vk_submits=5.0 gpu_backlog=1.5 "
+                   "encoder_backlog=1.5\n");
     assert(stats.TakeReport(1000 + 2'000'000'000ULL) == "EOP_STATS n=0\n");
     return 0;
 }

@@ -290,14 +290,14 @@ void Liverpool::ReportLongSpin(const char* what, const void* address, u64 wait_s
 
 void Liverpool::SignalFenceAfterReadbacks(Common::UniqueFunction<void>&& signal, bool must_sync,
                                           VAddr address, u64 value, u32 num_bytes, u32 queue,
-                                          VideoCore::FenceKind kind) {
+                                          VideoCore::FenceKind kind, bool interrupting) {
     VideoCore::ReadbackStats::CpTimer timer{VideoCore::ReadbackStats::CpTime::Fence};
     if (!rasterizer) {
         signal();
         return;
     }
     if (address == 0 || num_bytes == 0) {
-        rasterizer->OnFence(std::move(signal), kind, must_sync);
+        rasterizer->OnFence(std::move(signal), kind, must_sync, interrupting);
         return;
     }
     const u64 seq = RecordFence(address, value, num_bytes, queue);
@@ -306,7 +306,7 @@ void Liverpool::SignalFenceAfterReadbacks(Common::UniqueFunction<void>&& signal,
             signal();
             RetireFence(address, seq);
         },
-        kind, must_sync);
+        kind, must_sync, interrupting);
 }
 
 bool Liverpool::DeferWriteBehindFences(void* address, const u32* data, u32 num_bytes, u32 queue) {
@@ -1037,8 +1037,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (rasterizer) {
                         auto* semaphore = rasterizer->GetScheduler().GetMasterSemaphore();
                         semaphore->Refresh();
-                        GlobalEopLatencyStats().OnCpTicks(semaphore->CurrentTick(),
-                                                          semaphore->KnownGpuTick());
+                        GlobalEopLatencyStats().OnCpTicks(
+                            semaphore->CurrentTick(), semaphore->KnownGpuTick(),
+                            rasterizer->GetScheduler().EncoderBacklog());
                     }
                     const auto report = GlobalEopLatencyStats().TakeReport(eop_cp_ns);
                     if (!report.empty()) {
@@ -1080,7 +1081,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                                             : 0;
                 SignalFenceAfterReadbacks(
                     std::move(signal), false, reinterpret_cast<VAddr>(event_eop->Address<u8>()),
-                    event_eop->DataQWord(), eop_bytes, GfxQueueId, VideoCore::FenceGfxEop);
+                    event_eop->DataQWord(), eop_bytes, GfxQueueId, VideoCore::FenceGfxEop,
+                    event_eop->int_sel.Value() != InterruptSelect::None);
                 break;
             }
             case PM4ItOpcode::DmaData: {

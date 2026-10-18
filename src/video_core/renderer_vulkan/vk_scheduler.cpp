@@ -13,6 +13,7 @@
 #include "video_core/readback_stats.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_encoder_batch.h"
+#include <fmt/format.h>
 #include "video_core/frame_path_stats.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
@@ -275,9 +276,21 @@ void Scheduler::SetEncoderMode(u32 mode) {
         // direct tick, submitted by the ordering thread. Later ticks go to the encoder.
         direct_active = true;
         encoder_sync = mode == 3;
-        encoder_thread = std::jthread(std::bind_front(&Scheduler::EncoderThread, this));
-        LOG_INFO(Render_Vulkan, "Command processor: Vulkan encoding on an encoder thread{}",
-                 encoder_sync ? " (synchronous hand-off, diagnostic)" : "");
+        const std::size_t threads =
+            encoder_sync ? 1 : EncoderThreadCount(std::getenv("SHADPS4_ENCODER_THREADS"));
+        // Thread 0 uses the shared command pool; the others get their own (Vulkan command
+        // pools are externally synchronized, so parallel recording needs one per thread).
+        encoder_pools.resize(threads);
+        for (std::size_t i = 1; i < threads; ++i) {
+            encoder_pools[i] = std::make_unique<CommandPool>(instance, &master_semaphore);
+        }
+        encoder_thread = std::jthread(std::bind_front(&Scheduler::EncoderThread, this), 0);
+        for (std::size_t i = 1; i < threads; ++i) {
+            extra_encoder_threads.emplace_back(std::bind_front(&Scheduler::EncoderThread, this),
+                                               i);
+        }
+        LOG_INFO(Render_Vulkan, "Command processor: Vulkan encoding on {} encoder thread(s){}",
+                 threads, encoder_sync ? " (synchronous hand-off, diagnostic)" : "");
     }
 }
 
@@ -372,8 +385,10 @@ void Scheduler::SubmitCommandBuffer(vk::CommandBuffer cmdbuf, SubmitInfo& info) 
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 }
 
-void Scheduler::EncoderThread(std::stop_token stoken) {
-    Common::SetCurrentThreadName("shadPS4:GpuEncoder");
+void Scheduler::EncoderThread(std::stop_token stoken, std::size_t index) {
+    Common::SetCurrentThreadName(index == 0 ? "shadPS4:GpuEncoder"
+                                            : fmt::format("shadPS4:GpuEncoder{}", index).c_str());
+    CommandPool* const own_pool = index == 0 ? nullptr : encoder_pools[index].get();
     if (const u32 priority = EmulatorSettings.GetCpThreadPriority(); priority >= 2) {
         Common::SetCurrentThreadPriority(static_cast<Common::ThreadPriority>(priority));
     }
@@ -391,6 +406,7 @@ void Scheduler::EncoderThread(std::stop_token stoken) {
     while (true) {
         std::array<EncoderJob, MaxEncoderBatchSize> batch;
         std::size_t batch_size{};
+        u64 ticket{};
         {
             std::unique_lock lk{encoder_mutex};
             encoder_cv.wait(lk, stoken, [this] { return !encoder_jobs.empty(); });
@@ -404,12 +420,15 @@ void Scheduler::EncoderThread(std::stop_token stoken) {
                 batch[i] = std::move(encoder_jobs.front());
                 encoder_jobs.pop_front();
             }
+            ticket = submit_turnstile.Take();
         }
         encoder_cv.notify_all();
 
         const u64 start = VideoCore::ReadbackStats::NowNs();
         vk::CommandBuffer cmdbuf;
-        {
+        if (own_pool) {
+            cmdbuf = own_pool->Commit();
+        } else {
             std::scoped_lock lk{command_pool_mutex};
             cmdbuf = command_pool.Commit();
         }
@@ -431,7 +450,8 @@ void Scheduler::EncoderThread(std::stop_token stoken) {
             }
         }
         Check(cmdbuf.end());
-        {
+        // Batches replayed in parallel still reach the queue in recorded order.
+        submit_turnstile.Enter(ticket, [&] {
             // ImGui texture uploads submit to the queue too: done here, the ordering thread
             // never waits for the submit lock while this thread is in the driver.
             std::scoped_lock lk{submit_mutex};
@@ -442,7 +462,7 @@ void Scheduler::EncoderThread(std::stop_token stoken) {
             // Signaling the maximum timeline value makes all earlier milestones complete after
             // the whole batch. Readback callbacks remain FIFO and can never run early.
             SubmitCommandBuffer(cmdbuf, batch[batch_size - 1].info);
-        }
+        });
         const u64 replay_ns = VideoCore::ReadbackStats::NowNs() - start;
         VideoCore::ReadbackStats::OnCommandReplay(commands, replay_ns);
         if (VideoCore::FramePathStats::Enabled()) {

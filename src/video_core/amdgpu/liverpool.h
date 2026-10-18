@@ -246,7 +246,7 @@ private:
     /// fence value (if known) in the label timeline meanwhile.
     void SignalFenceAfterReadbacks(Common::UniqueFunction<void>&& signal, bool must_sync,
                                    VAddr address, u64 value, u32 num_bytes, u32 queue,
-                                   VideoCore::FenceKind kind);
+                                   VideoCore::FenceKind kind, bool interrupting = false);
 
     struct GpuQueue {
         std::mutex m_access{};

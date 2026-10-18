@@ -34,6 +34,7 @@ struct EopLatencyStats {
     std::atomic<std::uint64_t> tick_frames{};
     std::atomic<std::uint64_t> vk_submits{};
     std::atomic<std::uint64_t> backlog{};
+    std::atomic<std::uint64_t> encoder_backlog{};
     std::atomic<std::uint64_t> last_eop_tick{};
 
     /// A guest graphics submission at `now_ns`: the first one after an EOP signal ends the
@@ -48,14 +49,17 @@ struct EopLatencyStats {
     }
 
     /// The command processor reached an interrupting EOP while the scheduler was recording
-    /// `current_tick` and the GPU had finished `gpu_tick`.
-    void OnCpTicks(std::uint64_t current_tick, std::uint64_t gpu_tick) {
+    /// `current_tick`, the GPU had finished `gpu_tick` and `encoder_jobs` recorded command
+    /// lists were still waiting for the encoder thread (not yet submitted to the GPU).
+    void OnCpTicks(std::uint64_t current_tick, std::uint64_t gpu_tick,
+                   std::uint64_t encoder_jobs = 0) {
         const std::uint64_t last = last_eop_tick.exchange(current_tick, std::memory_order_relaxed);
         if (last != 0 && current_tick > last) {
             tick_frames.fetch_add(1, std::memory_order_relaxed);
             vk_submits.fetch_add(current_tick - last, std::memory_order_relaxed);
             backlog.fetch_add(current_tick > gpu_tick + 1 ? current_tick - 1 - gpu_tick : 0,
                               std::memory_order_relaxed);
+            encoder_backlog.fetch_add(encoder_jobs, std::memory_order_relaxed);
         }
     }
 
@@ -91,6 +95,7 @@ struct EopLatencyStats {
         const std::uint64_t f = tick_frames.exchange(0);
         const std::uint64_t v = vk_submits.exchange(0);
         const std::uint64_t q = backlog.exchange(0);
+        const std::uint64_t e = encoder_backlog.exchange(0);
         if (n == 0) {
             return "EOP_STATS n=0\n";
         }
@@ -110,7 +115,8 @@ struct EopLatencyStats {
         return "EOP_STATS n=" + std::to_string(n) + " submit_to_cp_ms=" + ms(a, n) +
                " cp_to_gpu_ms=" + ms(b, n) + " gpu_to_signal_ms=" + ms(c, n) +
                " signal_to_submit_ms=" + ms(d, r) + " guest_submits=" + avg(g, n) +
-               " vk_submits=" + avg(v, f) + " gpu_backlog=" + avg(q, f) + "\n";
+               " vk_submits=" + avg(v, f) + " gpu_backlog=" + avg(q, f) +
+               " encoder_backlog=" + avg(e, f) + "\n";
     }
 };
 

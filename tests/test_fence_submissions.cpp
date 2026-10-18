@@ -34,5 +34,16 @@ int main() {
         if ((completed >= prior.tick) != (completed >= 4)) return 7;
         if ((completed >= copy.tick) != (completed >= 5)) return 8;
     }
+    // Early interrupting EOPs: only with the mode on, an interrupt, and no readback copies.
+    for (bool mode : {false, true}) {
+        for (bool interrupting : {false, true}) {
+            for (bool copies : {false, true}) {
+                if (SignalAtCommandProcessor(mode, interrupting, copies) !=
+                    (mode && interrupting && !copies)) {
+                    return 9;
+                }
+            }
+        }
+    }
     return 0;
 }

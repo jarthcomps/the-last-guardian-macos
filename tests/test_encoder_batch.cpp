@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <mutex>
+#include <thread>
+#include <vector>
 #include "video_core/renderer_vulkan/vk_encoder_batch.h"
 
 struct Job {
@@ -66,5 +69,30 @@ int main() {
     jobs.front().signal_value = std::numeric_limits<std::uint64_t>::max();
     jobs.front().info.signal_ticks[0] = jobs.front().signal_value;
     if (EncoderBatchSize(jobs, 7, 8) != 1) return 10;
+
+    if (EncoderThreadCount(nullptr) != 1) return 11;
+    if (EncoderThreadCount("2") != 2) return 12;
+    if (EncoderThreadCount("9") != MaxEncoderThreads) return 13;
+    if (EncoderThreadCount("0") != 1 || EncoderThreadCount("x") != 1) return 14;
+
+    // Tickets taken in order are served in order even when later holders arrive first.
+    SubmitTurnstile turnstile;
+    std::vector<std::uint64_t> order;
+    std::mutex order_mutex;
+    std::vector<std::uint64_t> tickets;
+    for (int i = 0; i < 64; ++i) tickets.push_back(turnstile.Take());
+    std::vector<std::thread> threads;
+    for (int i = 63; i >= 0; --i) {
+        threads.emplace_back([&, ticket = tickets[i]] {
+            turnstile.Enter(ticket, [&] {
+                std::scoped_lock lk{order_mutex};
+                order.push_back(ticket);
+            });
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    for (std::uint64_t i = 0; i < 64; ++i) {
+        if (order[i] != i) return 15;
+    }
     return 0;
 }

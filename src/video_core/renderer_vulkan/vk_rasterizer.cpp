@@ -70,7 +70,10 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       rt_reuse_enabled{EmulatorSettings.IsRtLookupReuseEnabled()},
       encoder_debug{EmulatorSettings.GetCpEncoderDebug()},
       full_eop_fences{EmulatorSettings.GetCpEncoderMode() >= 2 || (encoder_debug & 4) != 0},
-      full_fence_kinds{EmulatorSettings.GetCpFullFenceKinds()} {
+      full_fence_kinds{EmulatorSettings.GetCpFullFenceKinds()}, early_eop{[] {
+          const char* value = std::getenv("SHADPS4_EARLY_EOP");
+          return value != nullptr && std::string_view{value} == "1";
+      }()} {
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -1800,11 +1803,11 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::OnFence(Common::UniqueFunction<void>&& signal, VideoCore::FenceKind kind,
-                         bool must_sync) {
+                         bool must_sync, bool interrupting) {
     if (encoder_debug & 1) {
         scheduler.SyncEncoder();
     }
-    if (defer_fences_in_pass) {
+    if (defer_fences_in_pass && !(early_eop && interrupting)) {
         const bool rendering = scheduler.IsRendering();
         const bool attachment = rendering && texture_cache.HasPendingDownloadIn(PassImages());
         ++deferral_stats.fences;
@@ -1834,7 +1837,7 @@ void Rasterizer::OnFence(Common::UniqueFunction<void>&& signal, VideoCore::Fence
         }
         return;
     }
-    ProcessAsyncFence(std::move(signal), kind);
+    ProcessAsyncFence(std::move(signal), kind, interrupting);
 }
 
 void Rasterizer::SerializeAfterDispatch() {
@@ -1965,7 +1968,7 @@ bool Rasterizer::PipelineWritesMemory(const Pipeline* pipeline) {
 }
 
 void Rasterizer::ProcessAsyncFence(Common::UniqueFunction<void>&& signal,
-                                   VideoCore::FenceKind kind) {
+                                   VideoCore::FenceKind kind, bool interrupting) {
     // Asynchronous path: record the copies, submit them and return without waiting. The
     // priority thread waits for the GPU, writes the data to guest memory and only then signals
     // the fence, so the guest still never sees the fence before the data. Fences are signaled
@@ -1982,6 +1985,18 @@ void Rasterizer::ProcessAsyncFence(Common::UniqueFunction<void>&& signal,
         buffer_cache.PrefetchHotRanges(batch, true);
     }
     const bool has_copies = !batch.Empty();
+    if (SignalAtCommandProcessor(early_eop, interrupting, has_copies)) {
+        // Start the GPU on the work before the fence, then let the guest go on.
+        VideoCore::ReadbackStats::OnAsyncFence(kind, true);
+        {
+            VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::FenceSubmit};
+            scheduler.Flush();
+        }
+        if (signal) {
+            signal();
+        }
+        return;
+    }
     if (!has_copies && !scheduler.HasPriorityOperations()) {
         // Nothing to read back and nothing in flight: keep the old immediate behavior.
         if (signal) {

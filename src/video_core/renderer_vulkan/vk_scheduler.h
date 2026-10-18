@@ -10,13 +10,16 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <memory>
 #include <thread>
+#include <vector>
 #include <queue>
 
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
 #include "video_core/renderer_vulkan/vk_command_recorder.h"
+#include "video_core/renderer_vulkan/vk_encoder_batch.h"
 #include "video_core/renderer_vulkan/vk_fence_submission.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
@@ -528,7 +531,7 @@ private:
         u64 signal_value{};
         s32 timing_slot{-1};
     };
-    void EncoderThread(std::stop_token stoken);
+    void EncoderThread(std::stop_token stoken, std::size_t index);
     void HandOffToEncoder(SubmitInfo& info, u64 signal_value);
     void SubmitCommandBuffer(vk::CommandBuffer cmdbuf, SubmitInfo& info);
     void WaitEncoderIdle();
@@ -540,6 +543,14 @@ private:
     std::condition_variable_any encoder_cv;
     std::deque<EncoderJob> encoder_jobs;
     std::vector<std::unique_ptr<CommandList>> free_lists;
+public:
+    /// Recorded command lists handed to the encoder thread and not yet submitted.
+    u64 EncoderBacklog() {
+        std::scoped_lock lk{encoder_mutex};
+        return jobs_handed - jobs_done;
+    }
+
+private:
     u64 jobs_handed{};
     u64 jobs_done{};
     std::mutex command_pool_mutex;
@@ -556,7 +567,10 @@ private:
     std::atomic<u32> num_priority_ops{};
     std::atomic<u64> max_priority_tick{};
     std::jthread priority_pending_ops_thread;
+    std::vector<std::unique_ptr<CommandPool>> encoder_pools; ///< per extra encoder thread
+    SubmitTurnstile submit_turnstile;
     std::jthread encoder_thread;
+    std::vector<std::jthread> extra_encoder_threads; ///< SHADPS4_ENCODER_THREADS above 1
     static constexpr u32 NumTimingSlots = 1024;
     vk::QueryPool timing_pool{};
     float timestamp_period{};
