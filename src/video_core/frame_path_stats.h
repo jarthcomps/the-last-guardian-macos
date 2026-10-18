@@ -31,21 +31,43 @@ struct Counters {
     std::atomic<std::uint64_t> read_faults{};
     std::atomic<std::uint64_t> write_faults{};
     std::atomic<std::uint64_t> fault_ns{};
+    std::atomic<std::uint64_t> read_fault_ns{};
+    std::atomic<std::uint64_t> slow_write_faults{}; ///< over 1 ms: waited for GPU data
     std::atomic<std::uint64_t> new_hot_pages{};
     std::atomic<std::uint64_t> vo_waits{};
     std::atomic<std::uint64_t> vo_wait_ns{};
     std::atomic<std::uint64_t> vo_sleeps{};
     std::atomic<std::uint64_t> vo_sleep_ns{};
+    std::atomic<std::uint64_t> draws{};      ///< draws reaching the GPU
+    std::atomic<std::uint64_t> gs_draws{};   ///< with a geometry shader (compute pre-pass on Metal)
+    std::atomic<std::uint64_t> tess_draws{}; ///< with tessellation (compute pre-pass on Metal)
     std::atomic<std::uint64_t> last_report_ns{};
 
     void OnFault(bool is_write, std::uint64_t ns) {
         (is_write ? write_faults : read_faults).fetch_add(1, std::memory_order_relaxed);
         fault_ns.fetch_add(ns, std::memory_order_relaxed);
+        if (!is_write) {
+            read_fault_ns.fetch_add(ns, std::memory_order_relaxed);
+        } else if (ns > 1'000'000) {
+            slow_write_faults.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     void OnVoWait(bool slept, std::uint64_t ns) {
         (slept ? vo_sleeps : vo_waits).fetch_add(1, std::memory_order_relaxed);
         (slept ? vo_sleep_ns : vo_wait_ns).fetch_add(ns, std::memory_order_relaxed);
+    }
+
+    /// A draw with the given VGT stage-enable value (0 = VS only, 0xB0 = ES/GS, 0x45 = LS/HS,
+    /// 0xAD = LS/HS/ES/GS).
+    void OnDraw(std::uint32_t stage_enable) {
+        draws.fetch_add(1, std::memory_order_relaxed);
+        if (stage_enable == 0xB0u || stage_enable == 0xADu) {
+            gs_draws.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (stage_enable == 0x45u || stage_enable == 0xADu) {
+            tess_draws.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     /// The counts since the previous report as one line once a second passed, empty otherwise.
@@ -67,11 +89,16 @@ struct Counters {
                std::to_string(read_faults.exchange(0)) +
                " write_faults=" + std::to_string(write_faults.exchange(0)) +
                " fault_ms=" + ms(fault_ns.exchange(0)) +
+               " read_fault_ms=" + ms(read_fault_ns.exchange(0)) +
+               " slow_write_faults=" + std::to_string(slow_write_faults.exchange(0)) +
                " new_hot_pages=" + std::to_string(new_hot_pages.exchange(0)) +
                " vo_waits=" + std::to_string(vo_waits.exchange(0)) +
                " vo_wait_ms=" + ms(vo_wait_ns.exchange(0)) +
                " vo_sleeps=" + std::to_string(vo_sleeps.exchange(0)) +
-               " vo_sleep_ms=" + ms(vo_sleep_ns.exchange(0)) + "\n";
+               " vo_sleep_ms=" + ms(vo_sleep_ns.exchange(0)) +
+               " draws=" + std::to_string(draws.exchange(0)) +
+               " gs_draws=" + std::to_string(gs_draws.exchange(0)) +
+               " tess_draws=" + std::to_string(tess_draws.exchange(0)) + "\n";
     }
 };
 

@@ -19,6 +19,7 @@
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/frame_path_stats.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
 #include "video_core/texture_cache/image_barrier_policy.h"
 
@@ -646,6 +647,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     DebugState.IncDrawCall();
     VideoCore::ReadbackStats::OnDraw();
+    if (VideoCore::FramePathStats::Enabled()) {
+        VideoCore::FramePathStats::Global().OnDraw(static_cast<u32>(regs.stage_enable.raw));
+    }
     scheduler.NoteDrawInPass();
     ++recorded_work;
     if (shader_call.Active()) {
@@ -782,6 +786,10 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
         DebugState.IncDrawCall();
         VideoCore::ReadbackStats::OnDraw();
+        if (VideoCore::FramePathStats::Enabled()) {
+            VideoCore::FramePathStats::Global().OnDraw(
+                static_cast<u32>(liverpool->regs.stage_enable.raw));
+        }
         ++recorded_work;
     } else {
         ASSERT(sizeof(VkDrawIndirectCommand) == stride);
@@ -794,6 +802,10 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
         DebugState.IncDrawCall();
         VideoCore::ReadbackStats::OnDraw();
+        if (VideoCore::FramePathStats::Enabled()) {
+            VideoCore::FramePathStats::Global().OnDraw(
+                static_cast<u32>(liverpool->regs.stage_enable.raw));
+        }
         ++recorded_work;
     }
     if (shader_call.Active()) {
