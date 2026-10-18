@@ -3,9 +3,14 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -70,12 +75,58 @@ struct Counters {
     }
 };
 
-inline bool Enabled() {
-    static const bool enabled = [] {
+/// SHADPS4_FRAME_PATH_STATS=2 also lists, once per second, the 64 KB blocks that took the most
+/// write faults: "FAULT_BLOCKS 0x…:count …" (shows whether faults hit the same pages every
+/// frame, which hot write pages can learn, or new memory each frame).
+class FaultBlocks {
+public:
+    void Add(std::uint64_t address) {
+        std::scoped_lock lk{mutex};
+        ++counts[address >> 16];
+    }
+
+    /// The `limit` busiest blocks since the previous call, busiest first, and clears them.
+    std::string Take(std::size_t limit = 8) {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> top;
+        {
+            std::scoped_lock lk{mutex};
+            top.assign(counts.begin(), counts.end());
+            counts.clear();
+        }
+        std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+            return a.second != b.second ? a.second > b.second : a.first < b.first;
+        });
+        std::string out = "FAULT_BLOCKS blocks=" + std::to_string(top.size());
+        char buffer[48];
+        for (std::size_t i = 0; i < std::min(limit, top.size()); ++i) {
+            std::snprintf(buffer, sizeof(buffer), " 0x%llx:%llu",
+                          static_cast<unsigned long long>(top[i].first << 16),
+                          static_cast<unsigned long long>(top[i].second));
+            out += buffer;
+        }
+        return out + "\n";
+    }
+
+private:
+    std::mutex mutex;
+    std::unordered_map<std::uint64_t, std::uint64_t> counts;
+};
+
+inline int Level() {
+    static const int level = [] {
         const char* value = std::getenv("SHADPS4_FRAME_PATH_STATS");
-        return value != nullptr && std::string_view{value} == "1";
+        return value != nullptr ? std::atoi(value) : 0;
     }();
-    return enabled;
+    return level;
+}
+
+inline FaultBlocks& GlobalFaultBlocks() {
+    static FaultBlocks blocks;
+    return blocks;
+}
+
+inline bool Enabled() {
+    return Level() >= 1;
 }
 
 inline Counters& Global() {

@@ -25,5 +25,12 @@ int main() {
            "FRAME_PATH_STATS dt=1000.0ms read_faults=0 write_faults=0 fault_ms=0.0 "
            "new_hot_pages=0 vo_waits=0 vo_wait_ms=0.0 vo_sleeps=0 vo_sleep_ms=0.0\n");
     assert(!VideoCore::FramePathStats::Enabled()); // SHADPS4_FRAME_PATH_STATS unset
+    assert(VideoCore::FramePathStats::Level() == 0);
+    VideoCore::FramePathStats::FaultBlocks blocks;
+    for (int i = 0; i < 5; ++i) blocks.Add(0x32ee88010 + i * 8); // one 64 KB block
+    blocks.Add(0x27c600000);
+    blocks.Add(0x27c60ffff);
+    assert(blocks.Take(1) == "FAULT_BLOCKS blocks=2 0x32ee80000:5\n");
+    assert(blocks.Take() == "FAULT_BLOCKS blocks=0\n");
     return 0;
 }

@@ -1019,6 +1019,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     const auto path_report = VideoCore::FramePathStats::Global().TakeReport(
                         VideoCore::FramePathStats::NowNs());
                     if (!path_report.empty()) {
+                        if (VideoCore::FramePathStats::Level() >= 2) {
+                            const auto blocks =
+                                VideoCore::FramePathStats::GlobalFaultBlocks().Take();
+                            std::fputs(blocks.c_str(), stderr);
+                        }
                         std::fputs(path_report.c_str(), stderr);
                         std::fflush(stderr);
                     }

@@ -236,6 +236,9 @@ struct PageManager::Impl {
             is_write ? rasterizer->InvalidateMemory(addr, 8) : rasterizer->ReadMemory(addr, 8);
         if (path_stats && handled) {
             FramePathStats::Global().OnFault(is_write, FramePathStats::NowNs() - path_start);
+            if (is_write && FramePathStats::Level() >= 2) {
+                FramePathStats::GlobalFaultBlocks().Add(addr);
+            }
         }
         if (stats && handled) {
             ReadbackStats::OnFault(is_write, ReadbackStats::NowNs() - start);
