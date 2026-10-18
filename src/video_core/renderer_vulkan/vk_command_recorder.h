@@ -18,6 +18,7 @@
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
 #include "video_core/renderer_vulkan/push_constant_reuse.h"
+#include "video_core/renderer_vulkan/dynamic_state_reuse.h"
 
 #ifdef MemoryBarrier
 #pragma push_macro("MemoryBarrier")
@@ -36,6 +37,10 @@ struct DescriptorPushMemoTestAccess;
 class CommandList {
 public:
     CommandList() {
+        const char* dynamic = std::getenv("SHADPS4_DYNAMIC_STATE_REUSE");
+        if (dynamic && dynamic[0] == '1' && dynamic[1] == '\0') {
+            dynamic_memo = std::make_unique<DynamicStateReuse>();
+        }
         const char* constants = std::getenv("SHADPS4_PUSH_CONSTANT_REUSE");
         if (constants && constants[0] == '1' && constants[1] == '\0') {
             constant_memo = std::make_unique<PushConstantReuse<vk::PipelineLayout>>();
@@ -94,6 +99,7 @@ public:
             return;
         }
         if (!pipeline) {
+            if (cache_index == 0) InvalidateDynamicState();
             pipeline_valid[cache_index] = false;
             Record([=](vk::CommandBuffer c) { c.bindPipeline(bind_point, pipeline); });
             return;
@@ -101,6 +107,7 @@ public:
         if (pipeline_valid[cache_index] && pipelines[cache_index] == pipeline) {
             return;
         }
+        if (cache_index == 0) InvalidateDynamicState();
         pipeline_valid[cache_index] = true;
         pipelines[cache_index] = pipeline;
         Record([=](vk::CommandBuffer c) { c.bindPipeline(bind_point, pipeline); });
@@ -402,6 +409,10 @@ private:
         }
     }
 
+    void InvalidateDynamicState() {
+        if (dynamic_memo) dynamic_memo->Reset();
+    }
+
     void Reset() {
         head = nullptr;
         tail = nullptr;
@@ -409,6 +420,7 @@ private:
         chunk_index = 0;
         offset = 0;
         large_blocks.clear();
+        InvalidateDynamicState();
         pipeline_valid.fill(false);
         pipelines.fill(vk::Pipeline{});
         if (constant_memo) {
@@ -430,6 +442,7 @@ private:
     u64 num_commands{};
     std::array<vk::Pipeline, 2> pipelines{};
     std::array<bool, 2> pipeline_valid{};
+    std::unique_ptr<DynamicStateReuse> dynamic_memo;
     std::unique_ptr<DescriptorMemo> descriptor_memo;
     std::unique_ptr<PushConstantReuse<vk::PipelineLayout>> constant_memo;
     bool constant_memo_diagnostics{};
@@ -578,6 +591,18 @@ public:
         });
     }
 
+private:
+    template <typename T>
+    bool RecordState(DynamicStateReuse::Key key, const T& value) const {
+        static_assert(std::is_trivially_copyable_v<T>);
+        return RecordStateBytes(key, 0, 0, 1, &value, sizeof(value));
+    }
+    bool RecordStateBytes(DynamicStateReuse::Key key, u32 variant, u32 first, u32 count,
+                          const void* value, size_t bytes) const {
+        return !list || !list->dynamic_memo ||
+               list->dynamic_memo->ShouldRecord(key, variant, first, count, value, bytes);
+    }
+public:
     // ---------------------------------------------------------------- dynamic state
 
     void setViewport(u32 first, vk::ArrayProxy<const vk::Viewport> viewports) const {
@@ -586,6 +611,8 @@ public:
             return;
         }
         const u32 n = viewports.size();
+        if (!RecordStateBytes(DynamicStateReuse::Key::Viewport, 0, first, n,
+                              viewports.data(), n * sizeof(vk::Viewport))) return;
         const auto* v = list->Copy(viewports.data(), n);
         list->Record([=](vk::CommandBuffer c) { c.setViewport(first, n, v); });
     }
@@ -596,6 +623,8 @@ public:
             return;
         }
         const u32 n = scissors.size();
+        if (!RecordStateBytes(DynamicStateReuse::Key::Scissor, 0, first, n,
+                              scissors.data(), n * sizeof(vk::Rect2D))) return;
         const auto* s = list->Copy(scissors.data(), n);
         list->Record([=](vk::CommandBuffer c) { c.setScissor(first, n, s); });
     }
@@ -606,6 +635,8 @@ public:
             return;
         }
         const u32 n = viewports.size();
+        if (!RecordStateBytes(DynamicStateReuse::Key::Viewport, 1, 0, n,
+                              viewports.data(), n * sizeof(vk::Viewport))) return;
         const auto* v = list->Copy(viewports.data(), n);
         list->Record([=](vk::CommandBuffer c) { c.setViewportWithCount(n, v); });
     }
@@ -616,64 +647,90 @@ public:
             return;
         }
         const u32 n = scissors.size();
+        if (!RecordStateBytes(DynamicStateReuse::Key::Scissor, 1, 0, n,
+                              scissors.data(), n * sizeof(vk::Rect2D))) return;
         const auto* s = list->Copy(scissors.data(), n);
         list->Record([=](vk::CommandBuffer c) { c.setScissorWithCount(n, s); });
     }
 
     void setDepthTestEnable(bool enable) const {
+        if (!RecordState(DynamicStateReuse::Key::DepthTest, enable)) return;
         Do([=](vk::CommandBuffer c) { c.setDepthTestEnable(enable); });
     }
     void setDepthWriteEnable(bool enable) const {
+        if (!RecordState(DynamicStateReuse::Key::DepthWrite, enable)) return;
         Do([=](vk::CommandBuffer c) { c.setDepthWriteEnable(enable); });
     }
     void setDepthCompareOp(vk::CompareOp op) const {
+        if (!RecordState(DynamicStateReuse::Key::DepthCompare, op)) return;
         Do([=](vk::CommandBuffer c) { c.setDepthCompareOp(op); });
     }
     void setDepthBoundsTestEnable(bool enable) const {
+        if (!RecordState(DynamicStateReuse::Key::DepthBoundsTest, enable)) return;
         Do([=](vk::CommandBuffer c) { c.setDepthBoundsTestEnable(enable); });
     }
     void setDepthBounds(float min, float max) const {
+        if (!RecordState(DynamicStateReuse::Key::DepthBounds,
+                         std::array{min, max})) return;
         Do([=](vk::CommandBuffer c) { c.setDepthBounds(min, max); });
     }
     void setDepthBiasEnable(bool enable) const {
+        if (!RecordState(DynamicStateReuse::Key::DepthBiasEnable, enable)) return;
         Do([=](vk::CommandBuffer c) { c.setDepthBiasEnable(enable); });
     }
     void setDepthBias(float constant, float clamp, float slope) const {
+        if (!RecordState(DynamicStateReuse::Key::DepthBias,
+                         std::array{constant, clamp, slope})) return;
         Do([=](vk::CommandBuffer c) { c.setDepthBias(constant, clamp, slope); });
     }
     void setStencilTestEnable(bool enable) const {
+        if (!RecordState(DynamicStateReuse::Key::StencilTest, enable)) return;
         Do([=](vk::CommandBuffer c) { c.setStencilTestEnable(enable); });
     }
     void setStencilOp(vk::StencilFaceFlags faces, vk::StencilOp fail, vk::StencilOp pass,
                       vk::StencilOp depth_fail, vk::CompareOp compare) const {
+        if (!RecordState(DynamicStateReuse::Key::StencilOp,
+                         std::array<u32, 5>{u32(faces), u32(fail), u32(pass), u32(depth_fail), u32(compare)})) return;
         Do([=](vk::CommandBuffer c) { c.setStencilOp(faces, fail, pass, depth_fail, compare); });
     }
     void setStencilReference(vk::StencilFaceFlags faces, u32 reference) const {
+        if (!RecordState(DynamicStateReuse::Key::StencilReference,
+                         std::array<u32, 2>{u32(faces), reference})) return;
         Do([=](vk::CommandBuffer c) { c.setStencilReference(faces, reference); });
     }
     void setStencilWriteMask(vk::StencilFaceFlags faces, u32 mask) const {
+        if (!RecordState(DynamicStateReuse::Key::StencilWriteMask,
+                         std::array<u32, 2>{u32(faces), mask})) return;
         Do([=](vk::CommandBuffer c) { c.setStencilWriteMask(faces, mask); });
     }
     void setStencilCompareMask(vk::StencilFaceFlags faces, u32 mask) const {
+        if (!RecordState(DynamicStateReuse::Key::StencilCompareMask,
+                         std::array<u32, 2>{u32(faces), mask})) return;
         Do([=](vk::CommandBuffer c) { c.setStencilCompareMask(faces, mask); });
     }
     void setPrimitiveRestartEnable(bool enable) const {
+        if (!RecordState(DynamicStateReuse::Key::PrimitiveRestart, enable)) return;
         Do([=](vk::CommandBuffer c) { c.setPrimitiveRestartEnable(enable); });
     }
     void setRasterizerDiscardEnable(bool enable) const {
+        if (!RecordState(DynamicStateReuse::Key::RasterizerDiscard, enable)) return;
         Do([=](vk::CommandBuffer c) { c.setRasterizerDiscardEnable(enable); });
     }
     void setCullMode(vk::CullModeFlags mode) const {
+        if (!RecordState(DynamicStateReuse::Key::Cull, mode)) return;
         Do([=](vk::CommandBuffer c) { c.setCullMode(mode); });
     }
     void setFrontFace(vk::FrontFace face) const {
+        if (!RecordState(DynamicStateReuse::Key::FrontFace, face)) return;
         Do([=](vk::CommandBuffer c) { c.setFrontFace(face); });
     }
     void setLineWidth(float width) const {
+        if (!RecordState(DynamicStateReuse::Key::LineWidth, width)) return;
         Do([=](vk::CommandBuffer c) { c.setLineWidth(width); });
     }
     void setBlendConstants(const float constants[4]) const {
         const std::array<float, 4> values{constants[0], constants[1], constants[2], constants[3]};
+        if (!RecordState(DynamicStateReuse::Key::BlendConstants, values)) return;
         Do([=](vk::CommandBuffer c) { c.setBlendConstants(values.data()); });
     }
     void setColorWriteMaskEXT(u32 first,
@@ -683,10 +740,13 @@ public:
             return;
         }
         const u32 n = masks.size();
+        if (!RecordStateBytes(DynamicStateReuse::Key::ColorWriteMask, 0, first, n,
+                              masks.data(), n * sizeof(vk::ColorComponentFlags))) return;
         const auto* m = list->Copy(masks.data(), n);
         list->Record([=](vk::CommandBuffer c) { c.setColorWriteMaskEXT(first, n, m); });
     }
     void setAttachmentFeedbackLoopEnableEXT(vk::ImageAspectFlags aspects) const {
+        if (!RecordState(DynamicStateReuse::Key::FeedbackLoop, aspects)) return;
         Do([=](vk::CommandBuffer c) { c.setAttachmentFeedbackLoopEnableEXT(aspects); });
     }
 
@@ -697,6 +757,7 @@ public:
             cmdbuf.beginRendering(info);
             return;
         }
+        list->InvalidateDynamicState();
         ASSERT_MSG(!info.pNext, "Recorded rendering info can't have a pNext chain");
         auto* copy = list->Copy(&info, 1);
         copy->pColorAttachments = list->Copy(info.pColorAttachments, info.colorAttachmentCount);
@@ -708,6 +769,7 @@ public:
     }
 
     void endRendering() const {
+        if (list) list->InvalidateDynamicState();
         Do([](vk::CommandBuffer c) { c.endRendering(); });
     }
 

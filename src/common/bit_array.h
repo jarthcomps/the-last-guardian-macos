@@ -233,6 +233,22 @@ public:
         return false;
     }
 
+    // Assigns only the requested bits and returns the exact changed-page mask.
+    BitArray AssignRange(const BitArray& other, size_t start, size_t end) {
+        BitArray changed;
+        if (start >= end || end > N) return changed;
+        const size_t first = start / BITS_PER_WORD;
+        const size_t last = (end - 1) / BITS_PER_WORD;
+        for (size_t word = first; word <= last; ++word) {
+            u64 mask = ~0ULL;
+            if (word == first) mask &= ~0ULL << (start % BITS_PER_WORD);
+            if (word == last) mask &= ~0ULL >> (BITS_PER_WORD - 1 - (end - 1) % BITS_PER_WORD);
+            changed.data[word] = (data[word] ^ other.data[word]) & mask;
+            data[word] ^= changed.data[word];
+        }
+        return changed;
+    }
+
     Range FirstRangeFrom(size_t start) const {
         if (start >= N) {
             return {N, N};

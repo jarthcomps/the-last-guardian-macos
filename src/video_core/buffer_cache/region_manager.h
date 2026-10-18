@@ -46,6 +46,11 @@ public:
         cpu_addr = new_cpu_addr;
     }
 
+    /// Configure before tracking begins, under the owning tracker lock.
+    void SetRangeProtectionEnabled(bool enabled) noexcept {
+        range_protection_enabled = enabled;
+    }
+
     /// Hot pages: pages the CPU rewrites right after nearly every upload. Write-protecting them
     /// again after each upload only buys a write fault per rewrite, so they stay CPU-modified and
     /// writable and are uploaded at each use instead. A page used as a GPU write target stops
@@ -141,7 +146,7 @@ public:
             bits.UnsetRange(start_page, end_page);
         }
         if constexpr (type == Type::CPU) {
-            UpdateProtection<!enable, false>();
+            UpdateProtection<!enable, false>(start_page, end_page);
         } else if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise) {
             UpdateProtection<enable, true>();
         }
@@ -189,7 +194,7 @@ public:
                 } else {
                     bits.UnsetRange(start_page, end_page);
                 }
-                UpdateProtection<true, false>();
+                UpdateProtection<true, false>(start_page, end_page);
             } else {
                 bits.UnsetRange(start_page, end_page);
                 if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
@@ -236,16 +241,22 @@ private:
      * @tparam track True when the tracker should start tracking the new pages
      */
     template <bool track, bool is_read>
-    void UpdateProtection() {
+    void UpdateProtection(size_t start = 0, size_t end = NUM_PAGES_PER_REGION) {
         RENDERER_TRACE;
-        RegionBits mask = is_read ? (~gpu ^ readable) : (cpu ^ writeable);
+        RegionBits mask;
+        if constexpr (is_read) {
+            mask = ~gpu ^ readable;
+        } else {
+            mask = range_protection_enabled ? writeable.AssignRange(cpu, start, end)
+                                            : (cpu ^ writeable);
+        }
         if (mask.None()) {
             return;
         }
         if constexpr (is_read) {
             readable = ~gpu;
         } else {
-            writeable = cpu;
+            if (!range_protection_enabled) writeable = cpu;
         }
         tracker->UpdatePageWatchersForRegion<track, is_read>(cpu_addr, mask);
     }
@@ -260,6 +271,7 @@ private:
     RegionBits writeable;
     RegionBits readable;
     bool hot_pages_enabled{};
+    bool range_protection_enabled{};
     RegionBits hot{};         ///< Kept CPU-modified and writable (see SetHotPagesEnabled).
     RegionBits reprotected{}; ///< Write-protected again by an upload, not rewritten since.
     std::array<u8, NUM_PAGES_PER_REGION> refaults{}; ///< CPU rewrites after an upload.

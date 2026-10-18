@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <deque>
+#include <cstdlib>
+#include <string_view>
 #include <mutex>
 #include <type_traits>
 #include <vector>
@@ -26,7 +28,11 @@ public:
 public:
     explicit MemoryTracker(PageManager& tracker_)
         : tracker{&tracker_},
-          hot_pages_enabled{EmulatorSettings.IsReadbackHotWritePagesEnabled()} {}
+          hot_pages_enabled{EmulatorSettings.IsReadbackHotWritePagesEnabled()},
+          range_protection_enabled{[] {
+              const char* value = std::getenv("SHADPS4_RANGE_PROTECTION");
+              return value && std::string_view{value} == "1";
+          }()} {}
 
     /// Forgets hot pages everywhere (see RegionManager::DecayHotPages).
     void DecayHotPages() {
@@ -201,6 +207,7 @@ private:
         auto* new_manager = free_managers.back();
         new_manager->SetCpuAddress(base_cpu_addr);
         new_manager->SetHotPagesEnabled(hot_pages_enabled);
+        new_manager->SetRangeProtectionEnabled(range_protection_enabled);
         free_managers.pop_back();
         top_tier[page_index] = new_manager;
     }
@@ -210,6 +217,7 @@ private:
     std::vector<RegionManager*> free_managers;
     std::array<RegionManager*, NUM_HIGH_PAGES> top_tier{};
     bool hot_pages_enabled{};
+    bool range_protection_enabled{};
 };
 
 } // namespace VideoCore

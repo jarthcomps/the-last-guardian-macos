@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/compute_dispatch_labels.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/image_view.h"
@@ -863,7 +864,15 @@ void Rasterizer::DispatchDirect() {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
-    cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    {
+        const auto label = ComputeDiagnostic::Enabled()
+            ? ComputeDiagnostic::GuestLabel(cs.pgm_hash, false,
+                  {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z},
+                  {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                   cs_program.num_thread_z.full}) : std::string{};
+        ComputeDiagnostic::Scope scope{cmdbuf, label};
+        cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    }
     SerializeAfterDispatch();
     record_dispatch(VideoCore::ReadbackStats::ShaderCallKind::Dispatch, cs_program.NumWorkgroups());
     DebugState.IncDispatch();
@@ -917,7 +926,15 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
-    cmdbuf.dispatchIndirect(buffer->Handle(), base);
+    {
+        const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+        const auto label = ComputeDiagnostic::Enabled()
+            ? ComputeDiagnostic::GuestLabel(cs.pgm_hash, true, {0, 0, 0},
+                  {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                   cs_program.num_thread_z.full}) : std::string{};
+        ComputeDiagnostic::Scope scope{cmdbuf, label};
+        cmdbuf.dispatchIndirect(buffer->Handle(), base);
+    }
     SerializeAfterDispatch();
     if (shader_call.Active()) {
         shader_call.Record(VideoCore::ReadbackStats::ShaderCallKind::DispatchIndirect, *pipeline);

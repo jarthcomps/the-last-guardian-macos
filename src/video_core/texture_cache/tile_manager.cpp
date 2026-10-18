@@ -4,6 +4,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/compute_dispatch_labels.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/shader_diagnostic_names.h"
 #include "video_core/texture_cache/image.h"
@@ -261,7 +262,13 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
 
     const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
-    cmdbuf.dispatch(dim_x, 1, 1);
+    {
+        const auto label = Vulkan::ComputeDiagnostic::Enabled()
+            ? Vulkan::ComputeDiagnostic::TilingLabel(false, u32(info.tile_mode), info.num_bits,
+                  params.num_mips, params.num_slices, dim_x) : std::string{};
+        Vulkan::ComputeDiagnostic::Scope scope{cmdbuf, label};
+        cmdbuf.dispatch(dim_x, 1, 1);
+    }
     return {out_buffer, 0};
 }
 
@@ -350,7 +357,13 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
 
     const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
-    cmdbuf.dispatch(dim_x, 1, 1);
+    {
+        const auto label = Vulkan::ComputeDiagnostic::Enabled()
+            ? Vulkan::ComputeDiagnostic::TilingLabel(true, u32(info.tile_mode), info.num_bits,
+                  params.num_mips, params.num_slices, dim_x) : std::string{};
+        Vulkan::ComputeDiagnostic::Scope scope{cmdbuf, label};
+        cmdbuf.dispatch(dim_x, 1, 1);
+    }
 }
 
 } // namespace VideoCore
