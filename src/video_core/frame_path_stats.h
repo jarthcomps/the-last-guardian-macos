@@ -26,7 +26,10 @@ namespace VideoCore::FramePathStats {
 ///   video-out label waits: the graphics ring waiting in WaitRegMem for the presenter to release
 ///     a flip buffer, by yielding (other rings had work) or sleeping (nothing else to do).
 /// One line per second: "FRAME_PATH_STATS dt=… read_faults=… write_faults=… fault_ms=…
-///   new_hot_pages=… vo_waits=… vo_wait_ms=… vo_sleeps=… vo_sleep_ms=…".
+///   new_hot_pages=… vo_waits=… vo_wait_ms=… vo_sleeps=… vo_sleep_ms=… draws=… cp_idle_ms=…
+///   handoff_wait_ms=… encoder_ms=… gpu_busy_ms=…". The last four split the frame's serial path:
+///   command processor idle (no guest work) or waiting on the encoder queue, encoder thread busy,
+///   and GPU busy (level 3 only, timestamp queries per submission).
 struct Counters {
     std::atomic<std::uint64_t> read_faults{};
     std::atomic<std::uint64_t> write_faults{};
@@ -41,6 +44,10 @@ struct Counters {
     std::atomic<std::uint64_t> draws{};      ///< draws reaching the GPU
     std::atomic<std::uint64_t> gs_draws{};   ///< with a geometry shader (compute pre-pass on Metal)
     std::atomic<std::uint64_t> tess_draws{}; ///< with tessellation (compute pre-pass on Metal)
+    std::atomic<std::uint64_t> cp_idle_ns{};      ///< command processor out of guest work
+    std::atomic<std::uint64_t> handoff_wait_ns{}; ///< command processor waiting for the encoder
+    std::atomic<std::uint64_t> encoder_ns{};      ///< encoder replaying and submitting
+    std::atomic<std::uint64_t> gpu_busy_ns{};     ///< GPU time (level 3: timestamp queries)
     std::atomic<std::uint64_t> last_report_ns{};
 
     void OnFault(bool is_write, std::uint64_t ns) {
@@ -68,6 +75,10 @@ struct Counters {
         if (stage_enable == 0x45u || stage_enable == 0xADu) {
             tess_draws.fetch_add(1, std::memory_order_relaxed);
         }
+    }
+
+    static void Add(std::atomic<std::uint64_t>& counter, std::uint64_t ns) {
+        counter.fetch_add(ns, std::memory_order_relaxed);
     }
 
     /// The counts since the previous report as one line once a second passed, empty otherwise.
@@ -98,7 +109,11 @@ struct Counters {
                " vo_sleep_ms=" + ms(vo_sleep_ns.exchange(0)) +
                " draws=" + std::to_string(draws.exchange(0)) +
                " gs_draws=" + std::to_string(gs_draws.exchange(0)) +
-               " tess_draws=" + std::to_string(tess_draws.exchange(0)) + "\n";
+               " tess_draws=" + std::to_string(tess_draws.exchange(0)) +
+               " cp_idle_ms=" + ms(cp_idle_ns.exchange(0)) +
+               " handoff_wait_ms=" + ms(handoff_wait_ns.exchange(0)) +
+               " encoder_ms=" + ms(encoder_ns.exchange(0)) +
+               " gpu_busy_ms=" + ms(gpu_busy_ns.exchange(0)) + "\n";
     }
 };
 

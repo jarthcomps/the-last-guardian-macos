@@ -13,6 +13,7 @@
 #include "video_core/readback_stats.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_encoder_batch.h"
+#include "video_core/frame_path_stats.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
 
@@ -66,8 +67,11 @@ void Scheduler::ReadGpuTiming(u32 slot) {
     // Command buffers may overlap on the GPU: only count time not counted already.
     const u64 start = std::max(stamps[0], last_timing_end);
     if (stamps[1] > start) {
-        VideoCore::ReadbackStats::OnGpuBusy(
-            static_cast<u64>(static_cast<double>(stamps[1] - start) * timestamp_period));
+        const u64 busy =
+            static_cast<u64>(static_cast<double>(stamps[1] - start) * timestamp_period);
+        VideoCore::ReadbackStats::OnGpuBusy(busy);
+        VideoCore::FramePathStats::Counters::Add(VideoCore::FramePathStats::Global().gpu_busy_ns,
+                                                 busy);
     }
     last_timing_end = std::max(last_timing_end, stamps[1]);
 }
@@ -313,6 +317,13 @@ void Scheduler::HandOffToEncoder(SubmitInfo& info, u64 signal_value) {
         // Back-pressure: the ordering thread may run at most a few ticks ahead of the encoder.
         static const size_t max_queued =
             std::max<size_t>(1, EmulatorSettings.GetCpEncoderQueueDepth());
+        if (VideoCore::FramePathStats::Enabled() && encoder_jobs.size() >= max_queued) {
+            const u64 wait_start = VideoCore::FramePathStats::NowNs();
+            encoder_cv.wait(lk, [this] { return encoder_jobs.size() < max_queued; });
+            VideoCore::FramePathStats::Counters::Add(
+                VideoCore::FramePathStats::Global().handoff_wait_ns,
+                VideoCore::FramePathStats::NowNs() - wait_start);
+        }
         encoder_cv.wait(lk, [this] { return encoder_jobs.size() < max_queued; });
         job.list = std::move(current_list_owner);
         if (free_lists.empty()) {
@@ -432,8 +443,12 @@ void Scheduler::EncoderThread(std::stop_token stoken) {
             // the whole batch. Readback callbacks remain FIFO and can never run early.
             SubmitCommandBuffer(cmdbuf, batch[batch_size - 1].info);
         }
-        VideoCore::ReadbackStats::OnCommandReplay(commands,
-                                                  VideoCore::ReadbackStats::NowNs() - start);
+        const u64 replay_ns = VideoCore::ReadbackStats::NowNs() - start;
+        VideoCore::ReadbackStats::OnCommandReplay(commands, replay_ns);
+        if (VideoCore::FramePathStats::Enabled()) {
+            VideoCore::FramePathStats::Counters::Add(VideoCore::FramePathStats::Global().encoder_ns,
+                                                     replay_ns);
+        }
         {
             std::unique_lock lk{encoder_mutex};
             for (std::size_t i = 0; i < batch_size; ++i) {

@@ -22,14 +22,20 @@ int main() {
     c.OnDraw(0xB0);
     c.OnDraw(0x45);
     c.OnDraw(0xAD);
+    Counters::Add(c.cp_idle_ns, 7'000'000);
+    Counters::Add(c.handoff_wait_ns, 300'000);
+    Counters::Add(c.encoder_ns, 12'340'000);
+    Counters::Add(c.gpu_busy_ns, 25'000'000);
     assert(c.TakeReport(10 + 999'999'999).empty());
     const std::string line = c.TakeReport(10 + 1'000'000'000ULL);
     assert(line == "FRAME_PATH_STATS dt=1000.0ms read_faults=1 write_faults=2 fault_ms=2.0 "
                    "read_fault_ms=1.9 slow_write_faults=0 new_hot_pages=3 vo_waits=1 vo_wait_ms=6.0 "
-                   "vo_sleeps=1 vo_sleep_ms=2.5 draws=4 gs_draws=2 tess_draws=2\n");
+                   "vo_sleeps=1 vo_sleep_ms=2.5 draws=4 gs_draws=2 tess_draws=2 cp_idle_ms=7.0 "
+                   "handoff_wait_ms=0.3 encoder_ms=12.3 gpu_busy_ms=25.0\n");
     assert(c.TakeReport(10 + 2'000'000'000ULL) ==
            "FRAME_PATH_STATS dt=1000.0ms read_faults=0 write_faults=0 fault_ms=0.0 "
-           "read_fault_ms=0.0 slow_write_faults=0 new_hot_pages=0 vo_waits=0 vo_wait_ms=0.0 vo_sleeps=0 vo_sleep_ms=0.0 draws=0 gs_draws=0 tess_draws=0\n");
+           "read_fault_ms=0.0 slow_write_faults=0 new_hot_pages=0 vo_waits=0 vo_wait_ms=0.0 vo_sleeps=0 vo_sleep_ms=0.0 draws=0 gs_draws=0 tess_draws=0 "
+           "cp_idle_ms=0.0 handoff_wait_ms=0.0 encoder_ms=0.0 gpu_busy_ms=0.0\n");
     assert(!VideoCore::FramePathStats::Enabled()); // SHADPS4_FRAME_PATH_STATS unset
     assert(VideoCore::FramePathStats::Level() == 0);
     VideoCore::FramePathStats::FaultBlocks blocks;

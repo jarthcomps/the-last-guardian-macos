@@ -389,6 +389,11 @@ void Liverpool::Process(std::stop_token stoken) {
                 VideoCore::ReadbackStats::OnGpuThreadIdle(VideoCore::ReadbackStats::NowNs() -
                                                           idle_start);
             }
+            if (VideoCore::FramePathStats::Enabled()) {
+                VideoCore::FramePathStats::Counters::Add(
+                    VideoCore::FramePathStats::Global().cp_idle_ns,
+                    VideoCore::ReadbackStats::NowNs() - idle_start);
+            }
         }
         if (stoken.stop_requested()) {
             break;

@@ -128,8 +128,9 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
     }
     memory->SetRasterizer(this);
     VideoCore::ReadbackStats::Start();
-    if (VideoCore::ReadbackStats::IsEnabled() &&
-        EmulatorSettings.IsReadbackStatsGpuTimingEnabled()) {
+    if ((VideoCore::ReadbackStats::IsEnabled() &&
+         EmulatorSettings.IsReadbackStatsGpuTimingEnabled()) ||
+        VideoCore::FramePathStats::Level() >= 3) {
         scheduler.EnableGpuTiming();
     }
 }
