@@ -68,6 +68,24 @@ struct LauncherSettings: Codable {
     var fullscreen = false
     var showFPS = false
     var metalTweaks = true
+    var fastShaderMath = true
+
+    init() {}
+
+    /// Settings saved by an older launcher lack newer keys: those take their defaults instead of
+    /// discarding the whole file (and the game paths in it).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = LauncherSettings()
+        gamePath = try c.decodeIfPresent(String.self, forKey: .gamePath)
+        updatePath = try c.decodeIfPresent(String.self, forKey: .updatePath)
+        resolution = try c.decodeIfPresent(String.self, forKey: .resolution) ?? defaults.resolution
+        fullscreen = try c.decodeIfPresent(Bool.self, forKey: .fullscreen) ?? defaults.fullscreen
+        showFPS = try c.decodeIfPresent(Bool.self, forKey: .showFPS) ?? defaults.showFPS
+        metalTweaks = try c.decodeIfPresent(Bool.self, forKey: .metalTweaks) ?? defaults.metalTweaks
+        fastShaderMath =
+            try c.decodeIfPresent(Bool.self, forKey: .fastShaderMath) ?? defaults.fastShaderMath
+    }
 }
 
 @MainActor
@@ -380,9 +398,12 @@ final class Launcher: ObservableObject {
         }
         for (name, suffix) in [("game.json", ".json"), ("game.readback.json", ".readback.json")] {
             let target = userDir.appendingPathComponent("custom_configs/\(titleID)\(suffix)")
+            let source = defaultsDir.appendingPathComponent("custom_configs/\(name)")
             if !fm.fileExists(atPath: target.path) {
-                try fm.copyItem(at: defaultsDir.appendingPathComponent("custom_configs/\(name)"),
-                                to: target)
+                try fm.copyItem(at: source, to: target)
+            } else {
+                // Settings added in newer launchers reach existing installs too.
+                try ConfigMerge.update(target: target, defaults: source)
             }
         }
         for patch in ["Guardian-720p.xml", "Guardian-540p.xml"] {
@@ -414,7 +435,8 @@ final class Launcher: ObservableObject {
         // shadPS4 also points the Vulkan loader at the manifest next to its executable.
         env["VK_DRIVER_FILES"] = engineDir.appendingPathComponent("kosmickrisp_mesa_icd.json").path
         env["DYLD_LIBRARY_PATH"] = engineDir.path
-        return PerformanceEnvironment.apply(to: env, metalTweaks: settings.metalTweaks)
+        return PerformanceEnvironment.apply(to: env, metalTweaks: settings.metalTweaks,
+                                            fastShaderMath: settings.fastShaderMath)
     }
 
     func start(_ arguments: [String], what: String) {
@@ -639,6 +661,9 @@ struct ContentView: View {
                     Toggle("Show frame rate", isOn: $launcher.settings.showFPS)
                     Toggle("Mac performance and feather fixes (recommended)",
                            isOn: $launcher.settings.metalTweaks)
+                    Toggle("Faster shader math", isOn: $launcher.settings.fastShaderMath)
+                        .disabled(!launcher.settings.metalTweaks)
+                        .help("A few percent faster outdoors. Turn off if something looks wrong.")
                 }.padding(6)
             }
             if !launcher.rosettaInstalled {

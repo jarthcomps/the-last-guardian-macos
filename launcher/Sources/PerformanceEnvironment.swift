@@ -1,9 +1,12 @@
 /// Runtime-only optimizations for the Metal performance profile.
 enum PerformanceEnvironment {
-    static func apply(to inherited: [String: String], metalTweaks: Bool) -> [String: String] {
+    /// `fastShaderMath` also drops the driver's NaN-preserving comparisons (workarounds 14 and
+    /// 17): a few percent faster outdoors, with a small chance of drawing differences.
+    static func apply(to inherited: [String: String], metalTweaks: Bool,
+                      fastShaderMath: Bool = true) -> [String: String] {
         var env = inherited
         if metalTweaks {
-            env["MESA_KK_DISABLE_WORKAROUNDS"] = "12,13"
+            env["MESA_KK_DISABLE_WORKAROUNDS"] = fastShaderMath ? "12,13,14,17" : "12,13"
             env["SHADPS4_METAL_ENCODER_ORDERING"] = "1"
             env["SHADPS4_PREFETCH_STRICT_UNMARK"] = "1"
             env["SHADPS4_TEXTURE_LOOKUP_REUSE"] = "1"

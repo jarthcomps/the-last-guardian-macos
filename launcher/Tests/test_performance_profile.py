@@ -22,6 +22,9 @@ class PerformanceProfileTests(unittest.TestCase):
         self.assertEqual(effective["readback_fence_wait_shortcut"], 3)
         self.assertEqual(effective["cp_full_fence_kinds"], 31)
         self.assertEqual(effective["readback_prefetch_lifetime"], 60)
+        # Kept-writable pages stay off: a watched walk on 1.1.5 candidates hung on the death
+        # screen and slowed to 2 FPS looking up at the tower (suspected).
+        self.assertIs(effective["readback_hot_write_pages_enabled"], False)
 
     def test_release_profile_has_no_readback_profiling_overhead(self):
         profile = json.loads(

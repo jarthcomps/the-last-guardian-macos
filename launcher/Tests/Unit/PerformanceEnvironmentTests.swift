@@ -11,7 +11,7 @@ final class PerformanceEnvironmentTests: XCTestCase {
             XCTAssertEqual(env[flag], "1", flag)
         }
         XCTAssertEqual(env["SHADPS4_READBACK_WINDOW_KB"], "64")
-        XCTAssertEqual(env["MESA_KK_DISABLE_WORKAROUNDS"], "12,13")
+        XCTAssertEqual(env["MESA_KK_DISABLE_WORKAROUNDS"], "12,13,14,17")
         XCTAssertEqual(env["PATH"], "/usr/bin")
         for flag in ["SHADPS4_TEXTURE_LOOKUP_VERIFY", "SHADPS4_IMAGE_BACKING_VERIFY",
                      "SHADPS4_PRECISE_BUFFER_HAZARDS", "SHADPS4_ENABLE_A912_COPY_HLE",
@@ -45,5 +45,53 @@ final class PerformanceEnvironmentTests: XCTestCase {
         XCTAssertEqual(env["SHADPS4_READBACK_WINDOW_KB"], "64")
         XCTAssertEqual(env["SHADPS4_DYNAMIC_STATE_REUSE"], "1")
         XCTAssertEqual(env["SHADPS4_RANGE_PROTECTION"], "1")
+    }
+
+    func testFastShaderMathSwitchOnlyChangesDriverWorkarounds() {
+        let fast = PerformanceEnvironment.apply(to: [:], metalTweaks: true, fastShaderMath: true)
+        let safe = PerformanceEnvironment.apply(to: [:], metalTweaks: true, fastShaderMath: false)
+        XCTAssertEqual(fast["MESA_KK_DISABLE_WORKAROUNDS"], "12,13,14,17")
+        XCTAssertEqual(safe["MESA_KK_DISABLE_WORKAROUNDS"], "12,13")
+        var rest = fast
+        rest["MESA_KK_DISABLE_WORKAROUNDS"] = "12,13"
+        XCTAssertEqual(rest, safe)
+        XCTAssertTrue(PerformanceEnvironment.apply(to: [:], metalTweaks: false,
+                                                   fastShaderMath: true).isEmpty)
+    }
+
+    func testOlderSettingsFileKeepsPathsAndGetsNewDefaults() throws {
+        let old = #"{"gamePath":"/Games/TLG","resolution":"540p","fullscreen":true,"showFPS":false,"metalTweaks":true}"#
+        let settings = try JSONDecoder().decode(LauncherSettings.self, from: Data(old.utf8))
+        XCTAssertEqual(settings.gamePath, "/Games/TLG")
+        XCTAssertEqual(settings.resolution, "540p")
+        XCTAssertTrue(settings.fullscreen)
+        XCTAssertTrue(settings.fastShaderMath)
+        var off = settings
+        off.fastShaderMath = false
+        let round = try JSONDecoder().decode(LauncherSettings.self,
+                                             from: JSONEncoder().encode(off))
+        XCTAssertFalse(round.fastShaderMath)
+    }
+
+    func testConfigMergeAddsNewKeysAndKeepsUserValues() throws {
+        let defaults: [String: Any] = ["GPU": ["readbacks_mode": 2, "new_setting": true],
+                                       "Top": "x"]
+        let user: [String: Any] = ["GPU": ["readbacks_mode": 1, "user_only": 5]]
+        let merged = ConfigMerge.addingMissingKeys(defaults: defaults, to: user)
+        let gpu = try XCTUnwrap(merged["GPU"] as? [String: Any])
+        XCTAssertEqual(gpu["readbacks_mode"] as? Int, 1)
+        XCTAssertEqual(gpu["new_setting"] as? Bool, true)
+        XCTAssertEqual(gpu["user_only"] as? Int, 5)
+        XCTAssertEqual(merged["Top"] as? String, "x")
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let target = dir.appendingPathComponent("user.json")
+        let base = dir.appendingPathComponent("defaults.json")
+        try JSONSerialization.data(withJSONObject: user).write(to: target)
+        try JSONSerialization.data(withJSONObject: defaults).write(to: base)
+        XCTAssertTrue(try ConfigMerge.update(target: target, defaults: base))
+        XCTAssertFalse(try ConfigMerge.update(target: target, defaults: base))
     }
 }
