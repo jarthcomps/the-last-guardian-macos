@@ -1257,11 +1257,25 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     buffer_bindings.clear();
+    // Precise hazards only see the cache's buffers. A shader that also uses the GDS buffer
+    // (append/consume counters shared across dispatches) keeps every barrier.
+    // Raw pointer (BDA) reads can reach memory no binding describes: same rule.
+    const bool uses_gds =
+        std::ranges::any_of(stage.buffers, [](const auto& desc) {
+            return desc.buffer_type == Shader::BufferType::GdsBuffer ||
+                   desc.buffer_type == Shader::BufferType::BdaPagetable;
+        });
     if (scheduler.TraceJobNames() && stage.sw_stage == Shader::SwStage::Compute) {
         g_dispatch_ranges.clear();
         for (const auto& desc : stage.buffers) {
             const auto vsharp = desc.GetSharp(stage);
-            if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
+            if (desc.buffer_type == Shader::BufferType::GdsBuffer) {
+                g_dispatch_ranges += " GDS";
+            } else if (desc.buffer_type == Shader::BufferType::BdaPagetable) {
+                g_dispatch_ranges += " BDA";
+            } else if (desc.buffer_type == Shader::BufferType::FaultBuffer) {
+                g_dispatch_ranges += " FAULTBUF";
+            } else if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
                 g_dispatch_ranges += fmt::format(" {}:{:x}+{:x}", desc.is_written ? 'W' : 'R',
                                                  vsharp.base_address, vsharp.GetSize());
             }
@@ -1355,8 +1369,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
             const bool precise = VideoCore::BufferBarrierPolicy::precise_hazards;
+            static const char* const precise_shaders = std::getenv("SHADPS4_PRECISE_HAZARD_SHADERS");
             const bool tracked =
-                binding_compute || VideoCore::BufferBarrierPolicy::precise_draw_hazards;
+                (binding_compute && !uses_gds &&
+                 VideoCore::PreciseHazardShaderAllowed(precise_shaders, stage.pgm_hash)) ||
+                (!binding_compute && VideoCore::BufferBarrierPolicy::precise_draw_hazards);
             const auto dst_access = desc.is_written ? vk::AccessFlagBits2::eShaderWrite
                                                     : vk::AccessFlagBits2::eShaderRead;
             const auto action = VideoCore::ClassifyPreciseBarrier(
@@ -1378,6 +1395,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             } else if (action == VideoCore::PreciseBarrier::Force) {
                 buffer_barriers.emplace_back(
                     vk_buffer->ForceBarrier(dst_access, vk::PipelineStageFlagBits2::eAllCommands));
+            }
+            if (scheduler.TraceJobNames() && binding_compute) {
+                g_dispatch_ranges += action == VideoCore::PreciseBarrier::Elide   ? " e"
+                                     : action == VideoCore::PreciseBarrier::Force ? " F"
+                                                                                  : " n";
             }
             if (precise) {
                 pending_hazards.push_back({vk_buffer, offset, offset + size, desc.is_written});

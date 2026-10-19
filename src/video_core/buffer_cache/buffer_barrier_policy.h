@@ -55,6 +55,37 @@ constexpr PreciseBarrier ClassifyPreciseBarrier(bool precise, bool tracked, bool
     return hazard ? PreciseBarrier::Force : PreciseBarrier::Elide;
 }
 
+/// SHADPS4_PRECISE_HAZARD_SHADERS="1d99a308,96d32d22,...": precise hazards only for compute
+/// shaders whose 32-bit program hash is listed (bisecting which elisions are safe). Empty = all.
+inline bool PreciseHazardShaderAllowed(const char* list, std::uint64_t pgm_hash) noexcept {
+    if (list == nullptr || *list == 0) {
+        return true;
+    }
+    const std::uint64_t low = pgm_hash & 0xffffffffULL;
+    std::uint64_t value = 0;
+    int digits = 0;
+    for (const char* c = list;; ++c) {
+        const char ch = *c;
+        int v = -1;
+        if (ch >= '0' && ch <= '9') v = ch - '0';
+        else if (ch >= 'a' && ch <= 'f') v = ch - 'a' + 10;
+        else if (ch >= 'A' && ch <= 'F') v = ch - 'A' + 10;
+        if (v >= 0) {
+            value = (value << 4) | static_cast<std::uint64_t>(v);
+            ++digits;
+            continue;
+        }
+        if (digits > 0 && (value & 0xffffffffULL) == low) {
+            return true;
+        }
+        value = 0;
+        digits = 0;
+        if (ch == 0) {
+            return false;
+        }
+    }
+}
+
 struct BufferBarrierPolicy {
     /// SHADPS4_WRITE_AFTER_WRITE_BARRIERS=1, read once at startup.
     static inline bool write_after_write = false;

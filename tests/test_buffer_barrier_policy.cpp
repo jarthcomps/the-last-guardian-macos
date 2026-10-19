@@ -61,5 +61,15 @@ int main() {
         if (ClassifyPreciseBarrier(true, true, true, false) != PreciseBarrier::Force) return 93;
         if (ClassifyPreciseBarrier(true, true, false, false) != PreciseBarrier::Elide) return 94;
     }
+    // Precise hazard shader allowlist.
+    {
+        using VideoCore::PreciseHazardShaderAllowed;
+        if (!PreciseHazardShaderAllowed(nullptr, 0x1234)) return 95;
+        if (!PreciseHazardShaderAllowed("", 0x1234)) return 96;
+        if (!PreciseHazardShaderAllowed("1d99a308,96d32d22", 0x1d99a308)) return 97;
+        if (!PreciseHazardShaderAllowed("1d99a308,96d32d22", 0x96d32d22)) return 98;
+        if (PreciseHazardShaderAllowed("1d99a308,96d32d22", 0x12345678)) return 99;
+        if (!PreciseHazardShaderAllowed("000000001D99A308", 0x1d99a308)) return 100;
+    }
     return 0;
 }

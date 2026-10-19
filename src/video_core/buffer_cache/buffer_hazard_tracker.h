@@ -20,7 +20,7 @@ namespace VideoCore {
 /// barriers; ranges recorded in an older epoch are already ordered and are dropped.
 class BufferHazardTracker {
 public:
-    static constexpr std::size_t MaxRanges = 32;
+    static constexpr std::size_t MaxRanges = 256;
     using Range = std::pair<std::uint64_t, std::uint64_t>; ///< [begin, end)
 
     /// Whether an access of [begin, end) needs a barrier before it.
