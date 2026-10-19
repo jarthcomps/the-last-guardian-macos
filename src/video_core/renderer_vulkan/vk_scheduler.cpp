@@ -6,6 +6,7 @@
 #include <thread>
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/env_switch.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
@@ -366,7 +367,9 @@ void Scheduler::HandOffToEncoder(SubmitInfo& info, u64 signal_value) {
         std::unique_lock lk{encoder_mutex};
         // Back-pressure: the ordering thread may run at most a few ticks ahead of the encoder.
         static const size_t max_queued =
-            std::max<size_t>(1, EmulatorSettings.GetCpEncoderQueueDepth());
+            std::max<size_t>(1, Common::EnvOverrideNumberNamed(
+                                    "SHADPS4_ENCODER_QUEUE_DEPTH",
+                                    EmulatorSettings.GetCpEncoderQueueDepth()));
         if (VideoCore::FramePathStats::Enabled() && encoder_jobs.size() >= max_queued) {
             const u64 wait_start = VideoCore::FramePathStats::NowNs();
             encoder_cv.wait(lk, [this] { return encoder_jobs.size() < max_queued; });
@@ -433,7 +436,9 @@ void Scheduler::EncoderThread(std::stop_token stoken, std::size_t index) {
     Common::SetCurrentThreadName(index == 0 ? "shadPS4:GpuEncoder"
                                             : fmt::format("shadPS4:GpuEncoder{}", index).c_str());
     CommandPool* const own_pool = index == 0 ? nullptr : encoder_pools[index].get();
-    if (const u32 priority = EmulatorSettings.GetCpThreadPriority(); priority >= 2) {
+    if (const u32 priority = Common::EnvOverrideNumberNamed("SHADPS4_CP_THREAD_PRIORITY",
+                                                            EmulatorSettings.GetCpThreadPriority());
+        priority >= 2) {
         Common::SetCurrentThreadPriority(static_cast<Common::ThreadPriority>(priority));
     }
     VideoCore::ReadbackStats::RegisterSampledThread("encoder");
@@ -652,7 +657,9 @@ bool Scheduler::OnPriorityThread() noexcept {
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuSchedPriorityPendingOpsRunner");
 #if defined(__APPLE__)
-    if (const u32 priority = EmulatorSettings.GetCpThreadPriority(); priority >= 2) {
+    if (const u32 priority = Common::EnvOverrideNumberNamed("SHADPS4_CP_THREAD_PRIORITY",
+                                                            EmulatorSettings.GetCpThreadPriority());
+        priority >= 2) {
         Common::SetCurrentThreadPriority(static_cast<Common::ThreadPriority>(priority));
     }
 #endif

@@ -12,6 +12,7 @@
 
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/env_switch.h"
 #include "common/polyfill_thread.h"
 #include "common/thread.h"
 #include "core/debug_state.h"
@@ -366,7 +367,9 @@ void Liverpool::ProcessCommands() {
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
-    if (const u32 priority = EmulatorSettings.GetCpThreadPriority(); priority >= 2) {
+    if (const u32 priority = Common::EnvOverrideNumberNamed("SHADPS4_CP_THREAD_PRIORITY",
+                                                            EmulatorSettings.GetCpThreadPriority());
+        priority >= 2) {
         Common::SetCurrentThreadPriority(static_cast<Common::ThreadPriority>(priority));
     }
     gpu_id = std::this_thread::get_id();
