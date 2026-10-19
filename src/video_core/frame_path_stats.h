@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
@@ -30,6 +31,40 @@ namespace VideoCore::FramePathStats {
 ///   handoff_wait_ms=… encoder_ms=… gpu_busy_ms=…". The last four split the frame's serial path:
 ///   command processor idle (no guest work) or waiting on the encoder queue, encoder thread busy,
 ///   and GPU busy (level 3 only, timestamp queries per submission).
+/// Why the command processor submitted a command buffer (counted with SHADPS4_FRAME_PATH_STATS).
+enum class SubmitReason : std::uint8_t {
+    Other,
+    Fence,     ///< a guest fence (EOP/EOS/label write) needed the work before it on the GPU
+    SubmitEnd, ///< end of a guest submission
+    Readback,  ///< a CPU access waits for GPU data (fault or download)
+    Wait,      ///< waiting for a GPU tick that was not submitted yet
+    Finish,    ///< waiting for the GPU to go idle
+    Present,   ///< the presenter
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<std::size_t>(SubmitReason::Count)>
+    SubmitReasonNames{"other", "fence", "end", "readback", "wait", "finish", "present"};
+
+/// The reason charged for submissions made on this thread (see SubmitReasonScope).
+inline thread_local SubmitReason g_submit_reason = SubmitReason::Other;
+
+/// Charges submissions made inside the scope to `reason` (innermost scope wins).
+class SubmitReasonScope {
+public:
+    explicit SubmitReasonScope(SubmitReason reason) : previous{g_submit_reason} {
+        g_submit_reason = reason;
+    }
+    ~SubmitReasonScope() {
+        g_submit_reason = previous;
+    }
+    SubmitReasonScope(const SubmitReasonScope&) = delete;
+    SubmitReasonScope& operator=(const SubmitReasonScope&) = delete;
+
+private:
+    SubmitReason previous;
+};
+
 struct Counters {
     std::atomic<std::uint64_t> read_faults{};
     std::atomic<std::uint64_t> write_faults{};
@@ -48,7 +83,13 @@ struct Counters {
     std::atomic<std::uint64_t> handoff_wait_ns{}; ///< command processor waiting for the encoder
     std::atomic<std::uint64_t> encoder_ns{};      ///< encoder replaying and submitting
     std::atomic<std::uint64_t> gpu_busy_ns{};     ///< GPU time (level 3: timestamp queries)
+    std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(SubmitReason::Count)>
+        submits{};
     std::atomic<std::uint64_t> last_report_ns{};
+
+    void OnSubmit(SubmitReason reason) {
+        submits[static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
+    }
 
     void OnFault(bool is_write, std::uint64_t ns) {
         (is_write ? write_faults : read_faults).fetch_add(1, std::memory_order_relaxed);
@@ -79,6 +120,16 @@ struct Counters {
 
     static void Add(std::atomic<std::uint64_t>& counter, std::uint64_t ns) {
         counter.fetch_add(ns, std::memory_order_relaxed);
+    }
+
+    /// " submits_fence=… submits_end=… …" (and clears the counts).
+    std::string SubmitsText() {
+        std::string out;
+        for (std::size_t i = 0; i < submits.size(); ++i) {
+            out += std::string(" submits_") + SubmitReasonNames[i] + "=" +
+                   std::to_string(submits[i].exchange(0));
+        }
+        return out;
     }
 
     /// The counts since the previous report as one line once a second passed, empty otherwise.
@@ -113,7 +164,7 @@ struct Counters {
                " cp_idle_ms=" + ms(cp_idle_ns.exchange(0)) +
                " handoff_wait_ms=" + ms(handoff_wait_ns.exchange(0)) +
                " encoder_ms=" + ms(encoder_ns.exchange(0)) +
-               " gpu_busy_ms=" + ms(gpu_busy_ns.exchange(0)) + "\n";
+               " gpu_busy_ms=" + ms(gpu_busy_ns.exchange(0)) + SubmitsText() + "\n";
     }
 };
 

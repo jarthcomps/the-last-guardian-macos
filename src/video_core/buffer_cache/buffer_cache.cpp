@@ -248,12 +248,16 @@ void BufferCache::ReadMemoryForGuest(VAddr device_addr, u64 size, bool is_write)
                     landed->notify_all();
                 },
                 scheduler.CurrentTick());
-            scheduler.Flush();
+            {
+                FramePathStats::SubmitReasonScope reason{FramePathStats::SubmitReason::Readback};
+                scheduler.Flush();
+            }
         } else if (memory_tracker->IsRegionGpuModified(page_start, page_size) &&
                    IsDownloadInFlight(page_start, page_size)) {
             // Nothing left to download: an asynchronous readback of the page is on its way.
             in_flight = true;
             if (scheduler.PriorityOperationsNeedSubmit()) {
+                FramePathStats::SubmitReasonScope reason{FramePathStats::SubmitReason::Readback};
                 scheduler.Flush();
             }
         }
@@ -643,6 +647,7 @@ void BufferCache::WaitForDownloads(VAddr device_addr, u64 size) {
     // Asynchronous downloads are submitted when recorded. Submit anyway if an operation waits on
     // the command buffer being recorded, since the downloads land in order after it.
     if (scheduler.PriorityOperationsNeedSubmit()) {
+        FramePathStats::SubmitReasonScope reason{FramePathStats::SubmitReason::Readback};
         scheduler.Flush();
     }
     const u64 start = ReadbackStats::NowNs();

@@ -456,6 +456,8 @@ void Liverpool::Process(std::stop_token stoken) {
                 VideoCore::ReadbackStats::CpTimer timer{
                     VideoCore::ReadbackStats::CpTime::SubmitEnd};
                 rasterizer->OnSubmit();
+                VideoCore::FramePathStats::SubmitReasonScope reason{
+                    VideoCore::FramePathStats::SubmitReason::SubmitEnd};
                 rasterizer->Flush();
             }
             submit_done = false;

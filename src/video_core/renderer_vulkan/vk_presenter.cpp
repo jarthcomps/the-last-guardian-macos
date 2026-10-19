@@ -18,6 +18,7 @@
 #include "imgui/shadnet_notifications_layer.h"
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/frame_path_stats.h"
 #include "video_core/readback_stats.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -670,7 +671,11 @@ Frame* Presenter::PrepareLastFrame() {
     frame->ready_semaphore = scheduler.GetMasterSemaphore()->Handle();
     frame->ready_tick = scheduler.CurrentTick();
     SubmitInfo info{};
-    scheduler.Flush(info);
+    {
+        VideoCore::FramePathStats::SubmitReasonScope reason{
+            VideoCore::FramePathStats::SubmitReason::Present};
+        scheduler.Flush(info);
+    }
     return frame;
 }
 
@@ -796,7 +801,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     frame->ready_semaphore = draw_scheduler.GetMasterSemaphore()->Handle();
     frame->ready_tick = draw_scheduler.CurrentTick();
     SubmitInfo info{};
-    draw_scheduler.Flush(info);
+    {
+        VideoCore::FramePathStats::SubmitReasonScope reason{
+            VideoCore::FramePathStats::SubmitReason::Present};
+        draw_scheduler.Flush(info);
+    }
     return frame;
 }
 
@@ -869,7 +878,11 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     frame->ready_semaphore = scheduler.GetMasterSemaphore()->Handle();
     frame->ready_tick = scheduler.CurrentTick();
     SubmitInfo info{};
-    scheduler.Flush(info);
+    {
+        VideoCore::FramePathStats::SubmitReasonScope reason{
+            VideoCore::FramePathStats::SubmitReason::Present};
+        scheduler.Flush(info);
+    }
     return frame;
 }
 
@@ -1120,7 +1133,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
-    scheduler.Flush(info);
+    {
+        VideoCore::FramePathStats::SubmitReasonScope reason{
+            VideoCore::FramePathStats::SubmitReason::Present};
+        scheduler.Flush(info);
+    }
 
     // Present to swapchain.
     {

@@ -178,7 +178,11 @@ void Scheduler::Finish() {
     const u64 start = VideoCore::ReadbackStats::NowNs();
     const u64 presubmit_tick = CurrentTick();
     SubmitInfo info{};
-    SubmitExecution(info);
+    {
+        VideoCore::FramePathStats::SubmitReasonScope reason{
+            VideoCore::FramePathStats::SubmitReason::Finish};
+        SubmitExecution(info);
+    }
     Wait(presubmit_tick);
     // Deferred write backs (async readbacks) for work that is now complete must land in guest
     // memory before anything that relies on Finish() reads it.
@@ -193,6 +197,8 @@ void Scheduler::Wait(u64 tick) {
     VideoCore::ReadbackStats::CpTimer timer{VideoCore::ReadbackStats::CpTime::GpuWait};
     if (tick >= master_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
+        VideoCore::FramePathStats::SubmitReasonScope reason{
+            VideoCore::FramePathStats::SubmitReason::Wait};
         SubmitInfo info{};
         Flush(info);
     }
@@ -564,6 +570,9 @@ void Scheduler::EncoderThread(std::stop_token stoken, std::size_t index) {
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     // Recorded commands go into the command buffer before anything written directly at the end.
     EndRendering();
+    if (VideoCore::FramePathStats::Enabled()) {
+        VideoCore::FramePathStats::Global().OnSubmit(VideoCore::FramePathStats::g_submit_reason);
+    }
 
     if (use_encoder && !direct_active) {
         const u64 signal_value = master_semaphore.NextTick();
