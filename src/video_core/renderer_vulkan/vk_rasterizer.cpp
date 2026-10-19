@@ -953,7 +953,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
                                           vk::PipelineStageFlagBits2::eDrawIndirect)) {
         buffer_barriers.emplace_back(*barrier);
     }
-    if (VideoCore::BufferBarrierPolicy::precise_hazards) {
+    if (VideoCore::BufferBarrierPolicy::precise_hazards && buffer->hazards.HasHistory()) {
         pending_hazards.push_back({buffer, base, base + size, false});
     }
 
@@ -1369,11 +1369,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
             const bool precise = VideoCore::BufferBarrierPolicy::precise_hazards;
-            static const char* const precise_shaders = std::getenv("SHADPS4_PRECISE_HAZARD_SHADERS");
-            const bool tracked =
-                (binding_compute && !uses_gds &&
-                 VideoCore::PreciseHazardShaderAllowed(precise_shaders, stage.pgm_hash)) ||
-                (!binding_compute && VideoCore::BufferBarrierPolicy::precise_draw_hazards);
+            static const VideoCore::PreciseHazardShaderList precise_shaders{
+                std::getenv("SHADPS4_PRECISE_HAZARD_SHADERS")};
+            bool tracked = precise &&
+                           ((binding_compute && !uses_gds && precise_shaders.Allowed(stage.pgm_hash)) ||
+                            (!binding_compute && VideoCore::BufferBarrierPolicy::precise_draw_hazards));
+            if (tracked && !vk_buffer->hazards.HasHistory()) {
+                // No history yet: this access gets the normal barrier and starts one.
+                vk_buffer->hazards.StartHistory();
+                tracked = false;
+            }
             const auto dst_access = desc.is_written ? vk::AccessFlagBits2::eShaderWrite
                                                     : vk::AccessFlagBits2::eShaderRead;
             const auto action = VideoCore::ClassifyPreciseBarrier(
@@ -1401,7 +1406,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                                      : action == VideoCore::PreciseBarrier::Force ? " F"
                                                                                   : " n";
             }
-            if (precise) {
+            if (precise && vk_buffer->hazards.HasHistory()) {
                 pending_hazards.push_back({vk_buffer, offset, offset + size, desc.is_written});
             }
             if (desc.is_written && desc.is_formatted) {
@@ -2056,6 +2061,8 @@ void Rasterizer::ProcessAsyncFence(Common::UniqueFunction<void>&& signal,
         VideoCore::ReadbackStats::OnAsyncFence(kind, true);
         {
             VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::FenceSubmit};
+            VideoCore::FramePathStats::SubmitReasonScope reason{
+                VideoCore::FramePathStats::SubmitReason::Fence};
             scheduler.Flush();
         }
         if (signal) {
@@ -2096,6 +2103,8 @@ void Rasterizer::ProcessAsyncFence(Common::UniqueFunction<void>&& signal,
         submission.tick);
     if (needs_submit) {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::FenceSubmit};
+        VideoCore::FramePathStats::SubmitReasonScope reason{
+            VideoCore::FramePathStats::SubmitReason::Fence};
         scheduler.Flush();
     }
 }

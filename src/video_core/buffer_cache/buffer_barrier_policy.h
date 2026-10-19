@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 
@@ -85,6 +86,55 @@ inline bool PreciseHazardShaderAllowed(const char* list, std::uint64_t pgm_hash)
         }
     }
 }
+
+/// PreciseHazardShaderAllowed with the list parsed once (the command thread asks for every
+/// buffer binding).
+class PreciseHazardShaderList {
+public:
+    explicit PreciseHazardShaderList(const char* list) {
+        all = list == nullptr || *list == 0;
+        std::uint64_t value = 0;
+        int digits = 0;
+        for (const char* c = list; c != nullptr; ++c) {
+            const char ch = *c;
+            int v = -1;
+            if (ch >= '0' && ch <= '9') v = ch - '0';
+            else if (ch >= 'a' && ch <= 'f') v = ch - 'a' + 10;
+            else if (ch >= 'A' && ch <= 'F') v = ch - 'A' + 10;
+            if (v >= 0) {
+                value = (value << 4) | static_cast<std::uint64_t>(v);
+                ++digits;
+                continue;
+            }
+            if (digits > 0 && count < hashes.size()) {
+                hashes[count++] = static_cast<std::uint32_t>(value);
+            }
+            value = 0;
+            digits = 0;
+            if (ch == 0) {
+                break;
+            }
+        }
+    }
+
+    bool Allowed(std::uint64_t pgm_hash) const noexcept {
+        if (all) {
+            return true;
+        }
+        const auto low = static_cast<std::uint32_t>(pgm_hash);
+        for (std::size_t i = 0; i < count; ++i) {
+            if (hashes[i] == low) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    bool all = true;
+    std::array<std::uint32_t, 64> hashes{};
+    std::size_t count = 0;
+};
 
 struct BufferBarrierPolicy {
     /// SHADPS4_WRITE_AFTER_WRITE_BARRIERS=1, read once at startup.

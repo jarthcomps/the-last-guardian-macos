@@ -71,5 +71,17 @@ int main() {
         if (PreciseHazardShaderAllowed("1d99a308,96d32d22", 0x12345678)) return 99;
         if (!PreciseHazardShaderAllowed("000000001D99A308", 0x1d99a308)) return 100;
     }
+    // The parsed allowlist agrees with the string version.
+    {
+        using VideoCore::PreciseHazardShaderList;
+        const PreciseHazardShaderList none{nullptr};
+        const PreciseHazardShaderList empty{""};
+        const PreciseHazardShaderList two{"1d99a308,96d32d22"};
+        const PreciseHazardShaderList wide{"000000001D99A308"};
+        if (!none.Allowed(0x1234) || !empty.Allowed(0x1234)) return 101;
+        if (!two.Allowed(0x1d99a308) || !two.Allowed(0xabcd000096d32d22ULL)) return 102;
+        if (two.Allowed(0x12345678)) return 103;
+        if (!wide.Allowed(0x1d99a308)) return 104;
+    }
     return 0;
 }

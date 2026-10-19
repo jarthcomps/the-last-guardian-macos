@@ -41,5 +41,34 @@ int main() {
         assert(m.Hazard(5, i * 1000 + 5, i * 1000 + 6, false)); // every write still seen
     }
     assert(!m.Hazard(5, 500, 600, false)); // gap between early ranges is still free
+
+    // History starts off and is switched on once.
+    BufferHazardTracker h;
+    assert(!h.HasHistory());
+    h.StartHistory();
+    assert(h.HasHistory());
+
+    // Draws re-reading the same range merge into the latest slot instead of filling the table,
+    // so later disjoint writes keep their own ranges.
+    BufferHazardTracker r;
+    for (int i = 0; i < 1000; ++i) {
+        r.Commit(7, 0, 64, false);
+    }
+    for (std::uint64_t i = 1; i < BufferHazardTracker::MaxRanges; ++i) {
+        r.Commit(7, i * 1000, i * 1000 + 10, true);
+    }
+    assert(!r.Hazard(7, 500, 600, true)); // no widening happened
+    assert(r.Hazard(7, 10, 20, true));    // the read is still seen by a write
+
+    // A range touching one older than the merge window gets its own slot; both still count.
+    BufferHazardTracker w;
+    w.Commit(9, 0, 100, true);
+    for (std::uint64_t i = 1; i <= BufferHazardTracker::MergeWindow; ++i) {
+        w.Commit(9, i * 1000, i * 1000 + 10, true);
+    }
+    w.Commit(9, 100, 200, true);
+    assert(w.Hazard(9, 50, 51, false));
+    assert(w.Hazard(9, 150, 151, false));
+    assert(!w.Hazard(9, 300, 400, false));
     return 0;
 }
