@@ -45,5 +45,16 @@ int main() {
             }
         }
     }
+    // Fence submit batching: held back only without interrupt or copies, for listed kinds, and
+    // at most batch - 1 in a row.
+    if (HoldFenceSubmit(0, 0, false, false, 2, 15)) return 20;
+    if (HoldFenceSubmit(1, 0, false, false, 2, 15)) return 21;
+    if (!HoldFenceSubmit(8, 0, false, false, 2, 15)) return 22;
+    if (!HoldFenceSubmit(8, 6, false, false, 2, 15)) return 23;
+    if (HoldFenceSubmit(8, 7, false, false, 2, 15)) return 24;
+    if (HoldFenceSubmit(8, 0, true, false, 2, 15)) return 25;
+    if (HoldFenceSubmit(8, 0, false, true, 2, 15)) return 26;
+    if (HoldFenceSubmit(8, 0, false, false, 16, 15)) return 27;
+    if (HoldFenceSubmit(8, 0, false, false, 4, 2)) return 28;
     return 0;
 }

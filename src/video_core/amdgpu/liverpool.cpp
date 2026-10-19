@@ -40,7 +40,12 @@ static_assert(Liverpool::NumComputeRings <= MAX_NAMES);
 
 static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
+// Before a queue waits, fences held back in the open command buffer are submitted
+// (SHADPS4_FENCE_SUBMIT_BATCH): what the queue waits for may depend on them.
 #define YIELD(name)                                                                                \
+    if (rasterizer) {                                                                              \
+        rasterizer->FlushHeldFenceSubmits();                                                       \
+    }                                                                                              \
     FIBER_EXIT;                                                                                    \
     co_yield {};                                                                                   \
     FIBER_ENTER(name);
@@ -381,6 +386,7 @@ void Liverpool::Process(std::stop_token stoken) {
         if (rasterizer) {
             // Out of work: a guest thread may be waiting on a fence deferred inside a pass.
             rasterizer->FlushDeferredFences(Vulkan::FlushReason::Idle);
+            rasterizer->FlushHeldFenceSubmits();
         }
         {
             VideoCore::ReadbackStats::CpTimer idle_timer{VideoCore::ReadbackStats::CpTime::Idle};
@@ -1217,6 +1223,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         VideoCore::ReadbackStats::CpTime::FlipSleep};
                     const bool path_stats = VideoCore::FramePathStats::Enabled();
                     const u64 sleep_start = path_stats ? VideoCore::FramePathStats::NowNs() : 0;
+                    if (rasterizer) {
+                        rasterizer->FlushHeldFenceSubmits();
+                    }
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     if (path_stats) {
                         VideoCore::FramePathStats::Global().OnVoWait(

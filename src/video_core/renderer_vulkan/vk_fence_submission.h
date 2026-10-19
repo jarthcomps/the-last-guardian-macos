@@ -24,6 +24,22 @@ constexpr FenceSubmission PlanFenceSubmission(std::uint64_t current_tick, bool h
     return {current ? current_tick : current_tick - 1, current || priority_needs_submit};
 }
 
+/// SHADPS4_FENCE_SUBMIT_BATCH=N: a guest fence normally submits the command buffer holding the
+/// work before it, so the fence can be signaled once the GPU finishes that work. Outdoors The
+/// Last Guardian writes about 180 such fences per frame, and every submission costs the command
+/// processor, the encoder and the GPU a command buffer. With N > 1, up to N - 1 fences in a row
+/// that do not raise an interrupt and carry no readback copies leave the command buffer open; the
+/// fence is still signaled after the GPU finished the work before it (only later, together with
+/// the work recorded after it). The command processor submits whatever is pending before it
+/// waits for anything (no guest work, a register/memory wait), so nobody waits on a fence whose
+/// work was never submitted. `pending` is the number of fences already held back in the command
+/// buffer being recorded; `kinds` is a FenceKind mask (SHADPS4_FENCE_BATCH_KINDS).
+constexpr bool HoldFenceSubmit(std::uint32_t batch, std::uint32_t pending, bool interrupting,
+                               bool has_copies, std::uint32_t kind, std::uint32_t kinds) {
+    return batch > 1 && !interrupting && !has_copies && (kind & kinds) != 0 &&
+           pending + 1 < batch;
+}
+
 /// SHADPS4_EARLY_EOP=1 (experiment): an end-of-pipe fence that raises an interrupt (the one The
 /// Last Guardian's render thread waits for before it submits the next frame) is signaled as soon
 /// as the command processor reaches it, instead of after the GPU finished the work before it.

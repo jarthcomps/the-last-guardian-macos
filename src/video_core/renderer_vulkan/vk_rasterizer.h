@@ -80,6 +80,9 @@ public:
     /// command processor also calls this when a ring yields on a wait or when it runs out of
     /// work: the guest may be blocked on a deferred fence with nothing else ending the pass.
     void FlushDeferredFences(FlushReason reason = FlushReason::Submit);
+    /// Submits the command buffer if fences were held back in it (SHADPS4_FENCE_SUBMIT_BATCH).
+    /// The command processor calls this before it waits for anything.
+    void FlushHeldFenceSubmits();
     /// A guest CS partial flush or AcquireMem (SHADPS4_HONOR_CS_FLUSH, fence_deferral.h).
     void GuestComputeFlush();
     void OnFence(Common::UniqueFunction<void>&& signal, VideoCore::FenceKind kind,
@@ -217,6 +220,12 @@ private:
     const bool early_eop;
     /// Fence kinds that get full fences (cp_full_fence_kinds).
     const u32 full_fence_kinds;
+    /// SHADPS4_FENCE_SUBMIT_BATCH / SHADPS4_FENCE_BATCH_KINDS (vk_fence_submission.h).
+    const u32 fence_submit_batch;
+    const u32 fence_batch_kinds;
+    /// Fences held back in the command buffer being recorded, and its tick.
+    u32 held_fence_submits{};
+    u64 held_fence_tick{};
 
     /// Image ids bound as attachments of the open render pass.
     boost::container::static_vector<VideoCore::ImageId, AmdGpu::NUM_COLOR_BUFFERS + 1>

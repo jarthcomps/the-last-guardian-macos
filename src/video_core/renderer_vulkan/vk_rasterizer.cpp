@@ -3,6 +3,7 @@
 
 #include <magic_enum/magic_enum.hpp>
 #include "common/debug.h"
+#include "common/env_switch.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -77,7 +78,13 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
       rt_reuse_enabled{EmulatorSettings.IsRtLookupReuseEnabled()},
       encoder_debug{EmulatorSettings.GetCpEncoderDebug()},
       full_eop_fences{EmulatorSettings.GetCpEncoderMode() >= 2 || (encoder_debug & 4) != 0},
-      full_fence_kinds{EmulatorSettings.GetCpFullFenceKinds()}, early_eop{[] {
+      full_fence_kinds{EmulatorSettings.GetCpFullFenceKinds()},
+      fence_submit_batch{Common::EnvOverrideNumberNamed("SHADPS4_FENCE_SUBMIT_BATCH", 0)},
+      fence_batch_kinds{Common::EnvOverrideNumberNamed(
+          "SHADPS4_FENCE_BATCH_KINDS", VideoCore::FenceGfxEop | VideoCore::FenceGfxEos |
+                                           VideoCore::FenceComputeRelease |
+                                           VideoCore::FenceHeldWrite)},
+      early_eop{[] {
           const char* value = std::getenv("SHADPS4_EARLY_EOP");
           return value != nullptr && std::string_view{value} == "1";
       }()} {
@@ -2089,7 +2096,19 @@ void Rasterizer::ProcessAsyncFence(Common::UniqueFunction<void>&& signal,
     // Submit when this or an earlier operation waits on the current command buffer: the guest
     // may block on this fence without submitting anything else. Otherwise every tick waited on
     // is submitted already and submitting would only cost time.
-    const bool needs_submit = submission.submit;
+    bool needs_submit = submission.submit;
+    if (needs_submit && fence_submit_batch > 1) {
+        const u64 tick = scheduler.CurrentTick();
+        if (held_fence_tick != tick) {
+            held_fence_tick = tick;
+            held_fence_submits = 0;
+        }
+        if (HoldFenceSubmit(fence_submit_batch, held_fence_submits, interrupting, has_copies,
+                            kind, fence_batch_kinds)) {
+            ++held_fence_submits;
+            needs_submit = false;
+        }
+    }
     VideoCore::ReadbackStats::OnAsyncFence(kind, needs_submit);
     scheduler.DeferPriorityOperation(
         [callbacks = batch.TakeCallbacks(), signal = std::move(signal)]() mutable {
@@ -2103,6 +2122,18 @@ void Rasterizer::ProcessAsyncFence(Common::UniqueFunction<void>&& signal,
         submission.tick);
     if (needs_submit) {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::FenceSubmit};
+        VideoCore::FramePathStats::SubmitReasonScope reason{
+            VideoCore::FramePathStats::SubmitReason::Fence};
+        scheduler.Flush();
+    }
+}
+
+void Rasterizer::FlushHeldFenceSubmits() {
+    if (held_fence_submits == 0) {
+        return;
+    }
+    held_fence_submits = 0;
+    if (held_fence_tick == scheduler.CurrentTick() && scheduler.PriorityOperationsNeedSubmit()) {
         VideoCore::FramePathStats::SubmitReasonScope reason{
             VideoCore::FramePathStats::SubmitReason::Fence};
         scheduler.Flush();
