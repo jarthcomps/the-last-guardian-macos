@@ -64,8 +64,15 @@ if (ARCHITECTURE STREQUAL "x86_64")
     # Target x86-64-v3 CPU architecture as this is a good balance between supporting performance critical
     # instructions like AVX2 and maintaining support for older CPUs. Under Rosetta on Apple silicon,
     # 256-bit AVX2 code is emulated with pairs of 128-bit operations and runs slower than SSE code;
-    # SHADPS4_X86_MARCH=x86-64-v2 builds the emulator for Rosetta without AVX.
-    set(SHADPS4_X86_MARCH "x86-64-v3" CACHE STRING "x86-64 -march level for the emulator (x86-64-v2 for Rosetta)")
+    # x86-64 builds for macOS run under Rosetta (the Metal 4 driver needs Apple silicon), so they
+    # default to x86-64-v2: an autovectorized loop ran 38% slower as AVX2, and the engine 7% faster
+    # in The Last Guardian without it.
+    if (APPLE)
+        set(SHADPS4_X86_MARCH_DEFAULT "x86-64-v2")
+    else()
+        set(SHADPS4_X86_MARCH_DEFAULT "x86-64-v3")
+    endif()
+    set(SHADPS4_X86_MARCH "${SHADPS4_X86_MARCH_DEFAULT}" CACHE STRING "x86-64 -march level for the emulator (x86-64-v2 for Rosetta)")
     add_compile_options(-march=${SHADPS4_X86_MARCH})
 endif()
 
