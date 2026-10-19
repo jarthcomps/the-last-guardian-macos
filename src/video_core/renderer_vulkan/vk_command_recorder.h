@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -34,6 +35,14 @@ struct DescriptorPushMemoTestAccess;
 /// Vulkan commands recorded as value-captured closures, replayed later into a command buffer.
 /// Everything a command needs (arrays, structures with pointers, strings) is copied into the
 /// list's arena, so the caller's data may change or go away right after recording.
+/// True while the command processor runs a compute ring (ASC queue) task. Commands recorded
+/// otherwise count as graphics-ring work (SHADPS4_ASYNC_COMPUTE).
+inline thread_local bool g_cp_compute_ring = false;
+/// SHADPS4_ASYNC_COMPUTE: a dispatch-only list was handed to the encoder and no pipeline barrier
+/// in graphics work was recorded since. The GPU may still run that list beside later passes, so
+/// barriers that rely on KosmicKrisp's encoder chaining must not be skipped meanwhile.
+inline thread_local bool g_async_since_barrier = false;
+
 class CommandList {
 public:
     CommandList() {
@@ -362,6 +371,36 @@ private:
         return true;
     }
 
+public:
+    /// What a list contains besides draws (GPU timing diagnostics, SHADPS4_FRAME_PATH_STATS=3).
+    struct Census {
+        u32 draws{}, indirect_draws{}, passes{};
+        u32 dispatches{}, copy_buffers{}, copy_images{}, buffer_to_image{}, image_to_buffer{},
+            fills{}, clears{}, resolves{};
+        u64 copy_bytes{}, fill_bytes{};
+        std::string Summary() const {
+            return "draw=" + std::to_string(draws) + " indirect=" + std::to_string(indirect_draws) +
+                   " pass=" + std::to_string(passes) + " dispatch=" + std::to_string(dispatches) + " copybuf=" +
+                   std::to_string(copy_buffers) + "(" + std::to_string(copy_bytes >> 10) +
+                   "KB) copyimg=" + std::to_string(copy_images) + " buf2img=" +
+                   std::to_string(buffer_to_image) + " img2buf=" +
+                   std::to_string(image_to_buffer) + " fill=" + std::to_string(fills) + "(" +
+                   std::to_string(fill_bytes >> 10) + "KB) clear=" + std::to_string(clears) +
+                   " resolve=" + std::to_string(resolves);
+        }
+    };
+    Census census;
+    /// Dispatch-only list (no draws, no render passes), from either ring. The encoder may let it
+    /// overlap later graphics work on the GPU (SHADPS4_ASYNC_COMPUTE); dependencies of later work
+    /// on it are expressed by pipeline barriers (KK_SHADPS4_ASYNC_COMPUTE=1 waits at the first).
+    bool has_gfx_work{};
+    bool has_compute_dispatch{};
+    bool AsyncEligible() const {
+        return census.dispatches > 0 && census.draws == 0 && census.indirect_draws == 0 &&
+               census.passes == 0;
+    }
+
+private:
     struct Command {
         void (*execute)(Command*, vk::CommandBuffer){};
         Command* next{};
@@ -377,6 +416,9 @@ private:
     static constexpr size_t ChunkSize = 256 * 1024;
 
     void Link(Command* command) {
+        if (!g_cp_compute_ring) {
+            has_gfx_work = true;
+        }
         if (tail) {
             tail->next = command;
         } else {
@@ -414,6 +456,9 @@ private:
     }
 
     void Reset() {
+        census = {};
+        has_gfx_work = false;
+        has_compute_dispatch = false;
         head = nullptr;
         tail = nullptr;
         num_commands = 0;
@@ -753,6 +798,7 @@ public:
     // ---------------------------------------------------------------- rendering and work
 
     void beginRendering(const vk::RenderingInfo& info) const {
+        if (list) ++list->census.passes;
         if (!list) {
             cmdbuf.beginRendering(info);
             return;
@@ -774,27 +820,32 @@ public:
     }
 
     void draw(u32 vertices, u32 instances, u32 first_vertex, u32 first_instance) const {
+        if (list) ++list->census.draws;
         Do([=](vk::CommandBuffer c) { c.draw(vertices, instances, first_vertex, first_instance); });
     }
 
     void drawIndexed(u32 indices, u32 instances, u32 first_index, s32 vertex_offset,
                      u32 first_instance) const {
+        if (list) ++list->census.draws;
         Do([=](vk::CommandBuffer c) {
             c.drawIndexed(indices, instances, first_index, vertex_offset, first_instance);
         });
     }
 
     void drawIndirect(vk::Buffer buffer, vk::DeviceSize offset, u32 count, u32 stride) const {
+        if (list) ++list->census.indirect_draws;
         Do([=](vk::CommandBuffer c) { c.drawIndirect(buffer, offset, count, stride); });
     }
 
     void drawIndexedIndirect(vk::Buffer buffer, vk::DeviceSize offset, u32 count,
                              u32 stride) const {
+        if (list) ++list->census.indirect_draws;
         Do([=](vk::CommandBuffer c) { c.drawIndexedIndirect(buffer, offset, count, stride); });
     }
 
     void drawIndirectCount(vk::Buffer buffer, vk::DeviceSize offset, vk::Buffer count_buffer,
                            vk::DeviceSize count_offset, u32 max_count, u32 stride) const {
+        if (list) ++list->census.indirect_draws;
         Do([=](vk::CommandBuffer c) {
             c.drawIndirectCount(buffer, offset, count_buffer, count_offset, max_count, stride);
         });
@@ -802,6 +853,7 @@ public:
 
     void drawIndexedIndirectCount(vk::Buffer buffer, vk::DeviceSize offset, vk::Buffer count_buffer,
                                   vk::DeviceSize count_offset, u32 max_count, u32 stride) const {
+        if (list) ++list->census.indirect_draws;
         Do([=](vk::CommandBuffer c) {
             c.drawIndexedIndirectCount(buffer, offset, count_buffer, count_offset, max_count,
                                        stride);
@@ -809,10 +861,18 @@ public:
     }
 
     void dispatch(u32 x, u32 y, u32 z) const {
+        if (list) {
+            ++list->census.dispatches;
+            list->has_compute_dispatch |= g_cp_compute_ring;
+        }
         Do([=](vk::CommandBuffer c) { c.dispatch(x, y, z); });
     }
 
     void dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) const {
+        if (list) {
+            ++list->census.dispatches;
+            list->has_compute_dispatch |= g_cp_compute_ring;
+        }
         Do([=](vk::CommandBuffer c) { c.dispatchIndirect(buffer, offset); });
     }
 
@@ -825,6 +885,9 @@ public:
         if (!list) {
             cmdbuf.pipelineBarrier2(info);
             return;
+        }
+        if (list->census.draws || list->census.indirect_draws || list->census.passes) {
+            g_async_since_barrier = false; // graphics barrier: the driver waits here
         }
         ASSERT_MSG(!info.pNext, "Recorded dependency info can't have a pNext chain");
         auto* copy = list->Copy(&info, 1);
@@ -869,6 +932,8 @@ public:
         }
         const u32 n = regions.size();
         const auto* r = list->Copy(regions.data(), n);
+        ++list->census.copy_buffers;
+        for (const auto& region : regions) list->census.copy_bytes += region.size;
         list->Record([=](vk::CommandBuffer c) { c.copyBuffer(src, dst, n, r); });
     }
 
@@ -878,6 +943,7 @@ public:
             cmdbuf.copyImage(src, src_layout, dst, dst_layout, regions);
             return;
         }
+        ++list->census.copy_images;
         const u32 n = regions.size();
         const auto* r = list->Copy(regions.data(), n);
         list->Record(
@@ -890,6 +956,7 @@ public:
             cmdbuf.copyBufferToImage(src, dst, dst_layout, regions);
             return;
         }
+        ++list->census.buffer_to_image;
         const u32 n = regions.size();
         const auto* r = list->Copy(regions.data(), n);
         list->Record([=](vk::CommandBuffer c) { c.copyBufferToImage(src, dst, dst_layout, n, r); });
@@ -901,6 +968,7 @@ public:
             cmdbuf.copyImageToBuffer(src, src_layout, dst, regions);
             return;
         }
+        ++list->census.image_to_buffer;
         const u32 n = regions.size();
         const auto* r = list->Copy(regions.data(), n);
         list->Record([=](vk::CommandBuffer c) { c.copyImageToBuffer(src, src_layout, dst, n, r); });
@@ -913,6 +981,7 @@ public:
             cmdbuf.resolveImage(src, src_layout, dst, dst_layout, regions);
             return;
         }
+        ++list->census.resolves;
         const u32 n = regions.size();
         const auto* r = list->Copy(regions.data(), n);
         list->Record(
@@ -925,6 +994,7 @@ public:
             cmdbuf.clearColorImage(image, layout, color, ranges);
             return;
         }
+        ++list->census.clears;
         const u32 n = ranges.size();
         const auto* r = list->Copy(ranges.data(), n);
         const vk::ClearColorValue value = color;
@@ -932,6 +1002,10 @@ public:
     }
 
     void fillBuffer(vk::Buffer buffer, vk::DeviceSize offset, vk::DeviceSize size, u32 data) const {
+        if (list) {
+            ++list->census.fills;
+            list->census.fill_bytes += size;
+        }
         Do([=](vk::CommandBuffer c) { c.fillBuffer(buffer, offset, size, data); });
     }
 

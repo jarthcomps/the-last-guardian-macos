@@ -145,7 +145,7 @@ Rasterizer::~Rasterizer() {
 void Rasterizer::CpSync() {
     // PfpSyncMe orders earlier shader writes before indirect argument reads. Inside a render
     // pass the same encoder ordering argument as for command stream barriers applies.
-    if (ShouldSkipCommandStreamBarrier(trust_encoder_ordering, scheduler.IsRendering(),
+    if (ShouldSkipCommandStreamBarrier(trust_encoder_ordering && !g_async_since_barrier, scheduler.IsRendering(),
                                        pass_memory_writes)) {
         ++deferral_stats.cp_syncs_skipped;
         ReportDeferralStats();
@@ -174,7 +174,7 @@ bool Rasterizer::CommandStreamBarrier(u64 producer_tick) {
         // later command comes after it, so it already orders this wait too.
         return false;
     }
-    if (ShouldSkipCommandStreamBarrier(trust_encoder_ordering, scheduler.IsRendering(),
+    if (ShouldSkipCommandStreamBarrier(trust_encoder_ordering && !g_async_since_barrier, scheduler.IsRendering(),
                                        pass_memory_writes)) {
         ++deferral_stats.barriers_skipped;
         ReportDeferralStats();
@@ -619,7 +619,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         // the open render encoder, which Metal already orders (fence_deferral.h).
         const bool skip_barriers =
             !buffer_barriers.empty() && !new_pass &&
-            ShouldSkipCommandStreamBarrier(trust_encoder_ordering, scheduler.IsRendering(),
+            ShouldSkipCommandStreamBarrier(trust_encoder_ordering && !g_async_since_barrier, scheduler.IsRendering(),
                                            pass_memory_writes);
         if (skip_barriers) {
             ++deferral_stats.draw_barriers_skipped;
@@ -651,6 +651,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     DebugState.IncDrawCall();
     VideoCore::ReadbackStats::OnDraw();
+    if (scheduler.GpuTimingActive()) {
+        scheduler.NoteDraw();
+    }
     if (VideoCore::FramePathStats::Enabled()) {
         VideoCore::FramePathStats::Global().OnDraw(static_cast<u32>(regs.stage_enable.raw));
     }
@@ -757,7 +760,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         // the open render encoder, which Metal already orders (fence_deferral.h).
         const bool skip_barriers =
             !buffer_barriers.empty() && !new_pass &&
-            ShouldSkipCommandStreamBarrier(trust_encoder_ordering, scheduler.IsRendering(),
+            ShouldSkipCommandStreamBarrier(trust_encoder_ordering && !g_async_since_barrier, scheduler.IsRendering(),
                                            pass_memory_writes);
         if (skip_barriers) {
             ++deferral_stats.draw_barriers_skipped;
@@ -790,6 +793,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
         DebugState.IncDrawCall();
         VideoCore::ReadbackStats::OnDraw();
+    if (scheduler.GpuTimingActive()) {
+        scheduler.NoteDraw();
+    }
         if (VideoCore::FramePathStats::Enabled()) {
             VideoCore::FramePathStats::Global().OnDraw(
                 static_cast<u32>(liverpool->regs.stage_enable.raw));
@@ -806,6 +812,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         }
         DebugState.IncDrawCall();
         VideoCore::ReadbackStats::OnDraw();
+    if (scheduler.GpuTimingActive()) {
+        scheduler.NoteDraw();
+    }
         if (VideoCore::FramePathStats::Enabled()) {
             VideoCore::FramePathStats::Global().OnDraw(
                 static_cast<u32>(liverpool->regs.stage_enable.raw));
@@ -886,6 +895,12 @@ void Rasterizer::DispatchDirect() {
                   {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z},
                   {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
                    cs_program.num_thread_z.full}) : std::string{};
+        if (scheduler.GpuTimingActive()) {
+            scheduler.NoteDispatch(ComputeDiagnostic::GuestLabel(cs.pgm_hash, false,
+                {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z},
+                {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                 cs_program.num_thread_z.full}));
+        }
         ComputeDiagnostic::Scope scope{cmdbuf, label};
         cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     }
@@ -948,6 +963,11 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
             ? ComputeDiagnostic::GuestLabel(cs.pgm_hash, true, {0, 0, 0},
                   {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
                    cs_program.num_thread_z.full}) : std::string{};
+        if (scheduler.GpuTimingActive()) {
+            scheduler.NoteDispatch(ComputeDiagnostic::GuestLabel(cs.pgm_hash, true, {0, 0, 0},
+                {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                 cs_program.num_thread_z.full}));
+        }
         ComputeDiagnostic::Scope scope{cmdbuf, label};
         cmdbuf.dispatchIndirect(buffer->Handle(), base);
     }

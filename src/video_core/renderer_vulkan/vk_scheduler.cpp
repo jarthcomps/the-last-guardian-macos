@@ -13,8 +13,10 @@
 #include "video_core/readback_stats.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_encoder_batch.h"
+#include <map>
 #include <fmt/format.h>
 #include "video_core/frame_path_stats.h"
+#include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
 
@@ -57,7 +59,7 @@ void Scheduler::EnableGpuTiming() {
     LOG_INFO(Render_Vulkan, "GPU timing enabled (timestamp period {} ns)", timestamp_period);
 }
 
-void Scheduler::ReadGpuTiming(u32 slot) {
+void Scheduler::ReadGpuTiming(u32 slot, std::vector<std::string> notes, u32 draws) {
     std::array<u64, 2> stamps{};
     const auto result = instance.GetDevice().getQueryPoolResults(
         timing_pool, slot * 2, 2, sizeof(stamps), stamps.data(), sizeof(u64),
@@ -75,6 +77,15 @@ void Scheduler::ReadGpuTiming(u32 slot) {
                                                  busy);
     }
     last_timing_end = std::max(last_timing_end, stamps[1]);
+    const double ms = static_cast<double>(stamps[1] - stamps[0]) * timestamp_period / 1e6;
+    if (ms >= 1.0) {
+        std::string line = fmt::format("LONG_GPU_JOB ms={:.2f} draws={} dispatches={}:", ms, draws,
+                                       notes.size());
+        for (std::size_t i = 0; i < notes.size() && i < 16; ++i) {
+            line += " | " + notes[i];
+        }
+        std::fputs((line + "\n").c_str(), stderr);
+    }
 }
 
 void Scheduler::BeginRendering(const RenderState& new_state) {
@@ -319,11 +330,21 @@ void Scheduler::HandOffToEncoder(SubmitInfo& info, u64 signal_value) {
         .info = info,
         .signal_value = signal_value,
     };
+    if (!timing_pool && TraceJobNames()) {
+        job.notes = std::move(job_notes);
+        job_notes.clear();
+        job_draws = 0;
+    }
     if (timing_pool) {
         const u32 slot = next_timing_slot++ % NumTimingSlots;
         job.timing_slot = static_cast<s32>(slot);
         std::unique_lock lk(pending_ops_mutex);
-        pending_ops.emplace([this, slot] { ReadGpuTiming(slot); }, signal_value);
+        job_notes.insert(job_notes.begin(), current_list->census.Summary());
+        pending_ops.emplace([this, slot, notes = std::move(job_notes), draws = job_draws]() mutable {
+            ReadGpuTiming(slot, std::move(notes), draws);
+        }, signal_value);
+        job_notes.clear();
+        job_draws = 0;
     }
     {
         std::unique_lock lk{encoder_mutex};
@@ -338,6 +359,13 @@ void Scheduler::HandOffToEncoder(SubmitInfo& info, u64 signal_value) {
                 VideoCore::FramePathStats::NowNs() - wait_start);
         }
         encoder_cv.wait(lk, [this] { return encoder_jobs.size() < max_queued; });
+        static const bool async_mode = [] {
+            const char* value = std::getenv("SHADPS4_ASYNC_COMPUTE");
+            return value != nullptr && std::string_view{value} == "1";
+        }();
+        if (async_mode && current_list_owner->AsyncEligible()) {
+            g_async_since_barrier = true;
+        }
         job.list = std::move(current_list_owner);
         if (free_lists.empty()) {
             current_list_owner = std::make_unique<CommandList>();
@@ -432,6 +460,30 @@ void Scheduler::EncoderThread(std::stop_token stoken, std::size_t index) {
             std::scoped_lock lk{command_pool_mutex};
             cmdbuf = command_pool.Commit();
         }
+        static const bool name_jobs = [] {
+            const char* value = std::getenv("SHADPS4_TRACE_JOB_NAMES");
+            return value != nullptr && std::string_view{value} == "1";
+        }();
+        if (name_jobs) {
+            // Metal traces label encoders with the command buffer name (diagnostics).
+            std::string name;
+            for (std::size_t i = 0; i < batch_size; ++i) {
+                std::map<std::string, int> shaders;
+                for (const auto& note : batch[i].notes) {
+                    ++shaders[note.substr(0, note.find(' '))];
+                }
+                std::string top;
+                for (const auto& [shader, count] : shaders) {
+                    top += " " + shader.substr(shader.size() > 8 ? shader.size() - 8 : 0) + "x" +
+                           std::to_string(count);
+                }
+                name += (i ? " ; " : "") + batch[i].list->census.Summary() + top +
+                        (batch[i].list->AsyncEligible()          ? " async"
+                         : batch[i].list->has_compute_dispatch ? " mixed"
+                                                                : "");
+            }
+            SetObjectName(instance.GetDevice(), cmdbuf, std::string_view{name});
+        }
         Check(cmdbuf.begin(begin_info));
         u64 commands{};
         for (std::size_t i = 0; i < batch_size; ++i) {
@@ -442,7 +494,26 @@ void Scheduler::EncoderThread(std::stop_token stoken, std::size_t index) {
                 cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, timing_pool, slot * 2);
             }
             commands += job.list->Size();
+            static const bool async_compute = [] {
+                const char* value = std::getenv("SHADPS4_ASYNC_COMPUTE");
+                const bool enabled = value != nullptr && std::string_view{value} == "1" &&
+                                     vk::detail::defaultDispatchLoaderDynamic
+                                         .vkCmdInsertDebugUtilsLabelEXT != nullptr;
+                if (enabled) {
+                    std::fputs("ASYNC_COMPUTE enabled\n", stderr);
+                }
+                return enabled;
+            }();
+            const bool async_job = async_compute && job.list->AsyncEligible();
+            if (async_job) {
+                // KK_SHADPS4_ASYNC_COMPUTE in the driver lets this list overlap graphics work.
+                cmdbuf.insertDebugUtilsLabelEXT({.pLabelName = "shadps4.async.begin"});
+            }
             job.list->Replay(cmdbuf);
+            if (async_job) {
+                cmdbuf.insertDebugUtilsLabelEXT({.pLabelName = "shadps4.async.end"});
+                ++async_jobs_replayed;
+            }
             if (job.timing_slot >= 0) {
                 const u32 slot = static_cast<u32>(job.timing_slot);
                 cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timing_pool,
@@ -521,7 +592,11 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         current_cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timing_pool,
                                       slot * 2 + 1);
         std::unique_lock lk(pending_ops_mutex);
-        pending_ops.emplace([this, slot] { ReadGpuTiming(slot); }, signal_value);
+        pending_ops.emplace([this, slot, notes = std::move(job_notes), draws = job_draws]() mutable {
+            ReadGpuTiming(slot, std::move(notes), draws);
+        }, signal_value);
+        job_notes.clear();
+        job_draws = 0;
     }
     Check(current_cmdbuf.end());
 

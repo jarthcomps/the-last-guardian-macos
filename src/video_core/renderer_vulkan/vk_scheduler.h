@@ -508,7 +508,7 @@ private:
 
     void PriorityPendingOpsThread(std::stop_token stoken);
 
-    void ReadGpuTiming(u32 slot);
+    void ReadGpuTiming(u32 slot, std::vector<std::string> notes = {}, u32 draws = 0);
 
 private:
     const Instance& instance;
@@ -530,6 +530,7 @@ private:
         SubmitInfo info;
         u64 signal_value{};
         s32 timing_slot{-1};
+        std::vector<std::string> notes; ///< dispatch labels (SHADPS4_TRACE_JOB_NAMES)
     };
     void EncoderThread(std::stop_token stoken, std::size_t index);
     void HandOffToEncoder(SubmitInfo& info, u64 signal_value);
@@ -573,6 +574,31 @@ private:
     std::vector<std::jthread> extra_encoder_threads; ///< SHADPS4_ENCODER_THREADS above 1
     static constexpr u32 NumTimingSlots = 1024;
     vk::QueryPool timing_pool{};
+    std::atomic<u64> async_jobs_replayed{}; ///< SHADPS4_ASYNC_COMPUTE lists (diagnostics)
+    std::vector<std::string> job_notes; ///< dispatches of the open tick (GPU timing only)
+    u32 job_draws{};
+public:
+    /// With GPU timing (SHADPS4_FRAME_PATH_STATS=3) a submission's dispatches are listed when
+    /// it took long on the GPU: "LONG_GPU_JOB ms=… draws=… dispatches=…: label …".
+    bool GpuTimingActive() const {
+        return timing_pool != vk::QueryPool{} || TraceJobNames();
+    }
+    /// SHADPS4_TRACE_JOB_NAMES=1: command buffers are named after their contents (Metal traces).
+    static bool TraceJobNames() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("SHADPS4_TRACE_JOB_NAMES");
+            return value != nullptr && std::string_view{value} == "1";
+        }();
+        return enabled;
+    }
+    void NoteDispatch(std::string label) {
+        job_notes.push_back(std::move(label));
+    }
+    void NoteDraw() {
+        ++job_draws;
+    }
+
+private:
     float timestamp_period{};
     u32 next_timing_slot{};
     s32 current_timing_slot{-1};

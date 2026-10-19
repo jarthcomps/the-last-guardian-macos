@@ -422,7 +422,9 @@ void Liverpool::Process(std::stop_token stoken) {
             const u64 resume_start = profile ? VideoCore::ReadbackStats::NowNs() : 0;
             const u64 packets_before = VideoCore::ReadbackStats::Detail::cp_packets;
             VideoCore::ReadbackStats::Detail::cp_yield_kind = 0;
+            Vulkan::g_cp_compute_ring = curr_qid != GfxQueueId;
             task.resume();
+            Vulkan::g_cp_compute_ring = false;
             if (rasterizer && VideoCore::ReadbackStats::Detail::cp_yield_kind != 0) {
                 // The ring is blocked on a wait that may depend on a deferred fence.
                 rasterizer->FlushDeferredFences(Vulkan::FlushReason::Yield);
