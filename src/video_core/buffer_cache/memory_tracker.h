@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/debug.h"
+#include "common/env_switch.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
 #include "video_core/buffer_cache/region_manager.h"
@@ -29,7 +30,9 @@ public:
 public:
     explicit MemoryTracker(PageManager& tracker_)
         : tracker{&tracker_},
-          hot_pages_enabled{EmulatorSettings.IsReadbackHotWritePagesEnabled()},
+          // SHADPS4_HOT_WRITE_PAGES=1|0 overrides the config (launcher switch).
+          hot_pages_enabled{Common::EnvOverrideNamed(
+              "SHADPS4_HOT_WRITE_PAGES", EmulatorSettings.IsReadbackHotWritePagesEnabled())},
           range_protection_enabled{[] {
               const char* value = std::getenv("SHADPS4_RANGE_PROTECTION");
               return value && std::string_view{value} == "1";
