@@ -51,5 +51,15 @@ int main() {
     assert(!VideoCore::BufferBarrierPolicy::write_after_write);
     VideoCore::BufferBarrierPolicy::write_after_write_barriers.fetch_add(2);
     assert(VideoCore::BufferBarrierPolicy::write_after_write_barriers.exchange(0) == 2);
+    // Precise hazards classification.
+    {
+        using VideoCore::ClassifyPreciseBarrier;
+        using VideoCore::PreciseBarrier;
+        if (ClassifyPreciseBarrier(false, true, true, false) != PreciseBarrier::Normal) return 90;
+        if (ClassifyPreciseBarrier(true, false, false, false) != PreciseBarrier::Normal) return 91;
+        if (ClassifyPreciseBarrier(true, true, false, true) != PreciseBarrier::Normal) return 92;
+        if (ClassifyPreciseBarrier(true, true, true, false) != PreciseBarrier::Force) return 93;
+        if (ClassifyPreciseBarrier(true, true, false, false) != PreciseBarrier::Elide) return 94;
+    }
     return 0;
 }

@@ -577,6 +577,7 @@ private:
     std::atomic<u64> async_jobs_replayed{}; ///< SHADPS4_ASYNC_COMPUTE lists (diagnostics)
     std::vector<std::string> job_notes; ///< dispatches of the open tick (GPU timing only)
     u32 job_draws{};
+    u32 chain_lists{};
 public:
     /// With GPU timing (SHADPS4_FRAME_PATH_STATS=3) a submission's dispatches are listed when
     /// it took long on the GPU: "LONG_GPU_JOB ms=… draws=… dispatches=…: label …".

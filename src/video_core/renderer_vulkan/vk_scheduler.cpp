@@ -331,6 +331,16 @@ void Scheduler::HandOffToEncoder(SubmitInfo& info, u64 signal_value) {
         .signal_value = signal_value,
     };
     if (!timing_pool && TraceJobNames()) {
+        static const bool dump_chains = std::getenv("SHADPS4_DUMP_CHAINS") != nullptr;
+        static u32 dumped = 0;
+        if (dump_chains && job_notes.size() >= 100 && dumped < 6 && (++chain_lists % 50) == 0) {
+            ++dumped;
+            std::string out = "DISPATCH_CHAIN n=" + std::to_string(job_notes.size()) + "\n";
+            for (const auto& note : job_notes) {
+                out += "  " + note + "\n";
+            }
+            std::fputs(out.c_str(), stderr);
+        }
         job.notes = std::move(job_notes);
         job_notes.clear();
         job_draws = 0;

@@ -128,6 +128,42 @@ public:
         return buffer.bda_addr;
     }
 
+    /// The last recorded access includes a write the precise range tracker does not see.
+    bool HasExternalWrite() const {
+        return static_cast<bool>(access_mask & (vk::AccessFlagBits2::eTransferWrite |
+                                                vk::AccessFlagBits2::eHostWrite |
+                                                vk::AccessFlagBits2::eMemoryWrite));
+    }
+
+    /// Precise hazards: a shader access recorded without a barrier. A write keeps the buffer
+    /// marked as shader-written, so later whole-buffer consumers (draws, copies) still order
+    /// against it.
+    void NoteElidedAccess(bool is_write) {
+        if (is_write) {
+            access_mask |= vk::AccessFlagBits2::eShaderWrite;
+            stage = vk::PipelineStageFlagBits2::eAllCommands;
+        }
+    }
+
+    /// Precise hazards: a barrier for an access overlapping one recorded since the last full
+    /// barrier, even when the access state alone asks for none (write after write).
+    vk::BufferMemoryBarrier2 ForceBarrier(vk::AccessFlags2 dst_access_mask,
+                                          vk::PipelineStageFlagBits2 dst_stage) {
+        const auto barrier = vk::BufferMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = access_mask | vk::AccessFlagBits2::eShaderRead |
+                             vk::AccessFlagBits2::eShaderWrite,
+            .dstStageMask = dst_stage,
+            .dstAccessMask = dst_access_mask,
+            .buffer = buffer.buffer,
+            .offset = 0,
+            .size = size_bytes,
+        };
+        access_mask = dst_access_mask;
+        stage = dst_stage;
+        return barrier;
+    }
+
     std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
                                                        vk::PipelineStageFlagBits2 dst_stage,
                                                        u32 offset = 0) {

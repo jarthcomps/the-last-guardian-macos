@@ -321,11 +321,13 @@ public:
         }
         const auto find_start_bit = [&](size_t word) {
 #ifdef BIT_ARRAY_USE_AVX
-            const __m256i all_zero = _mm256_setzero_si256();
+            // Skip whole words of ones: the run of set bits continues through them. (Comparing
+            // with zero here skipped empty words and returned a start far below the run.)
+            const __m256i all_one = _mm256_set1_epi64x(-1);
             for (; word >= WORDS_PER_AVX; word -= WORDS_PER_AVX) {
                 const __m256i current = _mm256_loadu_si256(
                     reinterpret_cast<const __m256i*>(&data[word - WORDS_PER_AVX]));
-                const __m256i cmp = _mm256_cmpeq_epi64(current, all_zero);
+                const __m256i cmp = _mm256_cmpeq_epi64(current, all_one);
                 if (_mm256_movemask_epi8(cmp) != 0xFFFFFFFF) {
                     break;
                 }

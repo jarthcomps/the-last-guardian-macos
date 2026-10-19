@@ -29,6 +29,13 @@
 
 namespace Vulkan {
 
+namespace {
+/// SHADPS4_TRACE_JOB_NAMES: buffer ranges of the dispatch being bound ("W:addr+size R:...").
+thread_local std::string g_dispatch_ranges;
+thread_local std::size_t g_dispatch_barriers;
+} // namespace
+
+
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -884,6 +891,7 @@ void Rasterizer::DispatchDirect() {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::Descriptors};
         FlushDeferredFences(FlushReason::Dispatch);
         scheduler.EndRendering();
+        g_dispatch_barriers = buffer_barriers.size();
         pipeline->BindResources(set_writes, buffer_barriers, push_data);
     }
 
@@ -899,7 +907,8 @@ void Rasterizer::DispatchDirect() {
             scheduler.NoteDispatch(ComputeDiagnostic::GuestLabel(cs.pgm_hash, false,
                 {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z},
                 {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
-                 cs_program.num_thread_z.full}));
+                 cs_program.num_thread_z.full}) + " bar=" + std::to_string(g_dispatch_barriers) +
+                g_dispatch_ranges);
         }
         ComputeDiagnostic::Scope scope{cmdbuf, label};
         cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
@@ -1248,6 +1257,16 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data) {
     buffer_bindings.clear();
+    if (scheduler.TraceJobNames() && stage.sw_stage == Shader::SwStage::Compute) {
+        g_dispatch_ranges.clear();
+        for (const auto& desc : stage.buffers) {
+            const auto vsharp = desc.GetSharp(stage);
+            if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
+                g_dispatch_ranges += fmt::format(" {}:{:x}+{:x}", desc.is_written ? 'W' : 'R',
+                                                 vsharp.base_address, vsharp.GetSize());
+            }
+        }
+    }
 
     for (const auto& desc : stage.buffers) {
         const auto vsharp = desc.GetSharp(stage);
@@ -1336,24 +1355,29 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
             const bool precise = VideoCore::BufferBarrierPolicy::precise_hazards;
-            const bool hazard =
-                !precise ||
-                (!binding_compute && !VideoCore::BufferBarrierPolicy::precise_draw_hazards) ||
-                vk_buffer->hazards.Hazard(BarrierStats::SyncEpoch(), offset, offset + size,
-                                          desc.is_written);
-            if (auto barrier =
-                    vk_buffer->GetBarrier(desc.is_written ? vk::AccessFlagBits2::eShaderWrite
-                                                          : vk::AccessFlagBits2::eShaderRead,
-                                          vk::PipelineStageFlagBits2::eAllCommands)) {
-                if (hazard) {
-                    VideoCore::ReadbackStats::NoteMutation(
-                        VideoCore::ReadbackStats::Mutation::BufferBarrier);
-                    buffer_barriers.emplace_back(*barrier);
-                } else {
-                    // Nothing this dispatch touches was accessed since the last full barrier.
-                    VideoCore::BufferBarrierPolicy::precise_hazards_elided.fetch_add(
-                        1, std::memory_order_relaxed);
-                }
+            const bool tracked =
+                binding_compute || VideoCore::BufferBarrierPolicy::precise_draw_hazards;
+            const auto dst_access = desc.is_written ? vk::AccessFlagBits2::eShaderWrite
+                                                    : vk::AccessFlagBits2::eShaderRead;
+            const auto action = VideoCore::ClassifyPreciseBarrier(
+                precise, tracked,
+                precise && tracked &&
+                    vk_buffer->hazards.Hazard(BarrierStats::SyncEpoch(), offset, offset + size,
+                                              desc.is_written),
+                vk_buffer->HasExternalWrite());
+            if (action == VideoCore::PreciseBarrier::Elide) {
+                // Nothing this dispatch touches was accessed since the last full barrier.
+                vk_buffer->NoteElidedAccess(desc.is_written);
+                VideoCore::BufferBarrierPolicy::precise_hazards_elided.fetch_add(
+                    1, std::memory_order_relaxed);
+            } else if (auto barrier = vk_buffer->GetBarrier(
+                           dst_access, vk::PipelineStageFlagBits2::eAllCommands)) {
+                VideoCore::ReadbackStats::NoteMutation(
+                    VideoCore::ReadbackStats::Mutation::BufferBarrier);
+                buffer_barriers.emplace_back(*barrier);
+            } else if (action == VideoCore::PreciseBarrier::Force) {
+                buffer_barriers.emplace_back(
+                    vk_buffer->ForceBarrier(dst_access, vk::PipelineStageFlagBits2::eAllCommands));
             }
             if (precise) {
                 pending_hazards.push_back({vk_buffer, offset, offset + size, desc.is_written});

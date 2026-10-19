@@ -35,6 +35,26 @@ constexpr bool NeedsBufferBarrier(std::uint64_t prev_access, std::uint64_t prev_
     return write_after_write && (prev_access & write_bits) != 0;
 }
 
+/// How a shader buffer binding is ordered under SHADPS4_PRECISE_BUFFER_HAZARDS.
+enum class PreciseBarrier {
+    Normal, ///< whole-buffer access state decides (precise mode off, or a draw)
+    Force,  ///< an overlapping range was touched since the last full barrier: always a barrier
+    Elide,  ///< nothing overlapping since the last full barrier: no barrier
+};
+
+/// `tracked` = precise mode covers this binding (compute, or draws with mode 2); `hazard` = the
+/// range tracker found an overlapping access in the current barrier epoch; `external_write` = the
+/// buffer's last recorded access includes a transfer, host or memory write, which the range
+/// tracker does not see. A forced barrier also covers write after write and write after read,
+/// which the whole-buffer state alone leaves out.
+constexpr PreciseBarrier ClassifyPreciseBarrier(bool precise, bool tracked, bool hazard,
+                                                bool external_write) noexcept {
+    if (!precise || !tracked || external_write) {
+        return PreciseBarrier::Normal;
+    }
+    return hazard ? PreciseBarrier::Force : PreciseBarrier::Elide;
+}
+
 struct BufferBarrierPolicy {
     /// SHADPS4_WRITE_AFTER_WRITE_BARRIERS=1, read once at startup.
     static inline bool write_after_write = false;
