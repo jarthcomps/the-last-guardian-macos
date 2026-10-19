@@ -223,6 +223,7 @@ private:
     /// SHADPS4_FENCE_SUBMIT_BATCH / SHADPS4_FENCE_BATCH_KINDS (vk_fence_submission.h).
     const u32 fence_submit_batch;
     const u32 fence_batch_kinds;
+    const u32 fence_hold_in_flight;
     /// Fences held back in the command buffer being recorded, and its tick.
     u32 held_fence_submits{};
     u64 held_fence_tick{};

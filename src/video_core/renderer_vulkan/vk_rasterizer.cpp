@@ -84,6 +84,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
           "SHADPS4_FENCE_BATCH_KINDS", VideoCore::FenceGfxEop | VideoCore::FenceGfxEos |
                                            VideoCore::FenceComputeRelease |
                                            VideoCore::FenceHeldWrite)},
+      fence_hold_in_flight{Common::EnvOverrideNumberNamed("SHADPS4_FENCE_HOLD_INFLIGHT", 0)},
       early_eop{[] {
           const char* value = std::getenv("SHADPS4_EARLY_EOP");
           return value != nullptr && std::string_view{value} == "1";
@@ -2103,8 +2104,15 @@ void Rasterizer::ProcessAsyncFence(Common::UniqueFunction<void>&& signal,
             held_fence_tick = tick;
             held_fence_submits = 0;
         }
+        u64 in_flight = 0;
+        if (fence_hold_in_flight != 0) {
+            auto* semaphore = scheduler.GetMasterSemaphore();
+            semaphore->Refresh();
+            const u64 known = semaphore->KnownGpuTick();
+            in_flight = tick > known + 1 ? tick - known - 1 : 0;
+        }
         if (HoldFenceSubmit(fence_submit_batch, held_fence_submits, interrupting, has_copies,
-                            kind, fence_batch_kinds)) {
+                            kind, fence_batch_kinds, in_flight, fence_hold_in_flight)) {
             ++held_fence_submits;
             needs_submit = false;
         }

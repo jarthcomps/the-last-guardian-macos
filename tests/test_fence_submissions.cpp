@@ -56,5 +56,9 @@ int main() {
     if (HoldFenceSubmit(8, 0, false, true, 2, 15)) return 26;
     if (HoldFenceSubmit(8, 0, false, false, 16, 15)) return 27;
     if (HoldFenceSubmit(8, 0, false, false, 4, 2)) return 28;
+    // With a minimum of command buffers in flight, an idle GPU gets the work at once.
+    if (HoldFenceSubmit(8, 0, false, false, 2, 15, 1, 3)) return 29;
+    if (!HoldFenceSubmit(8, 0, false, false, 2, 15, 3, 3)) return 30;
+    if (!HoldFenceSubmit(8, 0, false, false, 2, 15, 0, 0)) return 31;
     return 0;
 }

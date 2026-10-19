@@ -34,10 +34,13 @@ constexpr FenceSubmission PlanFenceSubmission(std::uint64_t current_tick, bool h
 /// waits for anything (no guest work, a register/memory wait), so nobody waits on a fence whose
 /// work was never submitted. `pending` is the number of fences already held back in the command
 /// buffer being recorded; `kinds` is a FenceKind mask (SHADPS4_FENCE_BATCH_KINDS).
+/// SHADPS4_FENCE_HOLD_INFLIGHT=K: hold only while at least K submitted command buffers are not
+/// finished on the GPU yet (`in_flight`), so an idle GPU still gets the work at once.
 constexpr bool HoldFenceSubmit(std::uint32_t batch, std::uint32_t pending, bool interrupting,
-                               bool has_copies, std::uint32_t kind, std::uint32_t kinds) {
+                               bool has_copies, std::uint32_t kind, std::uint32_t kinds,
+                               std::uint64_t in_flight = 0, std::uint32_t min_in_flight = 0) {
     return batch > 1 && !interrupting && !has_copies && (kind & kinds) != 0 &&
-           pending + 1 < batch;
+           pending + 1 < batch && in_flight >= min_in_flight;
 }
 
 /// SHADPS4_EARLY_EOP=1 (experiment): an end-of-pipe fence that raises an interrupt (the one The
