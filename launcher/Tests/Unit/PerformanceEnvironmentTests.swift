@@ -59,6 +59,33 @@ final class PerformanceEnvironmentTests: XCTestCase {
                                                    fastShaderMath: true).isEmpty)
     }
 
+    func testExperimentalSwitchAddsOnlyItsOwnFlags() {
+        let base = PerformanceEnvironment.apply(to: ["PATH": "/bin"], metalTweaks: true)
+        let experimental = PerformanceEnvironment.apply(to: ["PATH": "/bin"], metalTweaks: true,
+                                                        experimental: true)
+        XCTAssertFalse(PerformanceEnvironment.experimentalSwitches.isEmpty)
+        for (key, value) in PerformanceEnvironment.experimentalSwitches {
+            XCTAssertNil(base[key], key)
+            XCTAssertEqual(experimental[key], value, key)
+        }
+        var rest = experimental
+        for key in PerformanceEnvironment.experimentalSwitches.keys {
+            rest[key] = nil
+        }
+        XCTAssertEqual(rest, base)
+        // Nothing experimental without the Mac performance profile.
+        XCTAssertEqual(PerformanceEnvironment.apply(to: ["PATH": "/bin"], metalTweaks: false,
+                                                    experimental: true), ["PATH": "/bin"])
+    }
+
+    func testMemoryWarningOnlyBelowWhatTheGameNeeds() {
+        XCTAssertNil(MemoryCheck.warning(availableBytes: 14 << 30))
+        XCTAssertNil(MemoryCheck.warning(availableBytes: MemoryCheck.neededBytes))
+        XCTAssertEqual(MemoryCheck.warning(availableBytes: 3 << 29),
+                       "Low on memory (1.5 GB available): close other apps for a steadier frame rate.")
+        XCTAssertGreaterThan(MemoryCheck.availableBytes(), 0)
+    }
+
     func testOlderSettingsFileKeepsPathsAndGetsNewDefaults() throws {
         let old = #"{"gamePath":"/Games/TLG","resolution":"540p","fullscreen":true,"showFPS":false,"metalTweaks":true}"#
         let settings = try JSONDecoder().decode(LauncherSettings.self, from: Data(old.utf8))
@@ -66,6 +93,7 @@ final class PerformanceEnvironmentTests: XCTestCase {
         XCTAssertEqual(settings.resolution, "540p")
         XCTAssertTrue(settings.fullscreen)
         XCTAssertTrue(settings.fastShaderMath)
+        XCTAssertFalse(settings.experimentalSpeedups)
         var off = settings
         off.fastShaderMath = false
         let round = try JSONDecoder().decode(LauncherSettings.self,

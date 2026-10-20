@@ -2,9 +2,28 @@
 enum PerformanceEnvironment {
     /// `fastShaderMath` also drops the driver's NaN-preserving comparisons (workarounds 14 and
     /// 17): a few percent faster outdoors, with a small chance of drawing differences.
+    /// Switches still being tested in play (launcher toggle "Experimental speedups", off by
+    /// default). Each is also off in the engine and driver unless set here.
+    /// Measured outdoors (alternating 120 s runs, 2026-10-19): with the profile-guided engine,
+    /// about +9 to +12 % together. Hot write pages stop most guest page faults; fence batching
+    /// cuts ~180 command buffer submissions per frame to ~40; precise hazards drop the barriers
+    /// of one long compute chain; the keep-alive stops the GPU clocking down in the gaps.
+    static let experimentalSwitches: [String: String] = [
+        "SHADPS4_HOT_WRITE_PAGES": "1",
+        "SHADPS4_FENCE_SUBMIT_BATCH": "32",
+        "SHADPS4_FENCE_HOLD_INFLIGHT": "4",
+        "SHADPS4_PRECISE_BUFFER_HAZARDS": "1",
+        "SHADPS4_PRECISE_HAZARD_SHADERS": "1d99a308,96d32d22,ee29a0b1,a3c4525b,eb218825",
+        "KK_SHADPS4_GPU_KEEPALIVE": "2",
+    ]
+
     static func apply(to inherited: [String: String], metalTweaks: Bool,
-                      fastShaderMath: Bool = true) -> [String: String] {
+                      fastShaderMath: Bool = true,
+                      experimental: Bool = false) -> [String: String] {
         var env = inherited
+        if metalTweaks && experimental {
+            env.merge(experimentalSwitches) { _, new in new }
+        }
         if metalTweaks {
             env["MESA_KK_DISABLE_WORKAROUNDS"] = fastShaderMath ? "12,13,14,17" : "12,13"
             env["SHADPS4_METAL_ENCODER_ORDERING"] = "1"

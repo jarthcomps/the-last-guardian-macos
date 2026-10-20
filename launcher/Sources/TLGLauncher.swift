@@ -69,6 +69,7 @@ struct LauncherSettings: Codable {
     var showFPS = false
     var metalTweaks = true
     var fastShaderMath = true
+    var experimentalSpeedups = false
 
     init() {}
 
@@ -85,6 +86,8 @@ struct LauncherSettings: Codable {
         metalTweaks = try c.decodeIfPresent(Bool.self, forKey: .metalTweaks) ?? defaults.metalTweaks
         fastShaderMath =
             try c.decodeIfPresent(Bool.self, forKey: .fastShaderMath) ?? defaults.fastShaderMath
+        experimentalSpeedups = try c.decodeIfPresent(Bool.self, forKey: .experimentalSpeedups)
+            ?? defaults.experimentalSpeedups
     }
 }
 
@@ -436,7 +439,8 @@ final class Launcher: ObservableObject {
         env["VK_DRIVER_FILES"] = engineDir.appendingPathComponent("kosmickrisp_mesa_icd.json").path
         env["DYLD_LIBRARY_PATH"] = engineDir.path
         return PerformanceEnvironment.apply(to: env, metalTweaks: settings.metalTweaks,
-                                            fastShaderMath: settings.fastShaderMath)
+                                            fastShaderMath: settings.fastShaderMath,
+                                            experimental: settings.experimentalSpeedups)
     }
 
     func start(_ arguments: [String], what: String) {
@@ -486,6 +490,9 @@ final class Launcher: ObservableObject {
         if let blocker { message = blocker; return }
         do {
             start(try playArguments(), what: "The Last Guardian")
+            if running, let warning = MemoryCheck.warning(availableBytes: MemoryCheck.availableBytes()) {
+                message = "The Last Guardian is running. " + warning
+            }
         } catch {
             message = "Could not set up the game: \(error.localizedDescription)"
         }
@@ -664,6 +671,10 @@ struct ContentView: View {
                     Toggle("Faster shader math", isOn: $launcher.settings.fastShaderMath)
                         .disabled(!launcher.settings.metalTweaks)
                         .help("A few percent faster outdoors. Turn off if something looks wrong.")
+                    Toggle("Experimental speedups (testing)",
+                           isOn: $launcher.settings.experimentalSpeedups)
+                        .disabled(!launcher.settings.metalTweaks)
+                        .help("Changes still being tested in play. Turn off if anything goes wrong.")
                 }.padding(6)
             }
             if !launcher.rosettaInstalled {
