@@ -59,6 +59,21 @@ final class PerformanceEnvironmentTests: XCTestCase {
                                                    fastShaderMath: true).isEmpty)
     }
 
+    func testShaderOverrideDirOnlyWithExperimentalSwitch() {
+        let dir = "/tmp/shader-overrides"
+        let on = PerformanceEnvironment.apply(to: [:], metalTweaks: true, experimental: true,
+                                              shaderOverrideDir: dir)
+        XCTAssertEqual(on["KK_SHADPS4_MSL_OVERRIDE_DIR"], dir)
+        let off = PerformanceEnvironment.apply(to: [:], metalTweaks: true, experimental: false,
+                                               shaderOverrideDir: dir)
+        XCTAssertNil(off["KK_SHADPS4_MSL_OVERRIDE_DIR"])
+        let noTweaks = PerformanceEnvironment.apply(to: [:], metalTweaks: false, experimental: true,
+                                                    shaderOverrideDir: dir)
+        XCTAssertNil(noTweaks["KK_SHADPS4_MSL_OVERRIDE_DIR"])
+        let noDir = PerformanceEnvironment.apply(to: [:], metalTweaks: true, experimental: true)
+        XCTAssertNil(noDir["KK_SHADPS4_MSL_OVERRIDE_DIR"])
+    }
+
     func testExperimentalSwitchAddsOnlyItsOwnFlags() {
         let base = PerformanceEnvironment.apply(to: ["PATH": "/bin"], metalTweaks: true)
         let experimental = PerformanceEnvironment.apply(to: ["PATH": "/bin"], metalTweaks: true,

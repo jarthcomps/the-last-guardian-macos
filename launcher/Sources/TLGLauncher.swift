@@ -113,6 +113,11 @@ final class Launcher: ObservableObject {
     var userDir: URL { dataDir.appendingPathComponent("user") }
     var libraryDir: URL { dataDir.appendingPathComponent("library") }
     var engineDir: URL { Bundle.main.resourceURL!.appendingPathComponent("engine") }
+    /// Tuned compute shaders bundled with test builds (absent in release builds).
+    var shaderOverrideDir: String? {
+        let dir = Bundle.main.resourceURL!.appendingPathComponent("shader-overrides")
+        return FileManager.default.fileExists(atPath: dir.path) ? dir.path : nil
+    }
     var pkgTool: URL { Bundle.main.resourceURL!.appendingPathComponent("tools/ps4-pkg-tool") }
     var defaultsDir: URL { Bundle.main.resourceURL!.appendingPathComponent("defaults") }
     private var process: Process?
@@ -444,7 +449,8 @@ final class Launcher: ObservableObject {
         return PerformanceEnvironment.apply(to: env, metalTweaks: settings.metalTweaks,
                                             fastShaderMath: settings.fastShaderMath,
                                             experimental: settings.experimentalSpeedups,
-                                            copyShortcut: settings.copyShaderShortcut)
+                                            copyShortcut: settings.copyShaderShortcut,
+                                            shaderOverrideDir: shaderOverrideDir)
     }
 
     func start(_ arguments: [String], what: String) {
