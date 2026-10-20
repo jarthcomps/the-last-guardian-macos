@@ -21,6 +21,7 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/frame_path_stats.h"
+#include "video_core/texture_cache/texture_gc_policy.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
 #include "video_core/texture_cache/image_barrier_policy.h"
 
@@ -446,6 +447,19 @@ bool Rasterizer::FilterDraw() {
     return true;
 }
 
+void Rasterizer::TouchCachedTarget(CachedTarget& cache, VideoCore::ImageId image_id) {
+    // A reused target only needs one touch per GC tick (once per guest submission) to stay
+    // out of the collector's reach; touching takes the texture cache lock, and with
+    // SHADPS4_TOUCH_TARGETS_ONCE=1 the other ~250,000 touches a second outdoors are skipped.
+    static const bool once = Common::EnvOverrideNamed("SHADPS4_TOUCH_TARGETS_ONCE", false);
+    const u64 tick = texture_cache.GcTick();
+    if (!VideoCore::NeedsTargetTouch(once, cache.touched_tick, tick)) {
+        return;
+    }
+    texture_cache.TouchFoundImage(image_id);
+    cache.touched_tick = tick;
+}
+
 template <typename... Ts>
 bool Rasterizer::TargetInputsMatch(CachedTarget& cache, const Ts&... parts) {
     std::array<u8, 256> inputs;
@@ -490,13 +504,14 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             // same image again (image_id and desc still hold its result).
             VideoCore::ReadbackStats::OnReuse(VideoCore::ReadbackStats::Reuse::RtReused);
             bound_images.emplace_back(image_id);
-            texture_cache.TouchFoundImage(image_id);
+            TouchCachedTarget(rt_cache[cb], image_id);
         } else {
             std::construct_at(&desc, col_buf, hint);
             image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
             if (rt_reuse_enabled) {
                 rt_cache[cb].valid = true;
                 rt_cache[cb].generation = texture_cache.ImageGeneration();
+                rt_cache[cb].touched_tick = texture_cache.GcTick();
             }
         }
         auto& image = texture_cache.GetImage(image_id);
@@ -513,7 +528,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                                                   regs.depth_control, htile_address, hint)) {
             VideoCore::ReadbackStats::OnReuse(VideoCore::ReadbackStats::Reuse::RtReused);
             bound_images.emplace_back(image_id);
-            texture_cache.TouchFoundImage(image_id);
+            TouchCachedTarget(cache, image_id);
         } else {
             std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
                               htile_address, hint);
@@ -521,6 +536,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             if (rt_reuse_enabled) {
                 cache.valid = true;
                 cache.generation = texture_cache.ImageGeneration();
+                cache.touched_tick = texture_cache.GcTick();
             }
         }
         auto& image = texture_cache.GetImage(image_id);

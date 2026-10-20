@@ -288,6 +288,11 @@ public:
         }
     }
 
+    /// Garbage collection tick (advances once per guest submission; command processor thread).
+    [[nodiscard]] u64 GcTick() const noexcept {
+        return gc_tick;
+    }
+
     /// Guest size and number of the registered images (memory diagnostics).
     [[nodiscard]] u64 ImageBytes() const noexcept {
         return image_bytes;

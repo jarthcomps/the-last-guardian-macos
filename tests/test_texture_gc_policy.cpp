@@ -23,5 +23,10 @@ int main() {
     p = PlanImageGc(3500 * MB, 8683 * MB, 20643 * MB, 23920 * MB, 3000, 1500);
     if (!p.run || !p.pressured || !p.aggressive) return 7;
     static_assert(PlanImageGc(0, 1, 2, 3, 5, 5).run);
+    // Render target touches: every reuse without the switch, once per GC tick with it.
+    using VideoCore::NeedsTargetTouch;
+    if (!NeedsTargetTouch(false, 7, 7) || !NeedsTargetTouch(false, 6, 7)) return 8;
+    if (NeedsTargetTouch(true, 7, 7)) return 9;
+    if (!NeedsTargetTouch(true, 6, 7) || !NeedsTargetTouch(true, ~0ULL, 0)) return 10;
     return 0;
 }

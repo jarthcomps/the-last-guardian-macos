@@ -35,4 +35,11 @@ constexpr ImageGcPlan PlanImageGc(std::uint64_t used, std::uint64_t trigger,
     };
 }
 
+/// Whether a reused render target must touch its image now. The collector only compares an
+/// image's last touch with its own tick, so once per tick is enough (`once`); otherwise every
+/// reuse touches, as before.
+constexpr bool NeedsTargetTouch(bool once, std::uint64_t touched_tick, std::uint64_t gc_tick) {
+    return !once || touched_tick != gc_tick;
+}
+
 } // namespace VideoCore

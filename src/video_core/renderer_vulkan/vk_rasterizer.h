@@ -207,10 +207,14 @@ private:
     struct CachedTarget {
         bool valid{};
         u64 generation{};
+        u64 touched_tick = ~u64{0}; ///< texture cache GC tick the image was last touched at
         u32 size{};
         std::array<u8, 256> inputs{};
     };
     std::array<CachedTarget, AmdGpu::NUM_COLOR_BUFFERS + 1> rt_cache{};
+    /// Touches a reused render target's image for the texture cache's LRU (once per GC tick
+    /// with SHADPS4_TOUCH_TARGETS_ONCE=1).
+    void TouchCachedTarget(CachedTarget& cache, VideoCore::ImageId image_id);
     const bool rt_reuse_enabled;
     std::array<std::vector<VideoCore::TextureCache::CachedImageLookup>, 8> texture_lookups{};
     const u32 encoder_debug;
