@@ -1033,6 +1033,15 @@ void Rasterizer::OnSubmit() {
     buffer_cache.AdvanceHotEpoch();
     texture_cache.RunGarbageCollector();
     buffer_cache.RunGarbageCollector();
+    if (VideoCore::FramePathStats::Enabled()) {
+        auto& stats = VideoCore::FramePathStats::Global();
+        stats.image_bytes.store(texture_cache.ImageBytes(), std::memory_order_relaxed);
+        stats.image_count.store(texture_cache.ImageCount(), std::memory_order_relaxed);
+        stats.buffer_bytes.store(buffer_cache.BufferBytes(), std::memory_order_relaxed);
+        if (instance.CanReportMemoryUsage()) {
+            stats.device_bytes.store(instance.GetDeviceMemoryUsage(), std::memory_order_relaxed);
+        }
+    }
 }
 
 void Rasterizer::CommitHazards() {

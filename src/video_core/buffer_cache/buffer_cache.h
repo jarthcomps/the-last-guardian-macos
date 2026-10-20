@@ -209,6 +209,11 @@ public:
     /// Waits until asynchronous downloads of the range have landed in guest memory.
     void WaitForDownloads(VAddr device_addr, u64 size);
 
+    /// Size of the registered buffers (memory diagnostics).
+    [[nodiscard]] u64 BufferBytes() const noexcept {
+        return buffer_bytes;
+    }
+
 private:
     template <typename Func>
     void ForEachBufferInRange(VAddr device_addr, u64 size, Func&& func) {
@@ -290,6 +295,7 @@ private:
     Buffer bda_pagetable_buffer;
     Common::SlotVector<Buffer> slot_buffers;
     u64 total_used_memory = 0;
+    u64 buffer_bytes = 0; ///< size of the registered buffers
     u64 trigger_gc_memory = 0;
     u64 critical_gc_memory = 0;
     u64 gc_tick = 0;

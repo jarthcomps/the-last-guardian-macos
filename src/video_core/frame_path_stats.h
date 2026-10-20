@@ -16,6 +16,11 @@
 #include <string>
 #include <string_view>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <notify.h>
+#endif
+
 namespace VideoCore::FramePathStats {
 
 /// Cheap per-second counters for the costs on The Last Guardian's outdoor critical path
@@ -65,6 +70,51 @@ private:
     SubmitReason previous;
 };
 
+/// Host memory, read once a second for the report (macOS: this process's physical footprint and
+/// the system's free and compressor pages; zero elsewhere).
+struct HostMemory {
+    std::uint64_t footprint_bytes = 0;
+    std::uint64_t free_bytes = 0;
+    std::uint64_t compressor_bytes = 0;
+    /// macOS thermal pressure (com.apple.system.thermalpressurelevel): 0 nominal, 1 moderate,
+    /// 2 heavy, 3 trapping, 4 sleeping. The CPU is slowed from "moderate" on.
+    std::uint64_t thermal_level = 0;
+};
+
+inline HostMemory ReadHostMemory() {
+    HostMemory host;
+#ifdef __APPLE__
+    task_vm_info_data_t vm_info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm_info),
+                  &count) == KERN_SUCCESS) {
+        host.footprint_bytes = vm_info.phys_footprint;
+    }
+    vm_statistics64_data_t stats{};
+    mach_msg_type_number_t stats_count = HOST_VM_INFO64_COUNT;
+    vm_size_t page_size = 0;
+    if (host_page_size(mach_host_self(), &page_size) == KERN_SUCCESS &&
+        host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                          reinterpret_cast<host_info64_t>(&stats), &stats_count) == KERN_SUCCESS) {
+        host.free_bytes = static_cast<std::uint64_t>(stats.free_count) * page_size;
+        host.compressor_bytes = static_cast<std::uint64_t>(stats.compressor_page_count) * page_size;
+    }
+    static int thermal_token = [] {
+        int token = -1;
+        if (notify_register_check("com.apple.system.thermalpressurelevel", &token) !=
+            NOTIFY_STATUS_OK) {
+            token = -1;
+        }
+        return token;
+    }();
+    std::uint64_t level = 0;
+    if (thermal_token >= 0 && notify_get_state(thermal_token, &level) == NOTIFY_STATUS_OK) {
+        host.thermal_level = level;
+    }
+#endif
+    return host;
+}
+
 struct Counters {
     std::atomic<std::uint64_t> read_faults{};
     std::atomic<std::uint64_t> write_faults{};
@@ -85,6 +135,11 @@ struct Counters {
     std::atomic<std::uint64_t> gpu_busy_ns{};     ///< GPU time (level 3: timestamp queries)
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(SubmitReason::Count)>
         submits{};
+    /// Gauges set by the rasterizer at the end of each guest submission (latest value wins).
+    std::atomic<std::uint64_t> image_bytes{};
+    std::atomic<std::uint64_t> image_count{};
+    std::atomic<std::uint64_t> buffer_bytes{};
+    std::atomic<std::uint64_t> device_bytes{}; ///< the driver's reported device memory usage
     std::atomic<std::uint64_t> last_report_ns{};
 
     void OnSubmit(SubmitReason reason) {
@@ -134,6 +189,24 @@ struct Counters {
 
     /// The counts since the previous report as one line once a second passed, empty otherwise.
     std::string TakeReport(std::uint64_t now_ns) {
+        return TakeReport(now_ns, [] { return ReadHostMemory(); });
+    }
+
+    /// " footprint_mb=… free_mb=… compressor_mb=… device_mb=… images_mb=… images=… buffers_mb=…".
+    std::string MemoryText(const HostMemory& host) const {
+        const auto mb = [](std::uint64_t bytes) { return std::to_string(bytes >> 20); };
+        return " footprint_mb=" + mb(host.footprint_bytes) + " free_mb=" + mb(host.free_bytes) +
+               " compressor_mb=" + mb(host.compressor_bytes) +
+               " device_mb=" + mb(device_bytes.load(std::memory_order_relaxed)) +
+               " images_mb=" + mb(image_bytes.load(std::memory_order_relaxed)) +
+               " images=" + std::to_string(image_count.load(std::memory_order_relaxed)) +
+               " buffers_mb=" + mb(buffer_bytes.load(std::memory_order_relaxed)) +
+               " thermal=" + std::to_string(host.thermal_level);
+    }
+
+    /// As TakeReport, with the host memory reader given (tests).
+    template <typename HostReader>
+    std::string TakeReport(std::uint64_t now_ns, HostReader&& read_host) {
         std::uint64_t last = last_report_ns.load(std::memory_order_relaxed);
         if (last == 0) {
             last_report_ns.store(now_ns, std::memory_order_relaxed);
@@ -164,7 +237,8 @@ struct Counters {
                " cp_idle_ms=" + ms(cp_idle_ns.exchange(0)) +
                " handoff_wait_ms=" + ms(handoff_wait_ns.exchange(0)) +
                " encoder_ms=" + ms(encoder_ns.exchange(0)) +
-               " gpu_busy_ms=" + ms(gpu_busy_ns.exchange(0)) + SubmitsText() + "\n";
+               " gpu_busy_ms=" + ms(gpu_busy_ns.exchange(0)) + SubmitsText() +
+               MemoryText(read_host()) + "\n";
     }
 };
 

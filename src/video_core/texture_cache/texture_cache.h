@@ -288,6 +288,14 @@ public:
         }
     }
 
+    /// Guest size and number of the registered images (memory diagnostics).
+    [[nodiscard]] u64 ImageBytes() const noexcept {
+        return image_bytes;
+    }
+    [[nodiscard]] u64 ImageCount() const noexcept {
+        return image_count;
+    }
+
 private:
     /// Iterate over all page indices in a range
     template <typename Func>
@@ -367,6 +375,8 @@ private:
     tsl::robin_map<u64, Sampler> samplers;
     std::unordered_set<ImageId> download_images;
     u64 total_used_memory = 0;
+    u64 image_bytes = 0; ///< guest size of the registered images
+    u64 image_count = 0;
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;
     u64 critical_gc_memory = 0;

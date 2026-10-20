@@ -19,6 +19,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/frame_path_stats.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/image_upload_policy.h"
 #include "video_core/texture_cache/tile_manager.h"
@@ -63,6 +64,14 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                       DEFAULT_CRITICAL_GC_MEMORY));
     trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
+    if (FramePathStats::Enabled()) {
+        std::fprintf(stderr,
+                     "TEXTURE_GC budget_mb=%lld trigger_mb=%llu pressure_mb=%llu critical_mb=%llu\n",
+                     static_cast<long long>(device_local_memory >> 20),
+                     static_cast<unsigned long long>(trigger_gc_memory >> 20),
+                     static_cast<unsigned long long>(pressure_gc_memory >> 20),
+                     static_cast<unsigned long long>(critical_gc_memory >> 20));
+    }
 }
 
 TextureCache::~TextureCache() = default;
@@ -969,6 +978,8 @@ void TextureCache::RegisterImage(ImageId image_id) {
     image.flags |= ImageFlagBits::Registered;
     image_generation.fetch_add(1, std::memory_order_release);
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
+    image_bytes += Common::AlignUp(image.info.guest_size, 1024);
+    ++image_count;
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
     ForEachPage(image.info.guest_address, image.info.guest_size,
                 [this, image_id](u64 page) { page_table[page].push_back(image_id); });
@@ -982,6 +993,8 @@ void TextureCache::UnregisterImage(ImageId image_id) {
     image_generation.fetch_add(1, std::memory_order_release);
     lru_cache.Free(image.lru_id);
     total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);
+    image_bytes -= Common::AlignUp(image.info.guest_size, 1024);
+    --image_count;
     ForEachPage(image.info.guest_address, image.info.guest_size, [this, image_id](u64 page) {
         const auto page_it = page_table.find(page);
         if (page_it == nullptr) {
