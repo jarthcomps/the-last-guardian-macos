@@ -17,8 +17,10 @@ struct ImageGcPlan {
 /// The memory thresholds come from the Vulkan device budget, which on a unified-memory Mac is
 /// most of RAM, so outdoors in The Last Guardian collection never started (trigger 8.7 GB, usage
 /// 3.5 GB) while the game created about 20 small images a second at new addresses (4x4 R32F,
-/// per-frame scratch) that were never freed: 7,000 images after five minutes, and the command
-/// thread slowed from 17 to 37 ms per frame. SHADPS4_TEXTURE_GC_IMAGES=N (`image_limit`) also
+/// per-frame scratch) that were never freed: 7,000 images after five minutes (about 900 MB of
+/// images in all, flat). In alternating 5-minute runs the leak did not change the frame rate
+/// (with 23.5/23.7 FPS, without 21.4/24.5), so this stays off. SHADPS4_TEXTURE_GC_IMAGES=N
+/// (`image_limit`) also
 /// collects, as under memory pressure, once N images are registered, and aggressively from 2N.
 /// 0 keeps the memory thresholds alone.
 constexpr ImageGcPlan PlanImageGc(std::uint64_t used, std::uint64_t trigger,
