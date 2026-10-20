@@ -451,6 +451,8 @@ void Rasterizer::TouchCachedTarget(CachedTarget& cache, VideoCore::ImageId image
     // A reused target only needs one touch per GC tick (once per guest submission) to stay
     // out of the collector's reach; touching takes the texture cache lock, and with
     // SHADPS4_TOUCH_TARGETS_ONCE=1 the other ~250,000 touches a second outdoors are skipped.
+    // Measured outdoors (tower view, alternating 150 s runs): with 24.4/24.0 FPS, without
+    // 25.7/25.5, so it stays off.
     static const bool once = Common::EnvOverrideNamed("SHADPS4_TOUCH_TARGETS_ONCE", false);
     const u64 tick = texture_cache.GcTick();
     if (!VideoCore::NeedsTargetTouch(once, cache.touched_tick, tick)) {
