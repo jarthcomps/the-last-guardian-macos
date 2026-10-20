@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
+#include "common/env_switch.h"
 #include "common/scope_exit.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -21,6 +22,7 @@
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/frame_path_stats.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include "video_core/texture_cache/texture_gc_policy.h"
 #include "video_core/texture_cache/image_upload_policy.h"
 #include "video_core/texture_cache/tile_manager.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
@@ -980,6 +982,22 @@ void TextureCache::RegisterImage(ImageId image_id) {
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
     image_bytes += Common::AlignUp(image.info.guest_size, 1024);
     ++image_count;
+    if (FramePathStats::Level() >= 4) {
+        // Diagnostic: every registered image (why the image count grows outdoors).
+        u64 on_page = 0;
+        ForEachImageInRegion(image.info.guest_address, 1,
+                             [&](ImageId, Image&) { ++on_page; });
+        std::fprintf(stderr,
+                     "IMAGE_REG id=%u addr=%#llx guest_size=%llu %ux%ux%u fmt=%d type=%d tile=%d "
+                     "mips=%u layers=%u images=%llu on_page=%llu\n",
+                     image_id.index, static_cast<unsigned long long>(image.info.guest_address),
+                     static_cast<unsigned long long>(image.info.guest_size), image.info.size.width,
+                     image.info.size.height, image.info.size.depth,
+                     static_cast<int>(image.info.pixel_format), static_cast<int>(image.info.type),
+                     static_cast<int>(image.info.tile_mode), image.info.resources.levels,
+                     image.info.resources.layers, static_cast<unsigned long long>(image_count),
+                     static_cast<unsigned long long>(on_page));
+    }
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
     ForEachPage(image.info.guest_address, image.info.guest_size,
                 [this, image_id](u64 page) { page_table[page].push_back(image_id); });
@@ -1123,7 +1141,12 @@ void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
     }
-    if (total_used_memory < trigger_gc_memory) {
+    static const u64 image_limit = Common::EnvOverrideNumberNamed("SHADPS4_TEXTURE_GC_IMAGES", 0);
+    const auto plan = [&] {
+        return PlanImageGc(total_used_memory, trigger_gc_memory, pressure_gc_memory,
+                           critical_gc_memory, image_count, image_limit);
+    };
+    if (!plan().run) {
         return;
     }
     std::scoped_lock lock{mutex};
@@ -1133,8 +1156,9 @@ void TextureCache::GarbageCollectImages() {
     size_t num_deletions = 0;
 
     const auto configure = [&](bool allow_aggressive) {
-        pressured = total_used_memory >= pressure_gc_memory;
-        aggresive = allow_aggressive && total_used_memory >= critical_gc_memory;
+        const ImageGcPlan current = plan();
+        pressured = current.pressured;
+        aggresive = allow_aggressive && current.aggressive;
         ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 16;
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
         num_deletions = aggresive ? 40 : pressured ? 20 : 10;
@@ -1176,7 +1200,7 @@ void TextureCache::GarbageCollectImages() {
     configure(false);
     lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
 
-    if (total_used_memory >= critical_gc_memory) {
+    if (plan().aggressive) {
         // If we are still over the critical limit, run an aggressive GC
         configure(true);
         lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
