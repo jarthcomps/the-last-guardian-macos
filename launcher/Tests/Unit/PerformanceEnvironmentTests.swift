@@ -78,6 +78,18 @@ final class PerformanceEnvironmentTests: XCTestCase {
                                                     experimental: true), ["PATH": "/bin"])
     }
 
+    func testCopyShortcutSwitchIsSeparateAndOffByDefault() {
+        let base = PerformanceEnvironment.apply(to: [:], metalTweaks: true)
+        XCTAssertNil(base["SHADPS4_ENABLE_A912_COPY_HLE"])
+        let on = PerformanceEnvironment.apply(to: [:], metalTweaks: true, copyShortcut: true)
+        XCTAssertEqual(on["SHADPS4_ENABLE_A912_COPY_HLE"], "1")
+        XCTAssertEqual(on["SHADPS4_A912_IMAGE_SOURCE_COPY"], "1")
+        XCTAssertNil(on["SHADPS4_HOT_WRITE_PAGES"]) // independent of Experimental speedups
+        XCTAssertNil(PerformanceEnvironment.apply(to: [:], metalTweaks: false,
+                                                  copyShortcut: true)["SHADPS4_ENABLE_A912_COPY_HLE"])
+        XCTAssertFalse(LauncherSettings().copyShaderShortcut)
+    }
+
     func testMemoryWarningOnlyBelowWhatTheGameNeeds() {
         XCTAssertNil(MemoryCheck.warning(availableBytes: 14 << 30))
         XCTAssertNil(MemoryCheck.warning(availableBytes: MemoryCheck.neededBytes))

@@ -70,6 +70,7 @@ struct LauncherSettings: Codable {
     var metalTweaks = true
     var fastShaderMath = true
     var experimentalSpeedups = false
+    var copyShaderShortcut = false
 
     init() {}
 
@@ -88,6 +89,8 @@ struct LauncherSettings: Codable {
             try c.decodeIfPresent(Bool.self, forKey: .fastShaderMath) ?? defaults.fastShaderMath
         experimentalSpeedups = try c.decodeIfPresent(Bool.self, forKey: .experimentalSpeedups)
             ?? defaults.experimentalSpeedups
+        copyShaderShortcut = try c.decodeIfPresent(Bool.self, forKey: .copyShaderShortcut)
+            ?? defaults.copyShaderShortcut
     }
 }
 
@@ -440,7 +443,8 @@ final class Launcher: ObservableObject {
         env["DYLD_LIBRARY_PATH"] = engineDir.path
         return PerformanceEnvironment.apply(to: env, metalTweaks: settings.metalTweaks,
                                             fastShaderMath: settings.fastShaderMath,
-                                            experimental: settings.experimentalSpeedups)
+                                            experimental: settings.experimentalSpeedups,
+                                            copyShortcut: settings.copyShaderShortcut)
     }
 
     func start(_ arguments: [String], what: String) {
@@ -675,6 +679,11 @@ struct ContentView: View {
                            isOn: $launcher.settings.experimentalSpeedups)
                         .disabled(!launcher.settings.metalTweaks)
                         .help("Changes still being tested in play. Turn off if anything goes wrong.")
+                    Toggle("Copy shader shortcut (testing)",
+                           isOn: $launcher.settings.copyShaderShortcut)
+                        .disabled(!launcher.settings.metalTweaks)
+                        .help("Replaces one of the game's copy shaders with a plain GPU copy. "
+                              + "Turn off if anything looks wrong.")
                 }.padding(6)
             }
             if !launcher.rosettaInstalled {

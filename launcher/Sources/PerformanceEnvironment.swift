@@ -17,12 +17,24 @@ enum PerformanceEnvironment {
         "KK_SHADPS4_GPU_KEEPALIVE": "2",
     ]
 
+    /// The engine's shortcut for the game's copy shader a912f7d4 (it copies data with a plain
+    /// GPU copy instead of running the shader). Busier while Trico's lightning fires; separate
+    /// launcher toggle for testing in play.
+    static let copyShortcutSwitches: [String: String] = [
+        "SHADPS4_ENABLE_A912_COPY_HLE": "1",
+        "SHADPS4_A912_IMAGE_SOURCE_COPY": "1",
+    ]
+
     static func apply(to inherited: [String: String], metalTweaks: Bool,
                       fastShaderMath: Bool = true,
-                      experimental: Bool = false) -> [String: String] {
+                      experimental: Bool = false,
+                      copyShortcut: Bool = false) -> [String: String] {
         var env = inherited
         if metalTweaks && experimental {
             env.merge(experimentalSwitches) { _, new in new }
+        }
+        if metalTweaks && copyShortcut {
+            env.merge(copyShortcutSwitches) { _, new in new }
         }
         if metalTweaks {
             env["MESA_KK_DISABLE_WORKAROUNDS"] = fastShaderMath ? "12,13,14,17" : "12,13"
