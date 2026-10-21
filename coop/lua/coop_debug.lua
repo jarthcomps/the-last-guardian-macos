@@ -24,7 +24,7 @@ end
 
 function CoopDebug.Print(fmt, ...)
 	if not CoopDebug.enabled then return end
-	local ok, text = pcall(string.format, tostring(fmt), unpack(arg))
+	local ok, text = pcall(string.format, tostring(fmt), ...)
 	if not ok then text = tostring(fmt) end
 	CoopDebug.Raw(CoopDebug.pad, text)
 end

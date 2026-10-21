@@ -6,13 +6,20 @@ apply. The mod is installed into the private runtime's CUSA03745-mods only for t
 removed afterwards; the user's own game folders are never touched.
 
     python3 -m tlg_coop.probe TAG [--seconds 40] [--input "20:button cross 1"] [--no-pad2]
-        [--engine PATH --coop] [--strategy interest|forward|slide]
+        [--engine PATH --coop] [--strategy goal|interest|forward] [--save DIR]
 
 The probe always installs the scripts with the debug channel on (its own coop_config.lua).
+
+--save DIR plays another save (DIR is a CUSA03745 save folder, or a folder holding one). The
+runner rebuilds the private runtime's home from a snapshot on every start, so the save is put in
+both places: the snapshot (what the game loads) and the runtime. The originals are moved aside to
+logs/coop-20261021/saves/runtime-backup-<tag>/ and moved back afterwards, untouched; both folders
+are shared with the performance runners.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -29,6 +36,10 @@ OUTPUT = "logs/coop-20261021"
 ENGINE = "logs/plan-20261018/engine-release-117"
 DRIVER = "logs/plan-20261018/driver-release-117.dylib"
 LOG_FILTER = "*:Warning Lib.Pad:Debug Loader:Info"
+TITLE = "CUSA03745"
+SAVE = "1000/savedata/" + TITLE    # inside a user home
+SNAPSHOTS = {False: "logs/live-profile-20261017/autosave-snapshot/home",   # as the runner picks them
+             True: "logs/checkpoint-performance-20261017/snapshot-user/home"}
 
 
 def engine_sha256(engine: Path) -> str:
@@ -50,6 +61,47 @@ def probe_lua_dir(dest: Path, strategy: str, lua_dir: Path = install.LUA_DIR) ->
         shutil.copy2(script, dest / script.name)
     (dest / "coop_config.lua").write_text(probe_config(strategy))
     return dest
+
+
+def save_source(save: Path) -> Path:
+    """The CUSA03745 folder of a --save argument."""
+    if (save / TITLE).is_dir():
+        save = save / TITLE
+    if not (save / "sce_sdmemory").is_dir():
+        raise ValueError(f"{save} is not a {TITLE} save folder (no sce_sdmemory)")
+    return save
+
+
+def save_targets(root: Path, pool: bool) -> dict[str, Path]:
+    """The save folders the probe replaces: the runner's snapshot and the private runtime's."""
+    return {"snapshot": root / SNAPSHOTS[pool] / SAVE, "run": root / RUNTIME / "user/home" / SAVE}
+
+
+@contextlib.contextmanager
+def swapped_save(save: Path, targets: dict[str, Path], backup: Path):
+    """Put a copy of `save` at every target; afterwards put the originals back as they were."""
+    if backup.exists():
+        raise RuntimeError(f"{backup} already exists; refusing to mix up save backups")
+    source = save_source(save)
+    moved: dict[str, Path] = {}
+    try:
+        for name, target in targets.items():
+            if target.exists():
+                aside = backup / name / TITLE
+                aside.parent.mkdir(parents=True)
+                target.rename(aside)
+                moved[name] = aside
+            shutil.copytree(source, target, symlinks=True)
+        yield
+    finally:
+        for name, target in targets.items():
+            if target.exists():
+                shutil.rmtree(target)
+            if name in moved:
+                moved[name].rename(target)
+                moved[name].parent.rmdir()
+        if backup.exists():
+            backup.rmdir()
 
 
 def runner_command(root: Path, tag: str, seconds: float, patch: Path, inputs: list[str],
@@ -94,8 +146,9 @@ def main(argv=None) -> int:
                    help="extra argument passed to guardian_outdoor_experiments.py")
     p.add_argument("--engine", type=Path, help="emulator build to run (default: release 117)")
     p.add_argument("--coop", action="store_true", help="turn on the emulator's co-op mode")
-    p.add_argument("--strategy", default="interest", choices=("interest", "forward", "slide"),
+    p.add_argument("--strategy", default="goal", choices=("goal", "interest", "forward"),
                    help="how the scripts steer Trico")
+    p.add_argument("--save", type=Path, help="play this save (copied in, originals put back)")
     args = p.parse_args(argv)
 
     root = ROOT
@@ -113,11 +166,21 @@ def main(argv=None) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         lua_dir = probe_lua_dir(Path(tmp), args.strategy)
         print(json.dumps({"install": install.install(game, lua_dir)}), flush=True)
+    save = None
+    if args.save:
+        save = args.save if args.save.is_absolute() else root / args.save
+        save_source(save)
     try:
         cmd = runner_command(root, args.tag, args.seconds, patch, args.input, args.runner_arg,
                              engine, args.coop)
-        print("running:", " ".join(cmd), flush=True)
-        code = subprocess.call(cmd, cwd=root)
+        with contextlib.ExitStack() as stack:
+            if save:
+                backup = out_dir / "saves" / f"runtime-backup-{args.tag}"
+                stack.enter_context(swapped_save(save, save_targets(root, "--pool" in args.runner_arg),
+                                                 backup))
+                print(f"playing save {save}; originals kept in {backup} for the run", flush=True)
+            print("running:", " ".join(cmd), flush=True)
+            code = subprocess.call(cmd, cwd=root)
     finally:
         install.uninstall(game)
         print("co-op mod removed from the private runtime", flush=True)

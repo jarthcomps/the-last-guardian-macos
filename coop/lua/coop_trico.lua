@@ -3,30 +3,43 @@
 -- The stick picks a goal a few metres ahead of Trico, relative to the camera, and Trico's own
 -- AI walks there (paths, turns, jumps and animation stay the game's). Several ways of handing the
 -- goal to the AI are kept while they are compared on the real game; CoopTrico.strategy picks one:
+--   "goal":     the way the developers' auto-Trico leads Trico (condordebugautotrico.lua): an
+--               interest entity of type intr_AutoTorico sits on the goal with the top event
+--               level (addMax, above the boy's loudest call). Trico's interest system picks it
+--               and its approach walks there (Escape approach data, 1 m); nothing else of the AI
+--               is overridden. The entity is excluded again when the stick is released.
 --   "interest": the boy's pointing instruction target is moved to the goal and Trico is told
 --               to be interested in it; the approach destination is overwritten with the goal.
 --   "forward":  the move manager is asked for a free forward move towards the overwritten
---               approach destination.
---   "slide":    the move manager is asked to slide to the goal (short adjustments only).
--- With the stick released, Trico's AI is left alone.
+--               approach destination (the game stops free moves while Trico is injured).
+-- With the stick released, Trico is asked to stop and its AI is left alone.
 
 CoopTrico = CoopTrico or {}
 
 local PROXY_NAME = "PlayerAi2Instruction_InstProxyEntity"
+local GOAL_NAME = "CoopTrico_Goal"
+local GOAL_INTEREST = "intr_AutoTorico"
+local GOAL_LEVEL_NAME = "CoopTrico_Steer"
+local GOAL_LEVEL = "addMax"
+local CAMERA_NAME = "_trico_camera"
 local DEADZONE = 0.3
-local GOAL_DISTANCE = 6.0      -- metres ahead of Trico at full stick
-local MIN_GOAL_DISTANCE = 3.0
+local GOAL_DISTANCE = 8.0      -- metres ahead of Trico at full stick
+local MIN_GOAL_DISTANCE = 4.0
+local NAV_STEPS = { 1.0, 0.6, 0.35 }  -- shorter goals to try when the full one is off Trico's navmesh
 local REFRESH = 0.3            -- seconds between goal updates
 local REPORT = 0.5             -- seconds between debug reports
 
-CoopTrico.strategy = CoopTrico.strategy or "interest"
+CoopTrico.strategy = CoopTrico.strategy or "goal"
 
 function CoopTrico.Reset()
 	CoopTrico.steering = false
 	CoopTrico.goal = nil
+	CoopTrico.goalLive = false     -- the goal entity has Trico's interest
 	CoopTrico.refreshIn = 0
 	CoopTrico.reportIn = 0
 	CoopTrico.lastError = nil
+	CoopTrico.forward = nil        -- { x, z, source } of the last goal
+	CoopTrico.nav = nil
 end
 
 local function Props()
@@ -46,21 +59,40 @@ function CoopTrico.Stick(input)
 	return x, y, len
 end
 
--- Camera forward on the ground plane, as (x, z), from the camera to Trico.
-local function CameraForward(tricoPos)
+local function Flat(x, z)
+	local len = math.sqrt(x * x + z * z)
+	if len > 0.1 then return x / len, z / len end
+	return nil
+end
+
+local function CameraPos()
+	local cam = FindObject and FindObject(CAMERA_NAME)
+	if cam and cam.worldPosition then return Vector(cam.worldPosition) end
 	local cm = FindObject and FindObject("CameraManager")
-	local cam = cm and cm.camera
-	local pos = cam and cam.worldPosition
+	cam = cm and cm.camera
+	return cam and cam.worldPosition
+end
+
+-- Camera forward on the ground plane, as (x, z, source): the game camera's view direction (as
+-- s16_soldiersden.lua reads it), else the direction from the camera to Trico.
+function CoopTrico.CameraForward(tricoPos)
+	local cam = FindObject and FindObject(CAMERA_NAME)
+	local rot = cam and cam.worldRotation
+	if rot then
+		local view = Vector(0, 0, 1):Rotate(rot)
+		local fx, fz = Flat(view.X, view.Z)
+		if fx then return fx, fz, "view" end
+	end
+	local pos = CameraPos()
 	if pos then
-		local dx, dz = tricoPos.X - pos.X, tricoPos.Z - pos.Z
-		local len = math.sqrt(dx * dx + dz * dz)
-		if len > 0.01 then return dx / len, dz / len end
+		local fx, fz = Flat(tricoPos.X - pos.X, tricoPos.Z - pos.Z)
+		if fx then return fx, fz, "cam" end
 	end
 	return nil
 end
 
--- The goal for a stick vector: camera-relative, on Trico's height.
-function CoopTrico.GoalFor(tricoPos, tricoDirX, tricoDirZ, sx, sy, len, fx, fz)
+-- The goal for a stick vector: camera-relative, on Trico's height. `scale` shortens it.
+function CoopTrico.GoalFor(tricoPos, tricoDirX, tricoDirZ, sx, sy, len, fx, fz, scale)
 	if not fx then fx, fz = tricoDirX, tricoDirZ end
 	-- right = forward rotated -90 degrees about Y (looking along +Z, right is -X)
 	local rx, rz = -fz, fx
@@ -69,8 +101,15 @@ function CoopTrico.GoalFor(tricoPos, tricoDirX, tricoDirZ, sx, sy, len, fx, fz)
 	local dlen = math.sqrt(dx * dx + dz * dz)
 	if dlen < 0.001 then return nil end
 	dx, dz = dx / dlen, dz / dlen
-	local dist = MIN_GOAL_DISTANCE + (GOAL_DISTANCE - MIN_GOAL_DISTANCE) * len
+	local dist = (MIN_GOAL_DISTANCE + (GOAL_DISTANCE - MIN_GOAL_DISTANCE) * len) * (scale or 1)
 	return tricoPos.X + dx * dist, tricoPos.Y, tricoPos.Z + dz * dist, dx, dz
+end
+
+-- Is `to` on Trico's navmesh island (no special edge on the way)? Unknown counts as yes.
+local function Reachable(props, from, to)
+	local ok, same = pcall(Ai2.Utils.Navmesh.CheckSameIsland, props, from, to, true)
+	if not ok then return true, "?" end
+	return same, same and "y" or "n"
 end
 
 local function OverwriteApproach(props, goal, dir)
@@ -81,7 +120,35 @@ local function OverwriteApproach(props, goal, dir)
 	})
 end
 
+-- The goal interest entity (made the way auto-Trico makes its own), created once per world.
+local function GoalEntity()
+	local root = FindObject(GOAL_NAME)
+	if root then return root, false end
+	root = NewObject("SceneRoot")
+	Connect("_world", root)
+	RenameObject(root._object_name, GOAL_NAME)
+	local intr = NewObject("GameObjectExt")
+	intr.Type = "Interest"
+	intr.SubType = GOAL_INTEREST
+	Connect(root, intr)
+	RenameObject(intr._object_name, GOAL_NAME .. "_Interest")
+	return root, true
+end
+
 local Steer = {}
+
+function Steer.goal(props, goal, dir)
+	local ai = props.currentInfo.ai2Ext
+	local root, created = GoalEntity()
+	SetWorldPosition(root, tostring(goal))
+	if created or not CoopTrico.goalLive then
+		Ai2.Utils.RegisterInterest(ai, root)
+		Ai2.Utils.InterestExclusionSwitching(ai, root, false)
+		CoopTrico.goalLive = true
+	end
+	-- the same name re-sets the addition, so this keeps the level while steering
+	Ai2.Utils.InterestLevelAddition(ai, root, GOAL_LEVEL_NAME, GOAL_LEVEL)
+end
 
 function Steer.interest(props, goal, dir)
 	local ai = props.currentInfo.ai2Ext
@@ -100,16 +167,30 @@ function Steer.forward(props, goal, dir)
 	props.moveMngr:RequestForward({ isFreeMove = true, goalPos = goal, goalDir = dir })
 end
 
-function Steer.slide(props, goal, dir)
-	props.moveMngr:RequestSlide({ destination = goal, destinationDir = dir })
+local function DropGoal(props)
+	if not CoopTrico.goalLive then return end
+	CoopTrico.goalLive = false
+	local root = FindObject(GOAL_NAME)
+	local ai = props and props.currentInfo and props.currentInfo.ai2Ext
+	if not root or not ai then return end
+	pcall(Ai2.Utils.ResetInterestLevelAddition, ai, root, GOAL_LEVEL_NAME)
+	pcall(Ai2.Utils.InterestExclusionSwitching, ai, root, true)
 end
 
 local function Release(props)
 	CoopTrico.steering = false
 	CoopTrico.goal = nil
+	DropGoal(props)
 	if not props then return end
-	pcall(Ai2.Utils.ResetAllInstructionLevel, props.currentInfo.ai2Ext)
+	if CoopTrico.strategy == "interest" then
+		pcall(Ai2.Utils.ResetAllInstructionLevel, props.currentInfo.ai2Ext)
+	end
 	pcall(function() props.moveMngr:RequestStop(nil, props) end)
+end
+
+local function Vec(v)
+	if not v then return "-" end
+	return string.format("%.1f,%.1f,%.1f", v.X, v.Y, v.Z)
 end
 
 local function Report(props)
@@ -121,12 +202,27 @@ local function Report(props)
 	local intr = info.interestEntity
 	local okName, intrName = pcall(function() return intr and intr:GetName() end)
 	local run = props.moveMngr and props.moveMngr.runningRequest
-	CoopDebug.Print("TR %s %s p=%.1f,%.1f,%.1f g=%s pm=%s rq=%s in=%s md=%s",
+	CoopDebug.Print("TR %s %s p=%.1f,%.1f,%.1f g=%s pm=%s rq=%s in=%s it=%s md=%s",
 		CoopTrico.strategy, CoopTrico.steering and "on" or "off", p.X, p.Y, p.Z,
 		g and string.format("%.1f,%.1f", g.X, g.Z) or "-",
 		tostring(props.plannedMove), tostring(run and run.name),
-		tostring(okName and intrName or "?"),
+		okName and tostring(intrName) or "?", tostring(info.interestType),
 		tostring(info.aiMode and info.aiMode.name))
+
+	local okStage, stage = pcall(Ai2.Condor.StageScripts.GetBoyStageID)
+	local okBoy, boy = pcall(function()
+		local work = info.work
+		if work and work.GetPlayerPos then return work.GetPlayerPos end
+		return Ai2.Utils.GetPlayerAI().pos
+	end)
+	local okCam, cam = pcall(CameraPos)
+	local okF, fx, fz, src = pcall(CoopTrico.CameraForward, p)
+	local f = CoopTrico.forward
+	CoopDebug.Print("TS st=%s inj=%s boy=%s cam=%s f=%s nav=%s goal=%s",
+		tostring(okStage and stage or "?"), tostring(props.isInjuredMovementMode),
+		okBoy and Vec(boy) or "?", okCam and Vec(cam) or "?",
+		okF and fx and string.format("%.2f,%.2f,%s", fx, fz, src) or "-",
+		tostring(CoopTrico.nav), f and string.format("%.2f,%.2f,%s", f[1], f[2], f[3]) or "-")
 end
 
 -- Call once per frame with the Trico player's input (nil when nobody plays Trico).
@@ -153,15 +249,25 @@ function CoopTrico.Update(dt, input)
 	local info = props.currentInfo
 	local pos = info.aiPos
 	local dirXZ = info.ai2Ext and info.ai2Ext.dirXZ
-	local fx, fz = CameraForward(pos)
-	local gx, gy, gz, dx, dz = CoopTrico.GoalFor(pos, dirXZ and dirXZ.X or 0, dirXZ and dirXZ.Z or 1,
-		sx, sy, len, fx, fz)
-	if not gx then return end
-	local goal = Vector(gx, gy, gz)
-	local dir = Vector(dx, 0, dz)
+	local okF, fx, fz, src = pcall(CoopTrico.CameraForward, pos)
+	if not okF then fx, fz, src = nil, nil, nil end
+	CoopTrico.forward = { fx or 0, fz or 0, src or "trico" }
+	local goal, dir
+	for _, scale in ipairs(NAV_STEPS) do
+		local gx, gy, gz, dx, dz = CoopTrico.GoalFor(pos, dirXZ and dirXZ.X or 0,
+			dirXZ and dirXZ.Z or 1, sx, sy, len, fx, fz, scale)
+		if not gx then return end
+		local candidate = Vector(gx, gy, gz)
+		local ok, nav = Reachable(props, pos, candidate)
+		if not goal or ok then
+			goal, dir = candidate, Vector(dx, 0, dz)
+			CoopTrico.nav = nav .. string.format("%.2f", scale)
+		end
+		if ok then break end
+	end
 	CoopTrico.steering = true
 	CoopTrico.goal = goal
-	local steer = Steer[CoopTrico.strategy] or Steer.interest
+	local steer = Steer[CoopTrico.strategy] or Steer.goal
 	local ok, err = pcall(steer, props, goal, dir)
 	if not ok and err ~= CoopTrico.lastError then
 		CoopTrico.lastError = err

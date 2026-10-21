@@ -16,7 +16,7 @@ check(#Harness.lightbar == 1 and Harness.lightbar[1][2] == 0xc00fee, "only the h
 
 -- with the debug channel: reports and events
 CoopDebug.enabled = true
-Input.touch2.data[2] = { x = 4096 + 1 + 4, y = 0, id = 192 } -- solo, playing Trico
+Input.touch2.data[2] = { x = 8192 + 1 + 4, y = 0, id = 192 } -- solo, playing Trico
 Harness.Tick(1 / 60)
 check(#Harness.Find("^COOP event roles") == 1, "roles event reported")
 check(#Harness.Find("^COOP t=.* on=true boy=false trico=true") == 1, "status line")
@@ -24,12 +24,14 @@ check(#Harness.Find("^COOP t=.* on=true boy=false trico=true") == 1, "status lin
 -- the Trico player's stick steers Trico
 Harness.tricoProps = Harness.NewTricoProps(0, 0, 0)
 Harness.objects.PlayerAi2Instruction_InstProxyEntity = {}
-Input.pad2.LY, Input.pad2.LMag = 1, 1
+Input.touch2.data[1] = { x = 128 + 256 * 0, y = 128 + 256 * 128, id = 193 } -- stick up
 Harness.Tick(1 / 60)
-check(CoopTrico.steering, "steering from pad 2")
+check(CoopTrico.steering, "steering from the Trico player's stick")
+Harness.Tick(1 / 60, 61) -- the status report comes once a second
+check(#Harness.Find("^TP L=0.00,1.00 R=0.00,0.00 hold=%[%]") >= 1, "TP line")
 
 -- giving up the Trico role releases Trico
-Input.touch2.data[2] = { x = 4096 + 1 + 2, y = 1, id = 192 }
+Input.touch2.data[2] = { x = 8192 + 1 + 2, y = 1, id = 192 }
 Harness.Tick(1 / 60)
 check(not CoopTrico.steering, "released when nobody plays Trico")
 check(#Harness.Find("^COOP event swap boy") == 1, "swap event")

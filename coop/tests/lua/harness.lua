@@ -27,14 +27,50 @@ Harness.objects = {}
 function FindObject(name) return Harness.objects[name] end
 
 local VectorMT = { __tostring = function(v) return string.format("%g,%g,%g", v.X, v.Y, v.Z) end }
-function Vector(x, y, z) return setmetatable({ X = x, Y = y, Z = z }, VectorMT) end
+VectorMT.__index = {
+	-- rotate by a unit quaternion { X, Y, Z, W }
+	Rotate = function(v, q)
+		local tx = 2 * (q.Y * v.Z - q.Z * v.Y)
+		local ty = 2 * (q.Z * v.X - q.X * v.Z)
+		local tz = 2 * (q.X * v.Y - q.Y * v.X)
+		return Vector(v.X + q.W * tx + (q.Y * tz - q.Z * ty),
+			v.Y + q.W * ty + (q.Z * tx - q.X * tz),
+			v.Z + q.W * tz + (q.X * ty - q.Y * tx))
+	end,
+}
+function Vector(x, y, z)
+	if type(x) == "table" then x, y, z = x.X, x.Y, x.Z end
+	return setmetatable({ X = x, Y = y, Z = z }, VectorMT)
+end
 Harness.moved = {}
 function SetWorldPosition(obj, text) Harness.moved[#Harness.moved + 1] = { obj, text } end
+
+-- engine objects: NewObject / Connect / RenameObject keep Harness.objects by name
+Harness.created = {}
+local serial = 0
+function NewObject(class)
+	serial = serial + 1
+	local obj = { class = class, _object_name = class .. serial, children = {} }
+	Harness.created[#Harness.created + 1] = obj
+	Harness.objects[obj._object_name] = obj
+	return obj
+end
+function Connect(parent, child)
+	if type(parent) == "string" then parent = Harness.objects[parent] or { children = {} } end
+	parent.children[#parent.children + 1] = child
+	child.parent = parent
+end
+function RenameObject(old, new)
+	local obj = Harness.objects[old]
+	Harness.objects[old] = nil
+	obj._object_name = new
+	Harness.objects[new] = obj
+end
 
 -- Trico's AI as far as coop_trico.lua touches it; Harness.calls records what it was asked.
 Harness.calls = {}
 local function record(name)
-	return function(...) Harness.calls[#Harness.calls + 1] = { name, unpack(arg) } end
+	return function(...) Harness.calls[#Harness.calls + 1] = { name, ... } end
 end
 function Harness.NewTricoProps(x, y, z)
 	local mngr = {}
@@ -44,14 +80,23 @@ function Harness.NewTricoProps(x, y, z)
 	return { currentInfo = { aiPos = Vector(x, y, z), ai2Ext = { dirXZ = Vector(0, 0, 1) } },
 		moveMngr = mngr, approach = { overwrite = {} } }
 end
+Harness.reachable = function(from, to) return true end
 Ai2 = {
 	Utils = {
 		GetCondorAIProps = function() return Harness.tricoProps end,
 		RegisterInterest = record("interest"),
 		InstructionAddition = record("instruction"),
 		ResetAllInstructionLevel = record("reset"),
+		InterestLevelAddition = record("level"),
+		ResetInterestLevelAddition = record("levelReset"),
+		InterestExclusionSwitching = record("exclude"),
+		GetPlayerAI = function() return { pos = Vector(1, 0, -2) } end,
+		Navmesh = {
+			CheckSameIsland = function(props, from, to) return Harness.reachable(from, to) end,
+		},
 	},
 	Approach = { Overwrite = { Request = record("overwrite") } },
+	Condor = { StageScripts = { GetBoyStageID = function() return "s05" end } },
 }
 function Harness.CallsNamed(name)
 	local hits = {}

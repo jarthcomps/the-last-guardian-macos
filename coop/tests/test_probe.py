@@ -1,3 +1,4 @@
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,6 +50,77 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(summary["messages"], ["[2] hi"])
         self.assertEqual(summary["emulator_coop"], [])
         self.assertTrue(summary["mods_folder_seen"])
+
+
+def make_save(folder: Path, data: bytes) -> Path:
+    (folder / "sce_sdmemory/sce_sys").mkdir(parents=True)
+    (folder / "sce_sdmemory/memory.dat").write_bytes(data)
+    (folder / "sce_sdmemory/sce_sys/param.sfo").write_bytes(b"sfo-" + data)
+    return folder
+
+
+def tree(folder: Path) -> dict:
+    return {str(f.relative_to(folder)): (f.read_bytes(), f.stat().st_mtime_ns)
+            for f in sorted(folder.rglob("*")) if f.is_file()}
+
+
+class SaveSwapTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.save = make_save(self.root / "saves/main" / probe.TITLE, b"main")
+        self.targets = probe.save_targets(self.root, pool=False)
+        for name, target in self.targets.items():
+            make_save(target, name.encode())
+        self.before = {name: tree(t) for name, t in self.targets.items()}
+        self.backup = self.root / "saves/runtime-backup-t"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_targets_are_the_runner_snapshot_and_the_private_runtime(self):
+        self.assertEqual(self.targets["snapshot"], self.root / probe.SNAPSHOTS[False] /
+                         "1000/savedata/CUSA03745")
+        self.assertEqual(self.targets["run"], self.root / probe.RUNTIME /
+                         "user/home/1000/savedata/CUSA03745")
+        self.assertEqual(probe.save_targets(self.root, pool=True)["snapshot"],
+                         self.root / probe.SNAPSHOTS[True] / "1000/savedata/CUSA03745")
+
+    def test_save_is_in_place_during_the_run_and_originals_come_back(self):
+        with probe.swapped_save(self.save.parent, self.targets, self.backup):
+            for target in self.targets.values():
+                self.assertEqual((target / "sce_sdmemory/memory.dat").read_bytes(), b"main")
+            self.assertEqual((self.backup / "snapshot/CUSA03745/sce_sdmemory/memory.dat")
+                             .read_bytes(), b"snapshot")
+            # the game writes to its copy; the source save must not change
+            (self.targets["run"] / "sce_sdmemory/memory.dat").write_bytes(b"autosaved")
+        self.assertEqual({n: tree(t) for n, t in self.targets.items()}, self.before)
+        self.assertEqual((self.save / "sce_sdmemory/memory.dat").read_bytes(), b"main")
+        self.assertFalse(self.backup.exists())
+
+    def test_originals_come_back_when_the_run_fails(self):
+        with self.assertRaises(KeyboardInterrupt):
+            with probe.swapped_save(self.save, self.targets, self.backup):
+                raise KeyboardInterrupt
+        self.assertEqual({n: tree(t) for n, t in self.targets.items()}, self.before)
+        self.assertFalse(self.backup.exists())
+
+    def test_a_missing_original_stays_missing(self):
+        shutil.rmtree(self.targets["run"])
+        with probe.swapped_save(self.save, self.targets, self.backup):
+            self.assertTrue((self.targets["run"] / "sce_sdmemory/memory.dat").is_file())
+        self.assertFalse(self.targets["run"].exists())
+        self.assertEqual(tree(self.targets["snapshot"]), self.before["snapshot"])
+
+    def test_refuses_a_non_save_folder_and_an_existing_backup(self):
+        with self.assertRaises(ValueError):
+            with probe.swapped_save(self.root / "saves", self.targets, self.backup):
+                pass
+        self.backup.mkdir(parents=True)
+        with self.assertRaises(RuntimeError):
+            with probe.swapped_save(self.save, self.targets, self.backup):
+                pass
+        self.assertEqual({n: tree(t) for n, t in self.targets.items()}, self.before)
 
 
 if __name__ == "__main__":
