@@ -74,6 +74,18 @@ final class PerformanceEnvironmentTests: XCTestCase {
         XCTAssertNil(noDir["KK_SHADPS4_MSL_OVERRIDE_DIR"])
     }
 
+    func testShaderRecipesOnlyWithExperimentalSwitch() {
+        let file = "/tmp/shader-recipes.txt"
+        let on = PerformanceEnvironment.apply(to: [:], metalTweaks: true, experimental: true,
+                                              shaderRecipes: file)
+        XCTAssertEqual(on["KK_SHADPS4_MSL_RECIPES"], file)
+        let off = PerformanceEnvironment.apply(to: [:], metalTweaks: true, experimental: false,
+                                               shaderRecipes: file)
+        XCTAssertNil(off["KK_SHADPS4_MSL_RECIPES"])
+        XCTAssertNil(PerformanceEnvironment.apply(to: [:], metalTweaks: true,
+                                                  experimental: true)["KK_SHADPS4_MSL_RECIPES"])
+    }
+
     func testExperimentalSwitchAddsOnlyItsOwnFlags() {
         let base = PerformanceEnvironment.apply(to: ["PATH": "/bin"], metalTweaks: true)
         let experimental = PerformanceEnvironment.apply(to: ["PATH": "/bin"], metalTweaks: true,

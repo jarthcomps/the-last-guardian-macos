@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Reference implementation of the shader recipe steps (the driver's C code must match it byte
+for byte; see shadps4_msl_recipe.h in driver/kosmickrisp-tlg.patch).
+
+usage: msl-recipe apply <in.metal> <out.metal> <steps>      print the output hash
+       msl-recipe hash <file.metal>                         FNV-1a 64 of the text
+
+<steps> is a ';'-separated list, applied in order, to the normalized generated source (entry
+point = KK_SHADPS4_ENTRY), exactly as the driver dumps it:
+  const-loads     every "*(coherent device " that is not the target of a store becomes
+                  "*(const device " (a store line starts, after spaces, with "*(" or "(*(")
+  branchless      bounds-checked loads become an unconditional load from a known-readable
+                  address plus a select (6-line pattern, see below)
+  strip-guards    remove every "!&buf0.contents[0] ? 1 : "
+  hoist=O+O+...   load the descriptor-table entries at these byte offsets once, right after the
+                  table pointer is set, and use them everywhere
+  maxthreads=N    add [[max_total_threads_per_threadgroup(N)]] before the kernel
+Exit 2 when a step did not apply (the recipe is then invalid for this source)."""
+import sys
+
+ENTRY = 'KK_SHADPS4_ENTRY'
+
+
+def fnv1a64(text):
+    h = 0xcbf29ce484222325
+    for b in text.encode('latin-1'):
+        h ^= b
+        h = (h * 0x100000001b3) & 0xffffffffffffffff
+    return h
+
+
+def indent_of(line):
+    return line[:len(line) - len(line.lstrip(' '))]
+
+
+def is_store(line):
+    s = line.lstrip(' ')
+    return s.startswith('*(') or s.startswith('(*(')
+
+
+def is_ident(s):
+    return s != '' and all(c.isalnum() or c == '_' for c in s)
+
+
+def is_temp(s):  # t<digits>
+    return len(s) > 1 and s[0] == 't' and s[1:].isdigit()
+
+
+def step_const_loads(lines):
+    n = 0
+    out = []
+    for line in lines:
+        if not is_store(line) and '*(coherent device ' in line:
+            n += line.count('*(coherent device ')
+            line = line.replace('*(coherent device ', '*(const device ')
+        out.append(line)
+    return out, n
+
+
+def step_strip_guards(lines):
+    g = '!&buf0.contents[0] ? 1 : '
+    n = sum(l.count(g) for l in lines)
+    return [l.replace(g, '') for l in lines], n
+
+
+def find_table(lines):
+    """The descriptor-table pointer: the first top-level (4-space) line
+    "    X = uint4(*(Q device packed_uint4*)(B + uint(Nu)));" gives B. Returns (B, index of
+    B's only assignment) or (None, None)."""
+    base = None
+    for line in lines:
+        if not line.startswith('    ') or line.startswith('     '):
+            continue
+        body = line[4:]
+        eq = body.find(' = uint4(*(')
+        if eq <= 0 or not is_ident(body[:eq]):
+            continue
+        rest = body[eq + len(' = uint4(*('):]
+        for q in ('coherent device packed_uint4*)(', 'const device packed_uint4*)(',
+                  'device packed_uint4*)('):
+            if rest.startswith(q):
+                rest = rest[len(q):]
+                break
+        else:
+            continue
+        sp = rest.find(' + uint(')
+        if sp <= 0 or not is_temp(rest[:sp]):
+            continue
+        tail = rest[sp + len(' + uint('):]
+        if not tail.endswith('u)));') or not tail[:-len('u)));')].isdigit():
+            continue
+        base = rest[:sp]
+        break
+    if base is None:
+        return None, None
+    assigns = [i for i, l in enumerate(lines) if l.lstrip(' ').startswith(base + ' = ')]
+    if len(assigns) != 1:
+        return None, None
+    return base, assigns[0]
+
+
+def parse_load(line):
+    """"<ind><x> = [W(]*(<q> <ty>*)(<addr>)[)];" -> dict, or None (same rule as the C code)."""
+    ind = indent_of(line)
+    body = line[len(ind):]
+    eq = body.find(' = ')
+    if eq <= 0 or not is_ident(body[:eq]) or not body.endswith(';'):
+        return None
+    x, rhs = body[:eq], body[eq + 3:-1]
+    wrap = None
+    if not rhs.startswith('*('):
+        p = rhs.find('(*(')
+        if p <= 0 or not is_ident(rhs[:p]):
+            return None
+        wrap, rhs = rhs[:p], rhs[p + 1:]
+    # rhs = "*(<q> <ty>*)(<addr>)" plus one more ")" when wrapped
+    close = rhs.find('*)(')
+    if close < 0:
+        return None
+    qt = rhs[2:close]
+    for q in ('coherent device ', 'const device ', 'device '):
+        if qt.startswith(q):
+            qual, ty = q[:-1], qt[len(q):]
+            break
+    else:
+        return None
+    if not is_ident(ty):
+        return None
+    addr = rhs[close + 3:]
+    if wrap is not None:
+        if not addr.endswith('))'):
+            return None
+        addr = addr[:-2]
+    else:
+        if not addr.endswith(')') or addr.endswith('))'):
+            return None
+        addr = addr[:-1]
+    if addr == '':
+        return None
+    return dict(ind=ind, x=x, wrap=wrap, qual=qual, ty=ty, addr=addr)
+
+
+SIZES = {'float': 4, 'uint': 4, 'int': 4, 'half': 2, 'ushort': 2, 'short': 2, 'uchar': 1,
+         'char': 1, 'packed_uint2': 8, 'packed_float2': 8, 'packed_uint4': 16,
+         'packed_float4': 16, 'ulong': 8, 'packed_uint3': 12, 'packed_float3': 12, 'uint2': 8,
+         'float2': 8, 'uint4': 16, 'float4': 16}
+
+
+def parse_assign(line):
+    s = line.lstrip(' ')
+    eq = s.find(' = ')
+    if eq <= 0 or not is_ident(s[:eq]) or not s.endswith(';'):
+        return None
+    return s[:eq], s[eq + 3:-1]
+
+
+def mentions(text, name):
+    i = text.find(name)
+    while i >= 0:
+        before = text[i - 1] if i > 0 else ' '
+        after = text[i + len(name)] if i + len(name) < len(text) else ' '
+        if not (before.isalnum() or before == '_') and not (after.isalnum() or after == '_'):
+            return True
+        i = text.find(name, i + 1)
+    return False
+
+
+def step_branchless(lines):
+    base, base_line = find_table(lines)
+    if base is None:
+        return lines, 0
+    # The pointer is valid after the first top-level load through it.
+    first_use = next(i for i, l in enumerate(lines)
+                     if i > base_line and l.startswith('    ') and not l.startswith('     ')
+                     and ('(' + base + ' + uint(') in l)
+    out, i, n = [], 0, 0
+    while i < len(lines):
+        line = lines[i]
+        s = line.lstrip(' ')
+        if (i > first_use and i + 5 < len(lines) and s.startswith('if (') and s.endswith(') {')
+                and is_temp(s[4:-3])):
+            c = s[4:-3]
+            ind = indent_of(line)
+            ld = parse_load(lines[i + 1])
+            a1 = parse_assign(lines[i + 2])
+            a2 = parse_assign(lines[i + 4])
+            if (ld and a1 and a2 and lines[i + 3].strip() == '} else {'
+                    and lines[i + 5].strip() == '}' and a1[0] == a2[0]
+                    and SIZES.get(ld['ty'], 99) <= 16 and mentions(a1[1], ld['x'])
+                    and not mentions(a2[1], ld['x'])):
+                load = '*(%s %s*)(%s ? (ulong)(%s) : %s)' % (ld['qual'], ld['ty'], c, ld['addr'], base)
+                if ld['wrap']:
+                    load = '%s(%s)' % (ld['wrap'], load)
+                out.append('%s%s = %s;' % (ind, ld['x'], load))
+                out.append('%s%s = %s ? (%s) : (%s);' % (ind, a1[0], c, a1[1], a2[1]))
+                n += 1
+                i += 6
+                continue
+        out.append(line)
+        i += 1
+    return out, n
+
+
+def step_hoist(lines, offsets):
+    base, base_line = find_table(lines)
+    if base is None:
+        return lines, 0
+    n = 0
+    out = []
+    for line in lines:
+        for o in offsets:
+            for q in ('coherent device ', 'const device ', 'device '):
+                pat = 'uint4(*(%spacked_uint4*)(%s + uint(%du)))' % (q, base, o)
+                if pat in line:
+                    n += line.count(pat)
+                    line = line.replace(pat, 'dsc%d' % o)
+        out.append(line)
+    decl = ['    uint4 dsc%d = uint4(*(const device packed_uint4*)(%s + uint(%du)));' % (o, base, o)
+            for o in offsets]
+    out[base_line + 1:base_line + 1] = decl
+    return out, n
+
+
+def step_maxthreads(lines, n):
+    for i, l in enumerate(lines):
+        if l.startswith('kernel void '):
+            return lines[:i] + ['[[max_total_threads_per_threadgroup(%d)]]' % n] + lines[i:], 1
+    return lines, 0
+
+
+def apply_steps(text, steps):
+    lines = text.split('\n')
+    counts = []
+    for step in [s for s in steps.split(';') if s]:
+        if step == 'const-loads':
+            lines, n = step_const_loads(lines)
+        elif step == 'branchless':
+            lines, n = step_branchless(lines)
+        elif step == 'strip-guards':
+            lines, n = step_strip_guards(lines)
+        elif step.startswith('hoist='):
+            lines, n = step_hoist(lines, [int(o) for o in step[6:].split('+')])
+        elif step.startswith('maxthreads='):
+            lines, n = step_maxthreads(lines, int(step[11:]))
+        else:
+            raise SystemExit('unknown step ' + step)
+        counts.append((step, n))
+    return '\n'.join(lines), counts
+
+
+if __name__ == '__main__':
+    if sys.argv[1] == 'hash':
+        print('%016x' % fnv1a64(open(sys.argv[2], encoding='latin-1').read()))
+    elif sys.argv[1] == 'apply':
+        src = open(sys.argv[2], encoding='latin-1').read()
+        out, counts = apply_steps(src, sys.argv[4])
+        open(sys.argv[3], 'w', encoding='latin-1', newline='').write(out)
+        print('%016x' % fnv1a64(out), ' '.join('%s:%d' % c for c in counts))
+        sys.exit(2 if any(n == 0 for _, n in counts) else 0)

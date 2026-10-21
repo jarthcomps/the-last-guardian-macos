@@ -27,6 +27,10 @@ lipo -create "$OUT/TLGLauncher-arm64" "$OUT/TLGLauncher-x86_64" -output "$APP/Co
 rm -f "$OUT"/TLGLauncher-*
 cp "$HERE/Info.plist" "$APP/Contents/Info.plist"
 cp -R "$HERE/Resources/defaults" "$APP/Contents/Resources/defaults"
+# Shader recipes (no shader code; the driver rewrites its own generated code and checks a hash).
+if [[ -f "$HERE/Resources/shader-recipes.txt" ]]; then
+  cp "$HERE/Resources/shader-recipes.txt" "$APP/Contents/Resources/shader-recipes.txt"
+fi
 
 # The engine is a plain folder: shadPS4 loads the Vulkan driver manifest that sits next to its
 # executable, which a nested app bundle's signature would not allow.

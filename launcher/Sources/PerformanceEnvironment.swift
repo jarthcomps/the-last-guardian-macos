@@ -28,6 +28,9 @@ enum PerformanceEnvironment {
         "SHADPS4_A912_IMAGE_SOURCE_COPY": "1",
     ]
 
+    /// `shaderRecipes`: recipe file (key, rewrite steps, result hash per shader) that makes the
+    /// driver tune the game's shaders itself, without shipping shader code; a recipe is used only
+    /// when its result hash matches. Part of the experimental set.
     /// `shaderOverrideDir`: folder of hand-tuned Metal versions of the game's busiest compute
     /// shaders (`<key>.metal`, loaded by the driver in place of the generated code with the same
     /// key; checked byte-identical against the generated code). Part of the experimental set.
@@ -35,12 +38,16 @@ enum PerformanceEnvironment {
                       fastShaderMath: Bool = true,
                       experimental: Bool = false,
                       copyShortcut: Bool = false,
-                      shaderOverrideDir: String? = nil) -> [String: String] {
+                      shaderOverrideDir: String? = nil,
+                      shaderRecipes: String? = nil) -> [String: String] {
         var env = inherited
         if metalTweaks && experimental {
             env.merge(experimentalSwitches) { _, new in new }
             if let shaderOverrideDir {
                 env["KK_SHADPS4_MSL_OVERRIDE_DIR"] = shaderOverrideDir
+            }
+            if let shaderRecipes {
+                env["KK_SHADPS4_MSL_RECIPES"] = shaderRecipes
             }
         }
         if metalTweaks && copyShortcut {

@@ -1249,10 +1249,10 @@ index 0000000..dde2f1f
 +
 +#endif
 diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
-index f82e80f..f6c442c 100644
+index f82e80f..bbd44f2 100644
 --- a/src/kosmickrisp/vulkan/meson.build
 +++ b/src/kosmickrisp/vulkan/meson.build
-@@ -202,3 +202,46 @@ kosmickrisp_icd = custom_target(
+@@ -202,3 +202,53 @@ kosmickrisp_icd = custom_target(
  )
  
  devenv.append('VK_DRIVER_FILES', kosmickrisp_icd.full_path())
@@ -1276,6 +1276,13 @@ index f82e80f..f6c442c 100644
 +  test('shadps4-msl-override', executable(
 +    'shadps4_msl_override_test',
 +    'test_shadps4_msl_override.c',
++  ))
++endif
++
++if with_tests
++  test('shadps4-msl-recipe', executable(
++    'shadps4_msl_recipe_test',
++    'test_shadps4_msl_recipe.c',
 +  ))
 +endif
 +
@@ -1698,10 +1705,10 @@ index 0000000..b713719
 +#endif
 diff --git a/src/kosmickrisp/vulkan/shadps4_msl_override.h b/src/kosmickrisp/vulkan/shadps4_msl_override.h
 new file mode 100644
-index 0000000..35ae1df
+index 0000000..386010e
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/shadps4_msl_override.h
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,213 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Tuned Metal shaders for shadPS4 / The Last Guardian.
@@ -1715,6 +1722,10 @@ index 0000000..35ae1df
 + * names; the files hold that placeholder and it is put back when loading.
 + * Overrides apply where Metal libraries are created, after the pipeline cache,
 + * so cached pipelines always keep the generated source.
++ *
++ * KK_SHADPS4_MSL_RECIPES=<file> tunes shaders without shipping their code: for a shader with no
++ * override file, a recipe (shadps4_msl_recipe.h) rewrites the generated source and the result is
++ * used only if its hash matches the one the recipe was verified with.
 + */
 +#ifndef SHADPS4_MSL_OVERRIDE_H
 +#define SHADPS4_MSL_OVERRIDE_H
@@ -1724,6 +1735,10 @@ index 0000000..35ae1df
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
++
++#include <pthread.h>
++
++#include "shadps4_msl_recipe.h"
 +
 +#define KK_SHADPS4_ENTRY_PLACEHOLDER "KK_SHADPS4_ENTRY"
 +
@@ -1800,6 +1815,42 @@ index 0000000..35ae1df
 +   return data;
 +}
 +
++static struct kk_shadps4_recipes kk_shadps4_loaded_recipes;
++static pthread_once_t kk_shadps4_recipes_once = PTHREAD_ONCE_INIT;
++
++static inline void
++kk_shadps4_load_recipes(void)
++{
++   const char *path = getenv("KK_SHADPS4_MSL_RECIPES");
++   char *text = path && *path ? kk_shadps4_read_file(path) : NULL;
++   if (text) {
++      kk_shadps4_recipes_parse(text, &kk_shadps4_loaded_recipes);
++      free(text);
++      fprintf(stderr, "KK_SHADPS4_MSL_RECIPES %zu recipes\n", kk_shadps4_loaded_recipes.n);
++   }
++}
++
++/* The recipe result for `normalized` (malloc'd, entry point still the placeholder), or NULL. */
++static inline char *
++kk_shadps4_msl_recipe_source(const char *normalized, uint64_t key, const char *stage)
++{
++   pthread_once(&kk_shadps4_recipes_once, kk_shadps4_load_recipes);
++   const struct kk_shadps4_recipe *r = kk_shadps4_recipes_find(&kk_shadps4_loaded_recipes, key);
++   if (!r)
++      return NULL;
++   char *tuned = kk_shadps4_recipe_apply(normalized, r->steps);
++   const bool match = tuned && kk_shadps4_fnv1a64(tuned) == r->result_hash;
++   static int logged;
++   if (logged++ < 256)
++      fprintf(stderr, "KK_SHADPS4_MSL_RECIPE %016llx (%s) %s\n", (unsigned long long)key, stage,
++              match ? "applied" : "hash mismatch, generated code kept");
++   if (!match) {
++      free(tuned);
++      return NULL;
++   }
++   return tuned;
++}
++
 +/* Dumps and/or overrides one shader source; returns the source to compile: either
 + * `code` itself or a malloc'd override the caller frees (`*owned` is set then). */
 +static inline const char *
@@ -1809,7 +1860,8 @@ index 0000000..35ae1df
 +   *owned = false;
 +   const char *dump_dir = getenv("KK_SHADPS4_MSL_DUMP_DIR");
 +   const char *override_dir = getenv("KK_SHADPS4_MSL_OVERRIDE_DIR");
-+   if ((!dump_dir || !*dump_dir) && (!override_dir || !*override_dir))
++   const char *recipes = getenv("KK_SHADPS4_MSL_RECIPES");
++   if ((!dump_dir || !*dump_dir) && (!override_dir || !*override_dir) && (!recipes || !*recipes))
 +      return code;
 +   uint64_t key = 0;
 +   char *normalized = kk_shadps4_msl_normalize(code, entrypoint, &key);
@@ -1853,8 +1905,728 @@ index 0000000..35ae1df
 +         }
 +      }
 +   }
++   if (result == code && recipes && *recipes) {
++      char *tuned = kk_shadps4_msl_recipe_source(normalized, key, stage);
++      if (tuned) {
++         char *restored = kk_shadps4_replace_all(tuned, KK_SHADPS4_ENTRY_PLACEHOLDER,
++                                                 entrypoint ? entrypoint : "");
++         free(tuned);
++         if (restored) {
++            result = restored;
++            *owned = true;
++         }
++      }
++   }
 +   free(normalized);
 +   return result;
++}
++
++#endif
+diff --git a/src/kosmickrisp/vulkan/shadps4_msl_recipe.h b/src/kosmickrisp/vulkan/shadps4_msl_recipe.h
+new file mode 100644
+index 0000000..e354532
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/shadps4_msl_recipe.h
+@@ -0,0 +1,702 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Shader recipes for shadPS4 / The Last Guardian.
++ *
++ * A recipe tunes one generated Metal shader without shipping any shader code: it names the
++ * shader by its key (see shadps4_msl_override.h), lists text rewrite steps that are applied
++ * to the generated source, and gives the FNV-1a 64 hash of the expected result. The result is
++ * compiled only when its hash matches, so a recipe can only ever produce the exact source it was
++ * verified with; anything else (another driver version, another emulator build) falls back to
++ * the generated source.
++ *
++ * KK_SHADPS4_MSL_RECIPES=<file> loads the recipes, one per line:
++ *     <key, 16 hex> <result hash, 16 hex> <step>;<step>;...
++ * Lines starting with '#' are comments. Steps, applied in order to the normalized source:
++ *     const-loads     "*(coherent device " -> "*(const device " on every line that is not a store
++ *                     (a store line starts, after spaces, with "*(" or "(*(")
++ *     branchless      a bounds-checked load
++ *                         if (c) { x = *(Q T*)(A); r = E; } else { r = D; }
++ *                     becomes  x = *(Q T*)(c ? (ulong)(A) : TABLE); r = c ? (E) : (D);
++ *                     where TABLE is the descriptor-table pointer the shader already reads
++ *     strip-guards    removes every "!&buf0.contents[0] ? 1 : "
++ *     hoist=O+O+...   loads the descriptor-table entries at these byte offsets once, right after
++ *                     the table pointer is set
++ *     maxthreads=N    adds [[max_total_threads_per_threadgroup(N)]] before the kernel
++ * The reference implementation (and the tool that makes recipes) is msl-recipe in the
++ * project's shader tuning kit; this file must match it byte for byte.
++ */
++#ifndef SHADPS4_MSL_RECIPE_H
++#define SHADPS4_MSL_RECIPE_H
++
++#include <ctype.h>
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* ---- growable list of lines ------------------------------------------------------------- */
++
++struct kk_rcp_lines {
++   char **v;
++   size_t n, cap;
++};
++
++static inline bool
++kk_rcp_push(struct kk_rcp_lines *l, char *s)
++{
++   if (!s)
++      return false;
++   if (l->n == l->cap) {
++      size_t cap = l->cap ? l->cap * 2 : 256;
++      char **v = realloc(l->v, cap * sizeof(char *));
++      if (!v) {
++         free(s);
++         return false;
++      }
++      l->v = v;
++      l->cap = cap;
++   }
++   l->v[l->n++] = s;
++   return true;
++}
++
++static inline void
++kk_rcp_free(struct kk_rcp_lines *l)
++{
++   for (size_t i = 0; i < l->n; i++)
++      free(l->v[i]);
++   free(l->v);
++   l->v = NULL;
++   l->n = l->cap = 0;
++}
++
++static inline char *
++kk_rcp_strndup(const char *s, size_t n)
++{
++   char *r = malloc(n + 1);
++   if (r) {
++      memcpy(r, s, n);
++      r[n] = '\0';
++   }
++   return r;
++}
++
++static inline char *
++kk_rcp_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
++
++static inline char *
++kk_rcp_printf(const char *fmt, ...)
++{
++   va_list ap;
++   va_start(ap, fmt);
++   int len = vsnprintf(NULL, 0, fmt, ap);
++   va_end(ap);
++   if (len < 0)
++      return NULL;
++   char *s = malloc((size_t)len + 1);
++   if (!s)
++      return NULL;
++   va_start(ap, fmt);
++   vsnprintf(s, (size_t)len + 1, fmt, ap);
++   va_end(ap);
++   return s;
++}
++
++/* Splits on '\n' exactly like Python's str.split('\n'). */
++static inline bool
++kk_rcp_split(const char *text, struct kk_rcp_lines *out)
++{
++   const char *start = text;
++   for (const char *p = text;; p++) {
++      if (*p == '\n' || *p == '\0') {
++         if (!kk_rcp_push(out, kk_rcp_strndup(start, (size_t)(p - start))))
++            return false;
++         if (*p == '\0')
++            return true;
++         start = p + 1;
++      }
++   }
++}
++
++static inline char *
++kk_rcp_join(const struct kk_rcp_lines *l)
++{
++   size_t len = 0;
++   for (size_t i = 0; i < l->n; i++)
++      len += strlen(l->v[i]) + 1;
++   char *out = malloc(len + 1);
++   if (!out)
++      return NULL;
++   char *w = out;
++   for (size_t i = 0; i < l->n; i++) {
++      size_t k = strlen(l->v[i]);
++      memcpy(w, l->v[i], k);
++      w += k;
++      if (i + 1 < l->n)
++         *w++ = '\n';
++   }
++   *w = '\0';
++   return out;
++}
++
++/* ---- small string helpers (Python semantics) --------------------------------------------- */
++
++static inline bool kk_rcp_starts(const char *s, const char *p) { return strncmp(s, p, strlen(p)) == 0; }
++
++static inline bool
++kk_rcp_ends(const char *s, const char *p)
++{
++   size_t a = strlen(s), b = strlen(p);
++   return a >= b && memcmp(s + a - b, p, b) == 0;
++}
++
++static inline const char *kk_rcp_lstrip_spaces(const char *s) { while (*s == ' ') s++; return s; }
++
++static inline bool
++kk_rcp_is_ident_n(const char *s, size_t n)
++{
++   if (n == 0)
++      return false;
++   for (size_t i = 0; i < n; i++)
++      if (!isalnum((unsigned char)s[i]) && s[i] != '_')
++         return false;
++   return true;
++}
++
++static inline bool
++kk_rcp_is_temp_n(const char *s, size_t n)
++{
++   if (n < 2 || s[0] != 't')
++      return false;
++   for (size_t i = 1; i < n; i++)
++      if (!isdigit((unsigned char)s[i]))
++         return false;
++   return true;
++}
++
++static inline bool
++kk_rcp_is_digits_n(const char *s, size_t n)
++{
++   if (n == 0)
++      return false;
++   for (size_t i = 0; i < n; i++)
++      if (!isdigit((unsigned char)s[i]))
++         return false;
++   return true;
++}
++
++static inline bool kk_rcp_toplevel(const char *l) { return kk_rcp_starts(l, "    ") && !kk_rcp_starts(l, "     "); }
++
++/* Python str.strip() for the whitespace generated code contains. */
++static inline bool
++kk_rcp_strip_equals(const char *s, const char *want)
++{
++   while (*s && isspace((unsigned char)*s))
++      s++;
++   size_t n = strlen(s);
++   while (n && isspace((unsigned char)s[n - 1]))
++      n--;
++   return n == strlen(want) && memcmp(s, want, n) == 0;
++}
++
++static inline size_t
++kk_rcp_count(const char *s, const char *pat)
++{
++   size_t n = 0, k = strlen(pat);
++   for (const char *p = strstr(s, pat); p; p = strstr(p + k, pat))
++      n++;
++   return n;
++}
++
++/* Replaces every occurrence in place (frees the old string). */
++static inline bool
++kk_rcp_replace(char **line, const char *from, const char *to)
++{
++   if (!strstr(*line, from))
++      return true;
++   size_t fl = strlen(from), tl = strlen(to), count = kk_rcp_count(*line, from);
++   char *out = malloc(strlen(*line) + count * tl - count * fl + 1);
++   if (!out)
++      return false;
++   char *w = out;
++   const char *r = *line;
++   for (const char *p = strstr(r, from); p; p = strstr(r, from)) {
++      memcpy(w, r, (size_t)(p - r));
++      w += p - r;
++      memcpy(w, to, tl);
++      w += tl;
++      r = p + fl;
++   }
++   strcpy(w, r);
++   free(*line);
++   *line = out;
++   return true;
++}
++
++static inline bool
++kk_rcp_mentions(const char *text, const char *name)
++{
++   size_t k = strlen(name);
++   for (const char *p = strstr(text, name); p; p = strstr(p + 1, name)) {
++      char before = p > text ? p[-1] : ' ';
++      char after = p[k] ? p[k] : ' ';
++      if (!(isalnum((unsigned char)before) || before == '_') &&
++          !(isalnum((unsigned char)after) || after == '_'))
++         return true;
++   }
++   return false;
++}
++
++/* ---- steps ------------------------------------------------------------------------------- */
++
++static inline bool
++kk_rcp_is_store(const char *line)
++{
++   const char *s = kk_rcp_lstrip_spaces(line);
++   return kk_rcp_starts(s, "*(") || kk_rcp_starts(s, "(*(");
++}
++
++static inline long
++kk_rcp_const_loads(struct kk_rcp_lines *l)
++{
++   long n = 0;
++   for (size_t i = 0; i < l->n; i++) {
++      if (kk_rcp_is_store(l->v[i]) || !strstr(l->v[i], "*(coherent device "))
++         continue;
++      n += (long)kk_rcp_count(l->v[i], "*(coherent device ");
++      if (!kk_rcp_replace(&l->v[i], "*(coherent device ", "*(const device "))
++         return -1;
++   }
++   return n;
++}
++
++static inline long
++kk_rcp_strip_guards(struct kk_rcp_lines *l)
++{
++   long n = 0;
++   for (size_t i = 0; i < l->n; i++) {
++      n += (long)kk_rcp_count(l->v[i], "!&buf0.contents[0] ? 1 : ");
++      if (!kk_rcp_replace(&l->v[i], "!&buf0.contents[0] ? 1 : ", ""))
++         return -1;
++   }
++   return n;
++}
++
++/* The descriptor-table pointer B (written to `base`, size 32) and the index of its only
++ * assignment; false when there is none. */
++static inline bool
++kk_rcp_find_table(const struct kk_rcp_lines *l, char *base, size_t *assign)
++{
++   static const char *const quals[] = {"coherent device packed_uint4*)(",
++                                       "const device packed_uint4*)(",
++                                       "device packed_uint4*)("};
++   base[0] = '\0';
++   for (size_t i = 0; i < l->n && !base[0]; i++) {
++      const char *line = l->v[i];
++      if (!kk_rcp_toplevel(line))
++         continue;
++      const char *body = line + 4;
++      const char *eq = strstr(body, " = uint4(*(");
++      if (!eq || eq == body || !kk_rcp_is_ident_n(body, (size_t)(eq - body)))
++         continue;
++      const char *rest = eq + strlen(" = uint4(*(");
++      bool ok = false;
++      for (int q = 0; q < 3 && !ok; q++)
++         if (kk_rcp_starts(rest, quals[q])) {
++            rest += strlen(quals[q]);
++            ok = true;
++         }
++      if (!ok)
++         continue;
++      const char *sp = strstr(rest, " + uint(");
++      if (!sp || sp == rest || !kk_rcp_is_temp_n(rest, (size_t)(sp - rest)))
++         continue;
++      const char *tail = sp + strlen(" + uint(");
++      size_t tl = strlen(tail), suf = strlen("u)));");
++      if (tl < suf || !kk_rcp_ends(tail, "u)));") || !kk_rcp_is_digits_n(tail, tl - suf))
++         continue;
++      size_t bl = (size_t)(sp - rest);
++      if (bl >= 32)
++         continue;
++      memcpy(base, rest, bl);
++      base[bl] = '\0';
++   }
++   if (!base[0])
++      return false;
++   char prefix[40];
++   snprintf(prefix, sizeof(prefix), "%s = ", base);
++   size_t count = 0;
++   for (size_t i = 0; i < l->n; i++)
++      if (kk_rcp_starts(kk_rcp_lstrip_spaces(l->v[i]), prefix)) {
++         count++;
++         *assign = i;
++      }
++   return count == 1;
++}
++
++struct kk_rcp_load {
++   size_t ind;
++   char x[64], wrap[32], qual[32], ty[32];
++   const char *addr;
++   size_t addr_len;
++   bool wrapped;
++};
++
++/* Python parse_load: "<ind><x> = [W(]*(<q> <ty>*)(<addr>)[)];" */
++static inline bool
++kk_rcp_parse_load(const char *line, struct kk_rcp_load *ld)
++{
++   ld->ind = (size_t)(kk_rcp_lstrip_spaces(line) - line);
++   const char *body = line + ld->ind;
++   const char *eq = strstr(body, " = ");
++   size_t blen = strlen(body);
++   if (!eq || eq == body || !kk_rcp_is_ident_n(body, (size_t)(eq - body)) || !blen ||
++       body[blen - 1] != ';' || (size_t)(eq - body) >= sizeof(ld->x))
++      return false;
++   memcpy(ld->x, body, (size_t)(eq - body));
++   ld->x[eq - body] = '\0';
++   const char *rhs = eq + 3;
++   size_t rlen = (size_t)(body + blen - 1 - rhs); /* without ';' */
++   ld->wrapped = false;
++   if (!(rlen >= 2 && rhs[0] == '*' && rhs[1] == '(')) {
++      const char *p = strstr(rhs, "(*(");
++      if (!p || p == rhs || (size_t)(p - rhs) >= rlen || !kk_rcp_is_ident_n(rhs, (size_t)(p - rhs)) ||
++          (size_t)(p - rhs) >= sizeof(ld->wrap))
++         return false;
++      memcpy(ld->wrap, rhs, (size_t)(p - rhs));
++      ld->wrap[p - rhs] = '\0';
++      ld->wrapped = true;
++      rlen -= (size_t)(p + 1 - rhs);
++      rhs = p + 1;
++   }
++   /* rhs[0..rlen) = "*(<q> <ty>*)(<addr>)" (+ ")" when wrapped) */
++   const char *close = strstr(rhs, "*)(");
++   if (!close || (size_t)(close - rhs) + 3 > rlen)
++      return false;
++   const char *qt = rhs + 2;
++   size_t qtl = (size_t)(close - qt);
++   static const char *const quals[] = {"coherent device ", "const device ", "device "};
++   int qi = -1;
++   for (int q = 0; q < 3; q++)
++      if (qtl >= strlen(quals[q]) && strncmp(qt, quals[q], strlen(quals[q])) == 0) {
++         qi = q;
++         break;
++      }
++   if (qi < 0)
++      return false;
++   size_t ql = strlen(quals[qi]);
++   if (!kk_rcp_is_ident_n(qt + ql, qtl - ql) || qtl - ql >= sizeof(ld->ty))
++      return false;
++   memcpy(ld->qual, quals[qi], ql - 1);
++   ld->qual[ql - 1] = '\0';
++   memcpy(ld->ty, qt + ql, qtl - ql);
++   ld->ty[qtl - ql] = '\0';
++   const char *addr = close + 3;
++   size_t al = rlen - (size_t)(addr - rhs);
++   if (ld->wrapped) {
++      if (al < 2 || addr[al - 1] != ')' || addr[al - 2] != ')')
++         return false;
++      al -= 2;
++   } else {
++      if (al < 1 || addr[al - 1] != ')' || (al >= 2 && addr[al - 2] == ')'))
++         return false;
++      al -= 1;
++   }
++   if (al == 0)
++      return false;
++   ld->addr = addr;
++   ld->addr_len = al;
++   return true;
++}
++
++/* Python parse_assign on the stripped line: "<x> = <rhs>;" */
++static inline bool
++kk_rcp_parse_assign(const char *line, char *x, size_t xsize, const char **rhs, size_t *rlen)
++{
++   const char *s = kk_rcp_lstrip_spaces(line);
++   const char *eq = strstr(s, " = ");
++   size_t sl = strlen(s);
++   if (!eq || eq == s || !kk_rcp_is_ident_n(s, (size_t)(eq - s)) || !sl || s[sl - 1] != ';' ||
++       (size_t)(eq - s) >= xsize)
++      return false;
++   memcpy(x, s, (size_t)(eq - s));
++   x[eq - s] = '\0';
++   *rhs = eq + 3;
++   *rlen = (size_t)(s + sl - 1 - *rhs);
++   return true;
++}
++
++static inline int
++kk_rcp_type_size(const char *ty)
++{
++   static const struct { const char *n; int s; } sizes[] = {
++      {"float", 4}, {"uint", 4}, {"int", 4}, {"half", 2}, {"ushort", 2}, {"short", 2},
++      {"uchar", 1}, {"char", 1}, {"packed_uint2", 8}, {"packed_float2", 8},
++      {"packed_uint4", 16}, {"packed_float4", 16}, {"ulong", 8}, {"packed_uint3", 12},
++      {"packed_float3", 12}, {"uint2", 8}, {"float2", 8}, {"uint4", 16}, {"float4", 16}};
++   for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
++      if (strcmp(sizes[i].n, ty) == 0)
++         return sizes[i].s;
++   return 99;
++}
++
++static inline long
++kk_rcp_branchless(struct kk_rcp_lines *l)
++{
++   char base[32];
++   size_t base_line = 0;
++   if (!kk_rcp_find_table(l, base, &base_line))
++      return 0;
++   char use[48];
++   snprintf(use, sizeof(use), "(%s + uint(", base);
++   size_t first_use = SIZE_MAX;
++   for (size_t i = base_line + 1; i < l->n; i++)
++      if (kk_rcp_toplevel(l->v[i]) && strstr(l->v[i], use)) {
++         first_use = i;
++         break;
++      }
++   if (first_use == SIZE_MAX)
++      return 0;
++   struct kk_rcp_lines out = {0};
++   long n = 0;
++   size_t i = 0;
++   while (i < l->n) {
++      const char *line = l->v[i];
++      const char *s = kk_rcp_lstrip_spaces(line);
++      size_t sl = strlen(s);
++      if (i > first_use && i + 5 < l->n && kk_rcp_starts(s, "if (") && sl >= 7 &&
++          kk_rcp_ends(s, ") {") && kk_rcp_is_temp_n(s + 4, sl - 7)) {
++         char c[32];
++         size_t cl = sl - 7 < sizeof(c) - 1 ? sl - 7 : sizeof(c) - 1;
++         memcpy(c, s + 4, cl);
++         c[cl] = '\0';
++         size_t ind = (size_t)(s - line);
++         struct kk_rcp_load ld;
++         char a1x[64], a2x[64];
++         const char *a1r, *a2r;
++         size_t a1l, a2l;
++         if (kk_rcp_parse_load(l->v[i + 1], &ld) &&
++             kk_rcp_parse_assign(l->v[i + 2], a1x, sizeof(a1x), &a1r, &a1l) &&
++             kk_rcp_parse_assign(l->v[i + 4], a2x, sizeof(a2x), &a2r, &a2l) &&
++             kk_rcp_strip_equals(l->v[i + 3], "} else {") && kk_rcp_strip_equals(l->v[i + 5], "}") &&
++             strcmp(a1x, a2x) == 0 && kk_rcp_type_size(ld.ty) <= 16) {
++            char *e1 = kk_rcp_strndup(a1r, a1l), *e2 = kk_rcp_strndup(a2r, a2l);
++            char *addr = kk_rcp_strndup(ld.addr, ld.addr_len);
++            if (!e1 || !e2 || !addr) {
++               free(e1); free(e2); free(addr);
++               kk_rcp_free(&out);
++               return -1;
++            }
++            if (kk_rcp_mentions(e1, ld.x) && !kk_rcp_mentions(e2, ld.x)) {
++               char *load = kk_rcp_printf("*(%s %s*)(%s ? (ulong)(%s) : %s)", ld.qual, ld.ty, c,
++                                          addr, base);
++               char *l1 = NULL, *l2 = NULL;
++               if (load) {
++                  if (ld.wrapped)
++                     l1 = kk_rcp_printf("%.*s%s = %s(%s);", (int)ind, line, ld.x, ld.wrap, load);
++                  else
++                     l1 = kk_rcp_printf("%.*s%s = %s;", (int)ind, line, ld.x, load);
++                  l2 = kk_rcp_printf("%.*s%s = %s ? (%s) : (%s);", (int)ind, line, a1x, c, e1, e2);
++               }
++               free(load); free(e1); free(e2); free(addr);
++               if (!kk_rcp_push(&out, l1) || !kk_rcp_push(&out, l2)) {
++                  kk_rcp_free(&out);
++                  return -1;
++               }
++               n++;
++               i += 6;
++               continue;
++            }
++            free(e1); free(e2); free(addr);
++         }
++      }
++      if (!kk_rcp_push(&out, strdup(line))) {
++         kk_rcp_free(&out);
++         return -1;
++      }
++      i++;
++   }
++   kk_rcp_free(l);
++   *l = out;
++   return n;
++}
++
++static inline long
++kk_rcp_hoist(struct kk_rcp_lines *l, const unsigned *offs, size_t noffs)
++{
++   char base[32];
++   size_t base_line = 0;
++   if (!kk_rcp_find_table(l, base, &base_line))
++      return 0;
++   static const char *const quals[] = {"coherent device ", "const device ", "device "};
++   long n = 0;
++   for (size_t i = 0; i < l->n; i++)
++      for (size_t o = 0; o < noffs; o++)
++         for (int q = 0; q < 3; q++) {
++            char pat[128], rep[32];
++            snprintf(pat, sizeof(pat), "uint4(*(%spacked_uint4*)(%s + uint(%uu)))", quals[q], base,
++                     offs[o]);
++            if (!strstr(l->v[i], pat))
++               continue;
++            snprintf(rep, sizeof(rep), "dsc%u", offs[o]);
++            n += (long)kk_rcp_count(l->v[i], pat);
++            if (!kk_rcp_replace(&l->v[i], pat, rep))
++               return -1;
++         }
++   /* insert the loads after the table pointer's assignment */
++   for (size_t o = noffs; o-- > 0;) {
++      char *decl = kk_rcp_printf("    uint4 dsc%u = uint4(*(const device packed_uint4*)(%s + uint(%uu)));",
++                                 offs[o], base, offs[o]);
++      if (!kk_rcp_push(l, decl))
++         return -1;
++      memmove(&l->v[base_line + 2], &l->v[base_line + 1], (l->n - 2 - base_line) * sizeof(char *));
++      l->v[base_line + 1] = decl;
++   }
++   return n;
++}
++
++static inline long
++kk_rcp_maxthreads(struct kk_rcp_lines *l, unsigned threads)
++{
++   for (size_t i = 0; i < l->n; i++)
++      if (kk_rcp_starts(l->v[i], "kernel void ")) {
++         char *attr = kk_rcp_printf("[[max_total_threads_per_threadgroup(%u)]]", threads);
++         if (!kk_rcp_push(l, attr))
++            return -1;
++         memmove(&l->v[i + 1], &l->v[i], (l->n - 1 - i) * sizeof(char *));
++         l->v[i] = attr;
++         return 1;
++      }
++   return 0;
++}
++
++/* Applies `steps` to `source`; returns the malloc'd result, or NULL when a step is unknown,
++ * did not apply, or memory ran out. */
++static inline char *
++kk_shadps4_recipe_apply(const char *source, const char *steps)
++{
++   struct kk_rcp_lines l = {0};
++   if (!kk_rcp_split(source, &l)) {
++      kk_rcp_free(&l);
++      return NULL;
++   }
++   const char *p = steps;
++   bool ok = true;
++   while (ok && *p) {
++      const char *end = strchr(p, ';');
++      size_t len = end ? (size_t)(end - p) : strlen(p);
++      char step[256];
++      if (len >= sizeof(step)) {
++         ok = false;
++         break;
++      }
++      memcpy(step, p, len);
++      step[len] = '\0';
++      p += len + (end ? 1 : 0);
++      if (!len)
++         continue;
++      long n;
++      if (strcmp(step, "const-loads") == 0) {
++         n = kk_rcp_const_loads(&l);
++      } else if (strcmp(step, "branchless") == 0) {
++         n = kk_rcp_branchless(&l);
++      } else if (strcmp(step, "strip-guards") == 0) {
++         n = kk_rcp_strip_guards(&l);
++      } else if (strncmp(step, "hoist=", 6) == 0) {
++         unsigned offs[64];
++         size_t noffs = 0;
++         for (char *q = step + 6; *q && noffs < 64;) {
++            char *e;
++            unsigned long v = strtoul(q, &e, 10);
++            if (e == q)
++               break;
++            offs[noffs++] = (unsigned)v;
++            q = *e == '+' ? e + 1 : e;
++         }
++         n = noffs ? kk_rcp_hoist(&l, offs, noffs) : 0;
++      } else if (strncmp(step, "maxthreads=", 11) == 0) {
++         n = kk_rcp_maxthreads(&l, (unsigned)strtoul(step + 11, NULL, 10));
++      } else {
++         n = 0;
++      }
++      ok = n > 0;
++   }
++   char *out = ok ? kk_rcp_join(&l) : NULL;
++   kk_rcp_free(&l);
++   return out;
++}
++
++/* ---- the recipe file --------------------------------------------------------------------- */
++
++struct kk_shadps4_recipe {
++   uint64_t key, result_hash;
++   char *steps;
++};
++
++struct kk_shadps4_recipes {
++   struct kk_shadps4_recipe *v;
++   size_t n;
++};
++
++static inline int
++kk_rcp_cmp(const void *a, const void *b)
++{
++   uint64_t x = ((const struct kk_shadps4_recipe *)a)->key;
++   uint64_t y = ((const struct kk_shadps4_recipe *)b)->key;
++   return x < y ? -1 : x > y;
++}
++
++/* Parses recipe text; malformed lines are skipped. */
++static inline void
++kk_shadps4_recipes_parse(const char *text, struct kk_shadps4_recipes *r)
++{
++   r->v = NULL;
++   r->n = 0;
++   size_t cap = 0;
++   for (const char *line = text; line && *line;) {
++      const char *nl = strchr(line, '\n');
++      size_t len = nl ? (size_t)(nl - line) : strlen(line);
++      if (len && line[0] != '#') {
++         unsigned long long key, hash;
++         int consumed = 0;
++         char *copy = kk_rcp_strndup(line, len);
++         if (copy && sscanf(copy, "%16llx %16llx %n", &key, &hash, &consumed) == 2 && consumed) {
++            char *steps = copy + consumed;
++            size_t sl = strlen(steps);
++            while (sl && isspace((unsigned char)steps[sl - 1]))
++               steps[--sl] = '\0';
++            if (sl) {
++               if (r->n == cap) {
++                  cap = cap ? cap * 2 : 64;
++                  struct kk_shadps4_recipe *v = realloc(r->v, cap * sizeof(*v));
++                  if (!v) {
++                     free(copy);
++                     break;
++                  }
++                  r->v = v;
++               }
++               r->v[r->n].key = key;
++               r->v[r->n].result_hash = hash;
++               r->v[r->n].steps = strdup(steps);
++               if (r->v[r->n].steps)
++                  r->n++;
++            }
++         }
++         free(copy);
++      }
++      line = nl ? nl + 1 : NULL;
++   }
++   if (r->n)
++      qsort(r->v, r->n, sizeof(r->v[0]), kk_rcp_cmp);
++}
++
++static inline const struct kk_shadps4_recipe *
++kk_shadps4_recipes_find(const struct kk_shadps4_recipes *r, uint64_t key)
++{
++   struct kk_shadps4_recipe probe = {.key = key};
++   return r->n ? bsearch(&probe, r->v, r->n, sizeof(r->v[0]), kk_rcp_cmp) : NULL;
 +}
 +
 +#endif
@@ -2357,6 +3129,197 @@ index 0000000..aca60b6
 +   remove(path);
 +   rmdir(dir);
 +   return failures ? 1 : 0;
++}
+diff --git a/src/kosmickrisp/vulkan/test_shadps4_msl_recipe.c b/src/kosmickrisp/vulkan/test_shadps4_msl_recipe.c
+new file mode 100644
+index 0000000..4bfa0a1
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/test_shadps4_msl_recipe.c
+@@ -0,0 +1,185 @@
++/* SPDX-License-Identifier: MIT */
++#include "shadps4_msl_override.h"
++
++#include <unistd.h>
++
++static int failures;
++
++static void
++check(bool condition, const char *what)
++{
++   if (!condition) {
++      fprintf(stderr, "MSL recipe test failed: %s\n", what);
++      failures++;
++   }
++}
++
++/* A synthetic shader in the shape the driver generates (no game code). */
++static const char *const kernel_src =
++   "#include <metal_stdlib>\n"
++   "using namespace metal;\n"
++   "kernel void KK_SHADPS4_ENTRY(\n"
++   "    constant Buffer &buf0 [[buffer(0)]]\n"
++   ")\n"
++   "{\n"
++   "    t7 = *(constant ulong*)(t6);\n"
++   "    t8 = uint4(*(coherent device packed_uint4*)(t7 + uint(0u)));\n"
++   "    t9 = t8.z;\n"
++   "    if (t10) {\n"
++   "        t11 = *(coherent device float*)(t12);\n"
++   "        r1 = as_type<uint>((t11));\n"
++   "    } else {\n"
++   "        r1 = as_type<uint>(float(0.0));\n"
++   "    }\n"
++   "    if (t13) {\n"
++   "        t14 = uint4(*(coherent device packed_uint4*)(t7 + uint(16u)));\n"
++   "        r2 = t14.x;\n"
++   "    } else {\n"
++   "        r2 = uint(0u);\n"
++   "    }\n"
++   "    t15 = !&buf0.contents[0] ? 1 : t9 * t9;\n"
++   "    (*(coherent device uint*)t12) = r1;\n"
++   "}\n";
++
++static void
++test_steps(void)
++{
++   char *out = kk_shadps4_recipe_apply(kernel_src, "const-loads");
++   check(out && strstr(out, "t11 = *(const device float*)(t12);"), "const-loads rewrites loads");
++   check(out && strstr(out, "(*(coherent device uint*)t12) = r1;"), "const-loads keeps stores");
++   free(out);
++
++   out = kk_shadps4_recipe_apply(kernel_src, "branchless");
++   check(out && strstr(out, "\n    t11 = *(coherent device float*)(t10 ? (ulong)(t12) : t7);\n"
++                            "    r1 = t10 ? (as_type<uint>((t11))) : (as_type<uint>(float(0.0)));"),
++         "branchless rewrites a guarded scalar load");
++   check(out && strstr(out, "t14 = uint4(*(coherent device packed_uint4*)(t13 ? (ulong)(t7 + uint(16u)) : t7));"),
++         "branchless rewrites a wrapped load");
++   check(out && !strstr(out, "if (t10)"), "branchless removes the branch");
++   free(out);
++
++   out = kk_shadps4_recipe_apply(kernel_src, "strip-guards");
++   check(out && strstr(out, "t15 = t9 * t9;"), "strip-guards");
++   free(out);
++
++   out = kk_shadps4_recipe_apply(kernel_src, "hoist=0+16");
++   check(out && strstr(out, "    t7 = *(constant ulong*)(t6);\n"
++                            "    uint4 dsc0 = uint4(*(const device packed_uint4*)(t7 + uint(0u)));\n"
++                            "    uint4 dsc16 = uint4(*(const device packed_uint4*)(t7 + uint(16u)));\n"),
++         "hoist inserts the loads after the table pointer");
++   check(out && strstr(out, "t8 = dsc0;") && strstr(out, "t14 = dsc16;"), "hoist replaces the loads");
++   free(out);
++
++   out = kk_shadps4_recipe_apply(kernel_src, "maxthreads=64");
++   check(out && strstr(out, "[[max_total_threads_per_threadgroup(64)]]\nkernel void"), "maxthreads");
++   free(out);
++
++   check(kk_shadps4_recipe_apply(kernel_src, "no-such-step") == NULL, "unknown step rejected");
++   check(kk_shadps4_recipe_apply("fragment void f() {}\n", "maxthreads=64") == NULL,
++         "a step that does not apply rejects the recipe");
++
++   out = kk_shadps4_recipe_apply(kernel_src, "");
++   check(out && strcmp(out, kernel_src) == 0, "no steps keeps the text, trailing newline included");
++   free(out);
++}
++
++static void
++test_file(void)
++{
++   struct kk_shadps4_recipes r;
++   kk_shadps4_recipes_parse("# comment\n"
++                            "00000000000000ff 0000000000000001 const-loads\n"
++                            "bad line\n"
++                            "0000000000000010 0000000000000002 branchless;const-loads  \n",
++                            &r);
++   check(r.n == 2, "two recipes parsed");
++   const struct kk_shadps4_recipe *a = kk_shadps4_recipes_find(&r, 0x10);
++   check(a && a->result_hash == 2 && strcmp(a->steps, "branchless;const-loads") == 0,
++         "find by key, trailing spaces trimmed");
++   check(kk_shadps4_recipes_find(&r, 0x11) == NULL, "unknown key");
++   for (size_t i = 0; i < r.n; i++)
++      free(r.v[i].steps);
++   free(r.v);
++}
++
++static void
++test_driver_path(void)
++{
++   /* Through kk_shadps4_msl_source with the environment, as the driver calls it. */
++   const char *entry = "shadps4_guest_Compute_00000000test";
++   char *named = kk_shadps4_replace_all(kernel_src, KK_SHADPS4_ENTRY_PLACEHOLDER, entry);
++   uint64_t key = 0;
++   char *normalized = kk_shadps4_msl_normalize(named, entry, &key);
++   char *expect = kk_shadps4_recipe_apply(normalized, "const-loads");
++   const uint64_t good = kk_shadps4_fnv1a64(expect);
++
++   char dir[] = "/tmp/kk_msl_recipe_testXXXXXX";
++   check(mkdtemp(dir) != NULL, "temp dir");
++   char path[512];
++   snprintf(path, sizeof(path), "%s/recipes.txt", dir);
++   FILE *f = fopen(path, "wb");
++   fprintf(f, "%016llx %016llx const-loads\n", (unsigned long long)key, (unsigned long long)good);
++   fclose(f);
++   setenv("KK_SHADPS4_MSL_RECIPES", path, 1);
++   unsetenv("KK_SHADPS4_MSL_OVERRIDE_DIR");
++   unsetenv("KK_SHADPS4_MSL_DUMP_DIR");
++
++   bool owned = false;
++   const char *src = kk_shadps4_msl_source(named, entry, "compute", &owned);
++   char *want = kk_shadps4_replace_all(expect, KK_SHADPS4_ENTRY_PLACEHOLDER, entry);
++   check(owned && strcmp(src, want) == 0, "recipe applied, entry point restored");
++   if (owned)
++      free((void *)src);
++
++   /* A source the recipe does not fit (different key) stays as generated. */
++   const char *other = "kernel void other() {}";
++   src = kk_shadps4_msl_source(other, "other", "compute", &owned);
++   check(!owned && src == other, "no recipe: generated code");
++
++   /* Recipe whose hash does not match: generated code kept. The recipes are loaded once per
++    * process, so check the mismatch path directly. */
++   struct kk_shadps4_recipes bad = {0};
++   char line[128];
++   snprintf(line, sizeof(line), "%016llx %016llx const-loads\n", (unsigned long long)key,
++            (unsigned long long)(good ^ 1));
++   kk_shadps4_recipes_parse(line, &bad);
++   const struct kk_shadps4_recipe *r = kk_shadps4_recipes_find(&bad, key);
++   char *t = r ? kk_shadps4_recipe_apply(normalized, r->steps) : NULL;
++   check(t && kk_shadps4_fnv1a64(t) != r->result_hash, "mismatching hash is detected");
++   free(t);
++   for (size_t i = 0; i < bad.n; i++)
++      free(bad.v[i].steps);
++   free(bad.v);
++
++   /* An override file wins over a recipe. */
++   setenv("KK_SHADPS4_MSL_OVERRIDE_DIR", dir, 1);
++   kk_shadps4_msl_path(path, sizeof(path), dir, key, "metal");
++   f = fopen(path, "wb");
++   fputs("kernel void KK_SHADPS4_ENTRY() { /* override */ }", f);
++   fclose(f);
++   src = kk_shadps4_msl_source(named, entry, "compute", &owned);
++   check(owned && strstr(src, "/* override */") && strstr(src, entry), "override file first");
++   if (owned)
++      free((void *)src);
++   unlink(path);
++   snprintf(path, sizeof(path), "%s/recipes.txt", dir);
++   unlink(path);
++   rmdir(dir);
++
++   free(want);
++   free(expect);
++   free(normalized);
++   free(named);
++}
++
++int
++main(void)
++{
++   test_steps();
++   test_file();
++   test_driver_path();
++   if (failures)
++      return 1;
++   printf("shadps4 msl recipe: all checks passed\n");
++   return 0;
 +}
 diff --git a/src/kosmickrisp/vulkan/test_shadps4_root_trim.c b/src/kosmickrisp/vulkan/test_shadps4_root_trim.c
 new file mode 100644

@@ -113,6 +113,11 @@ final class Launcher: ObservableObject {
     var userDir: URL { dataDir.appendingPathComponent("user") }
     var libraryDir: URL { dataDir.appendingPathComponent("library") }
     var engineDir: URL { Bundle.main.resourceURL!.appendingPathComponent("engine") }
+    /// Shader recipes bundled with every build.
+    var shaderRecipes: String? {
+        let file = Bundle.main.resourceURL!.appendingPathComponent("shader-recipes.txt")
+        return FileManager.default.fileExists(atPath: file.path) ? file.path : nil
+    }
     /// Tuned compute shaders bundled with test builds (absent in release builds).
     var shaderOverrideDir: String? {
         let dir = Bundle.main.resourceURL!.appendingPathComponent("shader-overrides")
@@ -450,7 +455,8 @@ final class Launcher: ObservableObject {
                                             fastShaderMath: settings.fastShaderMath,
                                             experimental: settings.experimentalSpeedups,
                                             copyShortcut: settings.copyShaderShortcut,
-                                            shaderOverrideDir: shaderOverrideDir)
+                                            shaderOverrideDir: shaderOverrideDir,
+                                            shaderRecipes: shaderRecipes)
     }
 
     func start(_ arguments: [String], what: String) {
