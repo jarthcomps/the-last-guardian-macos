@@ -994,10 +994,18 @@ index 5194492..0cbe1ff 100644
                                         dev->residency_set.handle);
  
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 362739c..eadf52c 100644
+index 362739c..3db6431 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
-@@ -899,11 +899,28 @@ fs_uses_flat_varying(nir_shader *nir)
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include "kk_shader.h"
++#include "shadps4_msl_override.h"
+ 
+ #include "kk_cmd_buffer.h"
+ #include "kk_debug.h"
+@@ -899,11 +900,28 @@ fs_uses_flat_varying(nir_shader *nir)
     return false;
  }
  
@@ -1026,6 +1034,54 @@ index 362739c..eadf52c 100644
     shader->info.uses_per_draw_data = msl_gather_uses_per_draw_data(nir);
     shader->info.num_cull_distances = nir->info.cull_distance_array_size;
     if (nir->info.stage == MESA_SHADER_VERTEX) {
+@@ -1253,9 +1271,14 @@ kk_compile_compute_pipeline(struct kk_device *device,
+ {
+    struct kk_physical_device *pdev = kk_device_physical(device);
+ 
++   bool owned_source = false;
++   const char *source = kk_shadps4_msl_source(data->code, data->entrypoint_name,
++                                              "compute", &owned_source);
+    mtl_library *library = mtl_new_library(
+-      device->mtl_compiler_handle, data->code, pdev->info.msl_version,
++      device->mtl_compiler_handle, source, pdev->info.msl_version,
+       MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++   if (owned_source)
++      free((void *)source);
+    if (library == NULL)
+       return VK_ERROR_INVALID_SHADER_NV;
+ 
+@@ -1526,9 +1549,14 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+    }
+ 
+    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
++   bool owned_vs = false;
++   const char *vs_source = kk_shadps4_msl_source(vs_data->code, vs_data->entrypoint_name,
++                                                 "vertex", &owned_vs);
+    mtl_library *vertex_library = mtl_new_library(
+-      device->mtl_compiler_handle, vs_data->code, pdev->info.msl_version,
++      device->mtl_compiler_handle, vs_source, pdev->info.msl_version,
+       MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++   if (owned_vs)
++      free((void *)vs_source);
+    if (vertex_library == NULL)
+       return VK_ERROR_INVALID_SHADER_NV;
+ 
+@@ -1537,9 +1565,14 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+                                           vs_data->entrypoint_name);
+ 
+    const struct msl_compile_data *fs_data = &vs->msl_data[MESA_SHADER_FRAGMENT];
++   bool owned_fs = false;
++   const char *fs_source = kk_shadps4_msl_source(fs_data->code, fs_data->entrypoint_name,
++                                                 "fragment", &owned_fs);
+    mtl_library *fragment_library = mtl_new_library(
+-      device->mtl_compiler_handle, fs_data->code, pdev->info.msl_version,
++      device->mtl_compiler_handle, fs_source, pdev->info.msl_version,
+       MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++   if (owned_fs)
++      free((void *)fs_source);
+    if (fragment_library == NULL) {
+       result = VK_ERROR_INVALID_SHADER_NV;
+       goto destroy_vertex;
 diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
 index 296f9ff..c29140b 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.h
@@ -1069,10 +1125,10 @@ index 0000000..dde2f1f
 +
 +#endif
 diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
-index f82e80f..792f75e 100644
+index f82e80f..b31e3d8 100644
 --- a/src/kosmickrisp/vulkan/meson.build
 +++ b/src/kosmickrisp/vulkan/meson.build
-@@ -202,3 +202,32 @@ kosmickrisp_icd = custom_target(
+@@ -202,3 +202,39 @@ kosmickrisp_icd = custom_target(
  )
  
  devenv.append('VK_DRIVER_FILES', kosmickrisp_icd.full_path())
@@ -1089,6 +1145,13 @@ index f82e80f..792f75e 100644
 +  test('shadps4-encoder-stats', executable(
 +    'shadps4_encoder_stats_test',
 +    'test_shadps4_encoder_stats.c',
++  ))
++endif
++
++if with_tests
++  test('shadps4-msl-override', executable(
++    'shadps4_msl_override_test',
++    'test_shadps4_msl_override.c',
 +  ))
 +endif
 +
@@ -1434,6 +1497,168 @@ index 0000000..3221daa
 +}
 +
 +#endif /* SHADPS4_ENCODER_STATS_H */
+diff --git a/src/kosmickrisp/vulkan/shadps4_msl_override.h b/src/kosmickrisp/vulkan/shadps4_msl_override.h
+new file mode 100644
+index 0000000..35ae1df
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/shadps4_msl_override.h
+@@ -0,0 +1,156 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Tuned Metal shaders for shadPS4 / The Last Guardian.
++ *
++ * KK_SHADPS4_MSL_DUMP_DIR=<dir> writes every Metal shader the driver compiles as
++ * <dir>/<key>.metal (plus <key>.txt with its entry point name and stage), and
++ * KK_SHADPS4_MSL_OVERRIDE_DIR=<dir> compiles <dir>/<key>.metal instead of the
++ * generated source when that file exists. The key is a 64-bit FNV-1a hash of the
++ * generated source with the entry point name replaced by KK_SHADPS4_ENTRY, so a
++ * shader keeps its key whether or not the emulator gives entry points diagnostic
++ * names; the files hold that placeholder and it is put back when loading.
++ * Overrides apply where Metal libraries are created, after the pipeline cache,
++ * so cached pipelines always keep the generated source.
++ */
++#ifndef SHADPS4_MSL_OVERRIDE_H
++#define SHADPS4_MSL_OVERRIDE_H
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define KK_SHADPS4_ENTRY_PLACEHOLDER "KK_SHADPS4_ENTRY"
++
++/* `text` with every occurrence of `from` replaced by `to` (malloc'd; NULL on failure). */
++static inline char *
++kk_shadps4_replace_all(const char *text, const char *from, const char *to)
++{
++   const size_t from_len = strlen(from), to_len = strlen(to);
++   if (from_len == 0)
++      return strdup(text);
++   size_t count = 0;
++   for (const char *p = strstr(text, from); p; p = strstr(p + from_len, from))
++      count++;
++   const size_t len = strlen(text) + count * to_len - count * from_len;
++   char *out = malloc(len + 1);
++   if (!out)
++      return NULL;
++   char *w = out;
++   const char *r = text;
++   for (const char *p = strstr(r, from); p; p = strstr(r, from)) {
++      memcpy(w, r, (size_t)(p - r));
++      w += p - r;
++      memcpy(w, to, to_len);
++      w += to_len;
++      r = p + from_len;
++   }
++   strcpy(w, r);
++   return out;
++}
++
++static inline uint64_t
++kk_shadps4_fnv1a64(const char *text)
++{
++   uint64_t hash = 0xcbf29ce484222325ull;
++   for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
++      hash ^= *p;
++      hash *= 0x100000001b3ull;
++   }
++   return hash;
++}
++
++/* The source with the entry point name normalized (malloc'd) and its key. */
++static inline char *
++kk_shadps4_msl_normalize(const char *code, const char *entrypoint, uint64_t *key)
++{
++   char *normalized = kk_shadps4_replace_all(code, entrypoint ? entrypoint : "",
++                                             KK_SHADPS4_ENTRY_PLACEHOLDER);
++   if (normalized && key)
++      *key = kk_shadps4_fnv1a64(normalized);
++   return normalized;
++}
++
++static inline void
++kk_shadps4_msl_path(char *out, size_t size, const char *dir, uint64_t key, const char *ext)
++{
++   snprintf(out, size, "%s/%016llx.%s", dir, (unsigned long long)key, ext);
++}
++
++static inline char *
++kk_shadps4_read_file(const char *path)
++{
++   FILE *f = fopen(path, "rb");
++   if (!f)
++      return NULL;
++   fseek(f, 0, SEEK_END);
++   long size = ftell(f);
++   fseek(f, 0, SEEK_SET);
++   char *data = size >= 0 ? malloc((size_t)size + 1) : NULL;
++   if (data) {
++      size_t got = fread(data, 1, (size_t)size, f);
++      data[got] = '\0';
++   }
++   fclose(f);
++   return data;
++}
++
++/* Dumps and/or overrides one shader source; returns the source to compile: either
++ * `code` itself or a malloc'd override the caller frees (`*owned` is set then). */
++static inline const char *
++kk_shadps4_msl_source(const char *code, const char *entrypoint, const char *stage,
++                      bool *owned)
++{
++   *owned = false;
++   const char *dump_dir = getenv("KK_SHADPS4_MSL_DUMP_DIR");
++   const char *override_dir = getenv("KK_SHADPS4_MSL_OVERRIDE_DIR");
++   if ((!dump_dir || !*dump_dir) && (!override_dir || !*override_dir))
++      return code;
++   uint64_t key = 0;
++   char *normalized = kk_shadps4_msl_normalize(code, entrypoint, &key);
++   if (!normalized)
++      return code;
++   char path[1024];
++   if (dump_dir && *dump_dir) {
++      kk_shadps4_msl_path(path, sizeof(path), dump_dir, key, "metal");
++      FILE *existing = fopen(path, "rb");
++      if (existing) {
++         fclose(existing);
++      } else {
++         FILE *f = fopen(path, "wb");
++         if (f) {
++            fputs(normalized, f);
++            fclose(f);
++         }
++         kk_shadps4_msl_path(path, sizeof(path), dump_dir, key, "txt");
++         f = fopen(path, "wb");
++         if (f) {
++            fprintf(f, "entry %s\nstage %s\n", entrypoint ? entrypoint : "", stage);
++            fclose(f);
++         }
++      }
++   }
++   const char *result = code;
++   if (override_dir && *override_dir) {
++      kk_shadps4_msl_path(path, sizeof(path), override_dir, key, "metal");
++      char *tuned = kk_shadps4_read_file(path);
++      if (tuned) {
++         char *restored = kk_shadps4_replace_all(tuned, KK_SHADPS4_ENTRY_PLACEHOLDER,
++                                                 entrypoint ? entrypoint : "");
++         free(tuned);
++         if (restored) {
++            result = restored;
++            *owned = true;
++            static int logged;
++            if (logged++ < 64)
++               fprintf(stderr, "KK_SHADPS4_MSL_OVERRIDE %016llx (%s)\n",
++                       (unsigned long long)key, stage);
++         }
++      }
++   }
++   free(normalized);
++   return result;
++}
++
++#endif
 diff --git a/src/kosmickrisp/vulkan/shadps4_root_trim.h b/src/kosmickrisp/vulkan/shadps4_root_trim.h
 new file mode 100644
 index 0000000..fc9172a
@@ -1764,6 +1989,80 @@ index 0000000..c49f2e0
 +   }
 +   puts("Encoder stats tests passed");
 +   return EXIT_SUCCESS;
++}
+diff --git a/src/kosmickrisp/vulkan/test_shadps4_msl_override.c b/src/kosmickrisp/vulkan/test_shadps4_msl_override.c
+new file mode 100644
+index 0000000..aca60b6
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/test_shadps4_msl_override.c
+@@ -0,0 +1,68 @@
++/* SPDX-License-Identifier: MIT */
++#include "shadps4_msl_override.h"
++
++#include <unistd.h>
++
++static int failures;
++
++static void
++check(bool condition, const char *what)
++{
++   if (!condition) {
++      fprintf(stderr, "MSL override test failed: %s\n", what);
++      failures++;
++   }
++}
++
++int
++main(void)
++{
++   char *r = kk_shadps4_replace_all("a main_ep b main_ep", "main_ep", "X");
++   check(r && strcmp(r, "a X b X") == 0, "replace all occurrences");
++   free(r);
++
++   const char *plain = "kernel void main_entrypoint(device int* p) { p[0] = 1; }";
++   const char *named = "kernel void shadps4_guest_Compute_1171c360(device int* p) { p[0] = 1; }";
++   uint64_t k1 = 0, k2 = 0;
++   char *n1 = kk_shadps4_msl_normalize(plain, "main_entrypoint", &k1);
++   char *n2 = kk_shadps4_msl_normalize(named, "shadps4_guest_Compute_1171c360", &k2);
++   check(k1 == k2 && k1 != 0, "same key whatever the entry point is called");
++   check(strstr(n1, KK_SHADPS4_ENTRY_PLACEHOLDER) != NULL, "placeholder in normalized text");
++   free(n1);
++   free(n2);
++
++   char path[256];
++   kk_shadps4_msl_path(path, sizeof(path), "/tmp/x", 0xabcull, "metal");
++   check(strcmp(path, "/tmp/x/0000000000000abc.metal") == 0, "path format");
++
++   /* Dump then override through the environment. */
++   char dir[] = "/tmp/kk_msl_testXXXXXX";
++   check(mkdtemp(dir) != NULL, "temp dir");
++   setenv("KK_SHADPS4_MSL_DUMP_DIR", dir, 1);
++   bool owned = true;
++   const char *src = kk_shadps4_msl_source(plain, "main_entrypoint", "compute", &owned);
++   check(src == plain && !owned, "no override yet: generated source");
++   kk_shadps4_msl_path(path, sizeof(path), dir, k1, "metal");
++   char *dumped = kk_shadps4_read_file(path);
++   check(dumped && strstr(dumped, KK_SHADPS4_ENTRY_PLACEHOLDER), "dumped with placeholder");
++   free(dumped);
++   unsetenv("KK_SHADPS4_MSL_DUMP_DIR");
++
++   FILE *f = fopen(path, "wb");
++   fputs("kernel void " KK_SHADPS4_ENTRY_PLACEHOLDER "(device int* p) { p[0] = 2; }", f);
++   fclose(f);
++   setenv("KK_SHADPS4_MSL_OVERRIDE_DIR", dir, 1);
++   src = kk_shadps4_msl_source(named, "shadps4_guest_Compute_1171c360", "compute", &owned);
++   check(owned && strstr(src, "shadps4_guest_Compute_1171c360(device int* p) { p[0] = 2; }"),
++         "override with the real entry point name");
++   if (owned)
++      free((void *)src);
++   src = kk_shadps4_msl_source("kernel void other() {}", "other", "compute", &owned);
++   check(!owned, "other shaders unchanged");
++   unsetenv("KK_SHADPS4_MSL_OVERRIDE_DIR");
++   remove(path);
++   kk_shadps4_msl_path(path, sizeof(path), dir, k1, "txt");
++   remove(path);
++   rmdir(dir);
++   return failures ? 1 : 0;
 +}
 diff --git a/src/kosmickrisp/vulkan/test_shadps4_root_trim.c b/src/kosmickrisp/vulkan/test_shadps4_root_trim.c
 new file mode 100644
