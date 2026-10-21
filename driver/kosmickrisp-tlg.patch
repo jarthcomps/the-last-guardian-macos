@@ -269,18 +269,19 @@ index 0000000..9755f34
 +   return 0;
 +}
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
-index 22f4bf7..6602c70 100644
+index 22f4bf7..50b33d0 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
-@@ -12,6 +12,7 @@
+@@ -12,6 +12,8 @@
  #include "kk_descriptor_set_layout.h"
  #include "kk_entrypoints.h"
  #include "kk_format.h"
++#include "shadps4_flush_state.h"
 +#include "shadps4_root_trim.h"
  #include "kk_image_view.h"
  
  #include "kosmickrisp/bridge/mtl_bridge.h"
-@@ -24,6 +25,70 @@
+@@ -24,6 +26,70 @@
  #include "vk_common_entrypoints.h"
  #include "vk_format.h"
  #include "vk_pipeline_layout.h"
@@ -351,7 +352,7 @@ index 22f4bf7..6602c70 100644
  
  static void
  kk_descriptor_state_fini(struct kk_cmd_buffer *cmd,
-@@ -67,6 +132,10 @@ end_recording(struct kk_cmd_buffer *cmd)
+@@ -67,6 +133,10 @@ end_recording(struct kk_cmd_buffer *cmd)
  
     cs_end(cmd);
     mtl_end_command_buffer(cmd->metal.cmd_buf);
@@ -362,7 +363,7 @@ index 22f4bf7..6602c70 100644
     kk_cmd_pool_return_allocator(kk_cmd_buffer_pool(cmd), cmd->metal.allocator);
     cmd->metal.allocator = NULL;
  }
-@@ -269,13 +338,19 @@ cs_start_render(struct kk_cmd_buffer *cmd)
+@@ -269,13 +339,19 @@ cs_start_render(struct kk_cmd_buffer *cmd)
  
     cmd->metal.render = mtl_new_render_command_encoder_with_descriptor(
        cmd->metal.cmd_buf, state->render_pass_descriptor);
@@ -385,7 +386,7 @@ index 22f4bf7..6602c70 100644
  
     uint32_t layer_ids[KK_MAX_MULTIVIEW_VIEW_COUNT] = {};
     uint32_t count = 0u;
-@@ -315,10 +390,14 @@ cs_get_compute(struct kk_cmd_buffer *cmd)
+@@ -315,10 +391,14 @@ cs_get_compute(struct kk_cmd_buffer *cmd)
  {
     /* If we are inside render, we need to force a restart later */
     if (cmd->metal.render) {
@@ -400,7 +401,19 @@ index 22f4bf7..6602c70 100644
     }
  
     if (cmd->metal.compute == NULL) {
-@@ -405,54 +484,67 @@ kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd, uint64_t addr)
+@@ -387,6 +467,11 @@ cs_end(struct kk_cmd_buffer *cmd)
+ void
+ kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd, uint64_t addr)
+ {
++   /* Slot 0 keeps the address of the last bind (state.root_addr), so binding
++    * the same root again needs no argument table write. */
++   if (!kk_shadps4_root_bind_needed(cmd->state.root_addr, addr))
++      return;
++
+    mtl_set_address(cmd->argument_table, addr, 0u);
+    cmd->state.root_addr = addr;
+ }
+@@ -405,54 +490,67 @@ kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd, uint64_t addr)
   * attachment memory. Meaning there was no write to the attachment and therefore
   * no split is needed.
   */
@@ -497,7 +510,7 @@ index 22f4bf7..6602c70 100644
  }
  
  VKAPI_ATTR void VKAPI_CALL
-@@ -465,19 +557,31 @@ kk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
+@@ -465,19 +563,31 @@ kk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
      * barrier. To take advantage of this we need to remove the chaining of
      * encoders. */
     if (cmd->metal.render) {
@@ -529,7 +542,7 @@ index 22f4bf7..6602c70 100644
        /* We chain encoders, so an intra-encoder barrier is enough here:
         * no need to tear down and recreate the encoder.
         */
-@@ -534,6 +638,7 @@ kk_bind_descriptor_sets(struct kk_descriptor_state *desc,
+@@ -534,6 +644,7 @@ kk_bind_descriptor_sets(struct kk_descriptor_state *desc,
              vk_to_kk_descriptor_set_layout(pipeline_layout->set_layouts[s]);
  
           if (set != NULL && set_layout->vk.dynamic_descriptor_count > 0) {
@@ -537,7 +550,21 @@ index 22f4bf7..6602c70 100644
              for (uint32_t j = 0; j < set_layout->vk.dynamic_descriptor_count;
                   j++) {
                 struct kk_buffer_address addr = set->dynamic_buffers[j];
-@@ -767,13 +872,19 @@ kk_upload_descriptor_root(struct kk_cmd_buffer *cmd,
+@@ -639,7 +750,12 @@ kk_push_constants(UNUSED struct kk_cmd_buffer *cmd,
+                   struct kk_descriptor_state *desc,
+                   const VkPushConstantsInfoKHR *info)
+ {
+-   memcpy(desc->root.push + info->offset, info->pValues, info->size);
++   /* Identical bytes leave the root table as it is */
++   if (info->size == 0u ||
++       !kk_shadps4_copy_if_changed(desc->root.push + info->offset,
++                                   info->pValues, info->size))
++      return;
++
+    desc->root_dirty = true;
+ }
+ 
+@@ -767,13 +883,19 @@ kk_upload_descriptor_root(struct kk_cmd_buffer *cmd,
  {
     struct kk_descriptor_state *desc = kk_get_descriptors_state(cmd, bind_point);
     struct kk_root_descriptor_table *root = &desc->root;
@@ -559,6 +586,45 @@ index 22f4bf7..6602c70 100644
     desc->root_dirty = false;
  
     return root_ptr.gpu;
+@@ -785,16 +907,32 @@ kk_cmd_buffer_flush_push_descriptors(struct kk_cmd_buffer *cmd,
+ {
+    u_foreach_bit(set_idx, desc->push_dirty) {
+       struct kk_push_descriptor_set *push_set = desc->push[set_idx];
+-      struct kk_ptr push_gpu = kk_pool_upload(
+-         cmd, push_set->data, sizeof(push_set->data), KK_MIN_UBO_ALIGNMENT);
+-      if (unlikely(!push_gpu.gpu))
+-         return;
+ 
+-      desc->root.sets[set_idx] = push_gpu.gpu;
++      /* Bytes equal to the last upload are read from that upload: the GPU sees
++       * the same data at the same address. */
++      if (!kk_shadps4_push_upload_reusable(push_set->uploaded,
++                                           push_set->uploaded_cpu,
++                                           push_set->data,
++                                           sizeof(push_set->data))) {
++         struct kk_ptr push_gpu =
++            kk_pool_upload(cmd, push_set->data, sizeof(push_set->data),
++                           KK_MIN_UBO_ALIGNMENT);
++         if (unlikely(!push_gpu.gpu))
++            return;
++
++         push_set->uploaded = true;
++         push_set->uploaded_cpu = push_gpu.cpu;
++         push_set->uploaded_gpu = push_gpu.gpu;
++      }
++
++      /* The root table only changes when the set moves to another address */
++      if (desc->root.sets[set_idx] != push_set->uploaded_gpu) {
++         desc->root.sets[set_idx] = push_set->uploaded_gpu;
++         desc->root_dirty = true;
++      }
+       desc->set_sizes[set_idx] = sizeof(push_set->data);
+    }
+ 
+-   desc->root_dirty = true;
+    desc->push_dirty = 0;
+ }
+ 
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 index dcd0983..4ace936 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
@@ -656,10 +722,18 @@ index 4df22e7..1a3d4c4 100644
        struct kk_ptr patched =
           kk_pool_alloc(cmd, sizeof(VkDispatchIndirectCommand), 4u);
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
-index 24f05de..d0a81c8 100644
+index 24f05de..560a94a 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
-@@ -466,6 +466,7 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+@@ -15,6 +15,7 @@
+ #include "kk_image_view.h"
+ #include "kk_physical_device.h"
+ #include "kk_query_pool.h"
++#include "shadps4_flush_state.h"
+ 
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/vk_to_mtl_map.h"
+@@ -466,6 +467,7 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
           attachment_descriptor, MTL_LOAD_ACTION_LOAD);
     }
     cmd->state.gfx.need_to_start_render_pass = no_framebuffer;
@@ -667,7 +741,7 @@ index 24f05de..d0a81c8 100644
  
     kk_cmd_buffer_dirty_all_gfx(cmd);
  
-@@ -628,6 +629,13 @@ kk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
+@@ -628,6 +630,13 @@ kk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
  
     kk_apply_attachment_store_ops(cmd, false);
  
@@ -681,7 +755,20 @@ index 24f05de..d0a81c8 100644
     /* Clean up previous encoder */
     cs_end(cmd);
     mtl_release(cmd->state.gfx.render_pass_descriptor);
-@@ -971,6 +979,7 @@ kk_flush_render_pass(struct kk_cmd_buffer *cmd)
+@@ -735,6 +744,12 @@ kk_CmdBindVertexBuffers3KHR(VkCommandBuffer commandBuffer,
+          pBindingInfos[i].addressRange;
+       struct kk_addr_range *vb_range =
+          &cmd->state.gfx.vb.addr_range[firstBinding + i];
++      /* The attribute clamps depend on this binding's address and size (stride
++       * and format have their own dirty bits), so rebinding the same range
++       * leaves them and the root table unchanged. */
++      if (!kk_shadps4_vb_binding_changed(vb_range->addr, vb_range->range,
++                                         range.address, range.size))
++         continue;
+       vb_range->addr = range.address;
+       vb_range->range = range.size;
+       cmd->state.gfx.dirty |= KK_DIRTY_VB;
+@@ -971,6 +986,7 @@ kk_flush_render_pass(struct kk_cmd_buffer *cmd)
        cs_end(cmd);
        kk_cmd_buffer_dirty_all_gfx(cmd);
        cmd->state.gfx.need_to_start_render_pass = true;
@@ -689,15 +776,19 @@ index 24f05de..d0a81c8 100644
     }
  }
  
-@@ -1527,6 +1536,20 @@ kk_flush_gfx_state(struct kk_cmd_buffer *cmd)
+@@ -1527,6 +1543,24 @@ kk_flush_gfx_state(struct kk_cmd_buffer *cmd)
  
     kk_flush_render_pass(cmd);
     kk_flush_pipeline(cmd);
 +   KK_SHADPS4_STAT(draws);
 +
 +   /* Barriers recorded later in this encoder may name writes of these
-+    * draws only if one of their shaders writes memory. */
-+   if (!gfx->render.encoder_may_write_memory) {
++    * draws only if one of their shaders writes memory. The flag turns on only
++    * when a graphics shader is bound (which sets its dirty bit) or a render
++    * encoder starts (which sets all of them), so the scan is skipped while no
++    * graphics shader is dirty. */
++   if (!gfx->render.encoder_may_write_memory &&
++       (cmd->state.dirty_shaders & BITFIELD_MASK(MESA_SHADER_COMPUTE))) {
 +      for (unsigned stage = MESA_SHADER_VERTEX; stage <= MESA_SHADER_FRAGMENT;
 +           stage++) {
 +         const struct kk_shader *shader = cmd->state.shaders[stage];
@@ -710,7 +801,7 @@ index 24f05de..d0a81c8 100644
  
     if (desc->push_dirty)
        kk_cmd_buffer_flush_push_descriptors(cmd, desc);
-@@ -1971,14 +1994,29 @@ requires_unroll(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+@@ -1971,14 +2005,29 @@ requires_unroll(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
        return false;
  
     /* Metal does not support triangle fans */
@@ -842,6 +933,24 @@ index 479e70e..5573221 100644
  
     struct {
        struct util_dynarray free_allocators;
+diff --git a/src/kosmickrisp/vulkan/kk_descriptor_set.h b/src/kosmickrisp/vulkan/kk_descriptor_set.h
+index 97ea137..e3b72e8 100644
+--- a/src/kosmickrisp/vulkan/kk_descriptor_set.h
++++ b/src/kosmickrisp/vulkan/kk_descriptor_set.h
+@@ -66,6 +66,13 @@ kk_descriptor_set_addr(const struct kk_descriptor_set *set)
+ struct kk_push_descriptor_set {
+    uint8_t data[KK_PUSH_DESCRIPTOR_SET_SIZE];
+    struct kk_descriptor_set_layout *layout;
++
++   /* The last upload of data by kk_cmd_buffer_flush_push_descriptors. Its CPU
++    * and GPU addresses stay valid while this struct does, since both are freed
++    * with the command buffer's descriptor state and uploads. */
++   bool uploaded;
++   const void *uploaded_cpu;
++   uint64_t uploaded_gpu;
+ };
+ 
+ void kk_push_descriptor_set_update(struct kk_push_descriptor_set *push_set,
 diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
 index 613977a..5dbec0b 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
@@ -994,18 +1103,19 @@ index 5194492..0cbe1ff 100644
                                         dev->residency_set.handle);
  
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 362739c..3db6431 100644
+index 362739c..0ad5305 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
-@@ -6,6 +6,7 @@
+@@ -6,6 +6,8 @@
   */
  
  #include "kk_shader.h"
++#include "shadps4_flush_state.h"
 +#include "shadps4_msl_override.h"
  
  #include "kk_cmd_buffer.h"
  #include "kk_debug.h"
-@@ -899,11 +900,28 @@ fs_uses_flat_varying(nir_shader *nir)
+@@ -899,11 +901,28 @@ fs_uses_flat_varying(nir_shader *nir)
     return false;
  }
  
@@ -1034,7 +1144,7 @@ index 362739c..3db6431 100644
     shader->info.uses_per_draw_data = msl_gather_uses_per_draw_data(nir);
     shader->info.num_cull_distances = nir->info.cull_distance_array_size;
     if (nir->info.stage == MESA_SHADER_VERTEX) {
-@@ -1253,9 +1271,14 @@ kk_compile_compute_pipeline(struct kk_device *device,
+@@ -1253,9 +1272,14 @@ kk_compile_compute_pipeline(struct kk_device *device,
  {
     struct kk_physical_device *pdev = kk_device_physical(device);
  
@@ -1050,7 +1160,7 @@ index 362739c..3db6431 100644
     if (library == NULL)
        return VK_ERROR_INVALID_SHADER_NV;
  
-@@ -1526,9 +1549,14 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+@@ -1526,9 +1550,14 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
     }
  
     const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
@@ -1066,7 +1176,7 @@ index 362739c..3db6431 100644
     if (vertex_library == NULL)
        return VK_ERROR_INVALID_SHADER_NV;
  
-@@ -1537,9 +1565,14 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+@@ -1537,9 +1566,14 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
                                            vs_data->entrypoint_name);
  
     const struct msl_compile_data *fs_data = &vs->msl_data[MESA_SHADER_FRAGMENT];
@@ -1082,6 +1192,20 @@ index 362739c..3db6431 100644
     if (fragment_library == NULL) {
        result = VK_ERROR_INVALID_SHADER_NV;
        goto destroy_vertex;
+@@ -1996,9 +2030,12 @@ kk_cmd_bind_shaders(struct vk_command_buffer *cmd_buffer, uint32_t stage_count,
+    for (uint32_t i = 0; i < stage_count; i++) {
+       struct kk_shader *shader = container_of(shaders[i], struct kk_shader, vk);
+ 
++      /* vkCmdBindPipeline passes every graphics stage, changed or not. Only a
++       * new shader dirties the state built from it, so a repeat is skipped. */
+       if (stages[i] == MESA_SHADER_COMPUTE || stages[i] == MESA_SHADER_KERNEL)
+          kk_cmd_bind_compute_shader(cmd, shader);
+-      else
++      else if (kk_shadps4_shader_rebind_needed(cmd->state.shaders[stages[i]],
++                                               shader))
+          kk_cmd_bind_graphics_shader(cmd, stages[i], shader);
+    }
+ }
 diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
 index 296f9ff..c29140b 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.h
@@ -1125,10 +1249,10 @@ index 0000000..dde2f1f
 +
 +#endif
 diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
-index f82e80f..b31e3d8 100644
+index f82e80f..f6c442c 100644
 --- a/src/kosmickrisp/vulkan/meson.build
 +++ b/src/kosmickrisp/vulkan/meson.build
-@@ -202,3 +202,39 @@ kosmickrisp_icd = custom_target(
+@@ -202,3 +202,46 @@ kosmickrisp_icd = custom_target(
  )
  
  devenv.append('VK_DRIVER_FILES', kosmickrisp_icd.full_path())
@@ -1166,6 +1290,13 @@ index f82e80f..b31e3d8 100644
 +  test('shadps4-cache-key', executable(
 +    'shadps4_cache_key_test',
 +    'test_shadps4_cache_key.c',
++  ))
++endif
++
++if with_tests
++  test('shadps4-flush-state', executable(
++    'shadps4_flush_state_test',
++    'test_shadps4_flush_state.c',
 +  ))
 +endif
 diff --git a/src/kosmickrisp/vulkan/shadps4_barrier_split.h b/src/kosmickrisp/vulkan/shadps4_barrier_split.h
@@ -1497,6 +1628,74 @@ index 0000000..3221daa
 +}
 +
 +#endif /* SHADPS4_ENCODER_STATS_H */
+diff --git a/src/kosmickrisp/vulkan/shadps4_flush_state.h b/src/kosmickrisp/vulkan/shadps4_flush_state.h
+new file mode 100644
+index 0000000..b713719
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/shadps4_flush_state.h
+@@ -0,0 +1,62 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Decisions that let the per-draw state flush skip work whose result would not
++ * change (shadPS4 / The Last Guardian performance work, KK_SHADPS4 flush
++ * changes). Each helper answers one question the flush asks, in plain C so that
++ * it can be unit tested (test_shadps4_flush_state.c).
++ */
++#ifndef SHADPS4_FLUSH_STATE_H
++#define SHADPS4_FLUSH_STATE_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++/* The attribute clamps and bases of a vertex binding depend only on the
++ * buffer's address and size, so rebinding the same range changes nothing. */
++static inline bool
++kk_shadps4_vb_binding_changed(uint64_t bound_addr, uint64_t bound_range,
++                              uint64_t addr, uint64_t range)
++{
++   return bound_addr != addr || bound_range != range;
++}
++
++/* Argument table slot 0 holds the root address last written to it, which
++ * kk_cmd_buffer.state.root_addr records (zero after a reset, meaning unknown).
++ * A nonzero address equal to that needs no write. Zero is always written. */
++static inline bool
++kk_shadps4_root_bind_needed(uint64_t slot_addr, uint64_t addr)
++{
++   return addr == 0 || slot_addr != addr;
++}
++
++/* Push descriptor bytes equal to the last upload of the set can be read from
++ * that upload: the GPU then sees the same data at the same address. */
++static inline bool
++kk_shadps4_push_upload_reusable(bool uploaded, const void *uploaded_bytes,
++                                const void *data, size_t size)
++{
++   return uploaded && uploaded_bytes != NULL && size > 0 &&
++          memcmp(uploaded_bytes, data, size) == 0;
++}
++
++/* Binding the shader that a graphics stage already has changes nothing. */
++static inline bool
++kk_shadps4_shader_rebind_needed(const void *bound, const void *requested)
++{
++   return bound != requested;
++}
++
++/* Copies src over dst only when the bytes differ. Returns true when dst
++ * changed, so the caller marks the root table dirty only then. */
++static inline bool
++kk_shadps4_copy_if_changed(void *dst, const void *src, size_t size)
++{
++   if (memcmp(dst, src, size) == 0)
++      return false;
++   memcpy(dst, src, size);
++   return true;
++}
++
++#endif
 diff --git a/src/kosmickrisp/vulkan/shadps4_msl_override.h b/src/kosmickrisp/vulkan/shadps4_msl_override.h
 new file mode 100644
 index 0000000..35ae1df
@@ -1989,6 +2188,101 @@ index 0000000..c49f2e0
 +   }
 +   puts("Encoder stats tests passed");
 +   return EXIT_SUCCESS;
++}
+diff --git a/src/kosmickrisp/vulkan/test_shadps4_flush_state.c b/src/kosmickrisp/vulkan/test_shadps4_flush_state.c
+new file mode 100644
+index 0000000..d211ded
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/test_shadps4_flush_state.c
+@@ -0,0 +1,89 @@
++/* SPDX-License-Identifier: MIT */
++#include "shadps4_flush_state.h"
++
++#include <stdio.h>
++#include <string.h>
++
++static int failures;
++
++static void
++check(bool condition, const char *what)
++{
++   if (!condition) {
++      fprintf(stderr, "Flush state test failed: %s\n", what);
++      failures++;
++   }
++}
++
++int
++main(void)
++{
++   /* Vertex buffer rebinds */
++   check(!kk_shadps4_vb_binding_changed(0x1000, 256, 0x1000, 256),
++         "same address and size: no change");
++   check(kk_shadps4_vb_binding_changed(0x1000, 256, 0x2000, 256),
++         "address moved: change");
++   check(kk_shadps4_vb_binding_changed(0x1000, 256, 0x1000, 512),
++         "size changed: change");
++   check(!kk_shadps4_vb_binding_changed(0, 0, 0, 0),
++         "null binding rebound as null: no change");
++   check(kk_shadps4_vb_binding_changed(0, 0, 0x1000, 0),
++         "null binding bound: change");
++
++   /* Argument table root slot */
++   check(kk_shadps4_root_bind_needed(0, 0x5000),
++         "slot unknown (after reset): write");
++   check(!kk_shadps4_root_bind_needed(0x5000, 0x5000),
++         "slot already holds the root: no write");
++   check(kk_shadps4_root_bind_needed(0x5000, 0x6000),
++         "slot holds another root: write");
++   check(kk_shadps4_root_bind_needed(0, 0), "zero address: always written");
++   check(kk_shadps4_root_bind_needed(0x5000, 0),
++         "zero address over a root: written");
++
++   /* Push descriptor upload reuse */
++   uint8_t uploaded[8] = {1, 2, 3, 4, 5, 6, 7, 8};
++   uint8_t same[8] = {1, 2, 3, 4, 5, 6, 7, 8};
++   uint8_t last_differs[8] = {1, 2, 3, 4, 5, 6, 7, 9};
++   check(!kk_shadps4_push_upload_reusable(false, uploaded, same, 8),
++         "never uploaded: upload");
++   check(!kk_shadps4_push_upload_reusable(true, NULL, same, 8),
++         "no upload pointer: upload");
++   check(kk_shadps4_push_upload_reusable(true, uploaded, same, 8),
++         "same bytes as the last upload: reuse");
++   check(!kk_shadps4_push_upload_reusable(true, uploaded, last_differs, 8),
++         "last byte differs: upload");
++   check(!kk_shadps4_push_upload_reusable(true, uploaded, same, 0),
++         "empty size: upload");
++
++   /* Graphics shader rebinds */
++   int shader_a = 1, shader_b = 2;
++   check(!kk_shadps4_shader_rebind_needed(&shader_a, &shader_a),
++         "same shader on the stage: no rebind");
++   check(kk_shadps4_shader_rebind_needed(&shader_a, &shader_b),
++         "other shader: rebind");
++   check(kk_shadps4_shader_rebind_needed(NULL, &shader_a),
++         "shader on an empty stage: rebind");
++   check(kk_shadps4_shader_rebind_needed(&shader_a, NULL),
++         "empty stage over a shader: rebind");
++   check(!kk_shadps4_shader_rebind_needed(NULL, NULL),
++         "empty stage stays empty: no rebind");
++
++   /* Copy only when changed */
++   uint8_t dst[4] = {1, 2, 3, 4};
++   const uint8_t identical[4] = {1, 2, 3, 4};
++   const uint8_t changed[4] = {1, 9, 3, 4};
++   check(!kk_shadps4_copy_if_changed(dst, identical, 4),
++         "identical bytes: no copy reported");
++   check(kk_shadps4_copy_if_changed(dst, changed, 4),
++         "changed bytes: copy reported");
++   check(memcmp(dst, changed, sizeof(dst)) == 0,
++         "changed bytes: destination holds the new bytes");
++   check(!kk_shadps4_copy_if_changed(dst, changed, 0),
++         "empty copy: no change");
++
++   if (failures)
++      return 1;
++   printf("shadps4 flush state: all checks passed\n");
++   return 0;
 +}
 diff --git a/src/kosmickrisp/vulkan/test_shadps4_msl_override.c b/src/kosmickrisp/vulkan/test_shadps4_msl_override.c
 new file mode 100644
