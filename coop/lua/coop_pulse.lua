@@ -10,7 +10,14 @@
 --              for scripted shots) aim at the cursor, as a direct aim;
 --   "command": Trico's own pulse control commands (ready, then shot);
 --   "both":    the emblem, plus the ready command on R2 and the shot command as soon as the pulse
---              aims (in game the emblem alone gets the pulse to Search and Aim, but not to Shot).
+--              aims (in game the emblem alone gets the pulse to Search and Aim, but not to Shot);
+--   "aim":     as "both", but the emblem is shown as the cursor the whole time the cursor is up,
+--              so the player sees where the shield's ray lands and the pulse can search early
+--              (in game the emblem alone makes Trico aim and fire within a few seconds, as when
+--              the boy holds the shield up, so this one fires without R2);
+--   "hold":    hold R2 to aim and fire, like the boy holding the shield up: while R2 is held the
+--              emblem is on the cursor and the ready and shot commands go out as in "both";
+--              letting go puts everything back.
 -- Both also turn on the free pulse mode (fire without the emblem being Trico's interest) and point
 -- Trico's tail at the cursor (OverwriteTailPulseDst).
 
@@ -30,7 +37,7 @@ local HIDE_AFTER = 8.0     -- seconds without aiming before the cursor goes away
 local FIRE_HOLD = 10.0     -- at most this many seconds of aim after R2; the aim ends earlier once
                            -- the pulse has gone through "Shot" (or the bolt has shown) and stopped
 local SHOT_AFTER = 1.0     -- "command": seconds from ready to shot
-local SHOT_AFTER_BOTH = 2.0  -- "both": shot after this long even if the pulse never aims
+local SHOT_AFTER_BOTH = 2.0  -- emblem methods: shot after this long even if the pulse never aims
 local REPORT = 0.5
 
 CoopPulse.method = CoopPulse.method or "emblem"
@@ -128,11 +135,14 @@ local function ShowCursor(pos)
 	CoopPulse.effect = "shown"
 end
 
+local ClearEmblem
+
 local function HideCursor()
 	local name = CoopPulse.cursorName
 	local obj = name and FindObject(name)
 	if obj then obj.entityFlags = "|Hide" end
 	CoopPulse.effect = "hidden"
+	if CoopPulse.method == "aim" and CoopPulse.firing <= 0 then ClearEmblem() end
 end
 
 local function SetEmblem(pos)
@@ -151,7 +161,7 @@ local function SetEmblem(pos)
 	return true
 end
 
-local function ClearEmblem()
+function ClearEmblem()
 	if not CoopPulse.ownEmblem then return end
 	CoopPulse.ownEmblem = false
 	local inst = PlayerInstruction()
@@ -170,9 +180,9 @@ local function Fire(props)
 	end
 	cu.EnableFreePulseMode(props)
 	cu.OverwriteTailPulseDst(props, CoopPulse.cursor)
-	if CoopPulse.method == "command" or CoopPulse.method == "both" then
+	if CoopPulse.method ~= "emblem" then
 		Ai2.Utils.ReqCtrlCmd(props.currentInfo.ai2Ext, CMD_READY)
-		CoopPulse.shotIn = CoopPulse.method == "both" and SHOT_AFTER_BOTH or SHOT_AFTER
+		CoopPulse.shotIn = CoopPulse.method == "command" and SHOT_AFTER or SHOT_AFTER_BOTH
 	end
 	if CoopPulse.method ~= "command" then SetEmblem(CoopPulse.cursor) end
 	CoopPulse.firing = FIRE_HOLD
@@ -235,7 +245,7 @@ local function Step(dt, input, props, shield)
 	end
 	local dx, dz = CoopPulse.Step(input.rx or 0, input.ry or 0, fx, fz, dt)
 	local fire = input.down and input.down.R2
-	if dx or fire then
+	if dx or fire or (input.hold and input.hold.R2) then
 		CoopPulse.idle = 0
 		if not CoopPulse.active then
 			CoopPulse.active = true
@@ -259,8 +269,26 @@ local function Step(dt, input, props, shield)
 	local x, z = CoopPulse.Clamp(pos, c.X + (dx or 0), c.Z + (dz or 0))
 	CoopPulse.cursor = Ground(props, Vector(x, c.Y, z))
 	ShowCursor(CoopPulse.cursor)
+	if CoopPulse.method == "aim" and CoopPulse.firing <= 0 and not fire then
+		-- the emblem is the cursor; never over the boy's own aim
+		local inst = PlayerInstruction()
+		if inst and (CoopPulse.ownEmblem or not inst.triggerObj) then
+			if CoopPulse.ownEmblem then inst.triggerAimPos = CoopPulse.cursor
+			else SetEmblem(CoopPulse.cursor) end
+		end
+	end
 
-	if fire and CoopPulse.firing <= 0 then Fire(props) end
+	local held = input.hold and input.hold.R2
+	if CoopPulse.method == "hold" then
+		if held and CoopPulse.firing <= 0 then Fire(props) end
+		if held and CoopPulse.firing > 0 then CoopPulse.firing = FIRE_HOLD end
+		if not held and CoopPulse.firing > 0 then
+			EndFire(props, not CoopPulse.shot)
+			return
+		end
+	elseif fire and CoopPulse.firing <= 0 then
+		Fire(props)
+	end
 	if CoopPulse.firing > 0 then
 		CoopPulse.firing = CoopPulse.firing - dt
 		if CoopPulse.ownEmblem then
@@ -272,7 +300,7 @@ local function Step(dt, input, props, shield)
 		local state = tp and tp.state
 		if CoopPulse.shotIn then
 			CoopPulse.shotIn = CoopPulse.shotIn - dt
-			if CoopPulse.shotIn <= 0 or (CoopPulse.method == "both" and state == "Aim") then
+			if CoopPulse.shotIn <= 0 or (CoopPulse.method ~= "command" and state == "Aim") then
 				CoopPulse.shotIn = nil
 				Ai2.Utils.ReqCtrlCmd(info.ai2Ext, CMD_SHOT)
 			end
@@ -281,7 +309,7 @@ local function Step(dt, input, props, shield)
 		local okZap, zap = pcall(Ai2.CondorUtils.IsShootingPulse)
 		if state == "Shot" or (okZap and zap) then
 			CoopPulse.shot = true
-		elseif CoopPulse.shot then
+		elseif CoopPulse.shot and CoopPulse.method ~= "hold" then
 			CoopPulse.firing = 0
 		end
 		if CoopPulse.firing <= 0 then EndFire(props, false) end

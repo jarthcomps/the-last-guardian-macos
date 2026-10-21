@@ -148,6 +148,70 @@ CoopPulse.Release()
 GameFlag.HaveTrigger = 0
 CoopPulse.Update(0.1, pad())
 
+-- aim: the emblem is the cursor while the cursor is up; R2 then readies and shoots
+CoopPulse.method = "aim"
+GameFlag.HaveTrigger = 1
+local cmdsBefore = #Harness.CallsNamed("cmd")
+CoopPulse.Update(0.1, pad(0, 1))
+check(CoopPulse.active and inst.triggerObj ~= nil and CoopPulse.ownEmblem, "aim: emblem shown with the cursor")
+local z0 = inst.triggerAimPos.Z
+CoopPulse.Update(0.25, pad(0, 1))
+check(inst.triggerAimPos.Z > z0, "aim: emblem follows the cursor")
+check(#Harness.CallsNamed("cmd") == cmdsBefore, "aim: no commands before R2")
+CoopPulse.Update(0.1, pad(0, 0, true))
+cmds = Harness.CallsNamed("cmd")
+check(cmds[#cmds][3] == "ControlCommand_C_A_tail_pulse_ready", "aim: ready on R2")
+for _ = 1, 21 do CoopPulse.Update(0.1, pad()) end
+cmds = Harness.CallsNamed("cmd")
+check(cmds[#cmds][3] == "ControlCommand_C_A_tail_pulse_shot", "aim: shot")
+for _ = 1, 80 do CoopPulse.Update(0.1, pad()) end
+for _ = 1, 81 do CoopPulse.Update(0.1, pad()) end
+check(not CoopPulse.active and inst.triggerObj == nil, "aim: emblem gone with the cursor")
+-- the boy's own aim still wins
+inst.triggerObj = boyTrigger
+CoopPulse.Update(0.1, pad(0, 1))
+check(inst.triggerObj == boyTrigger and not CoopPulse.ownEmblem, "aim: boy's aim left alone")
+inst.triggerObj = nil
+CoopPulse.Release()
+GameFlag.HaveTrigger = 0
+CoopPulse.Update(0.1, pad())
+
+-- hold: aim and fire while R2 is held, stop when it is let go
+CoopPulse.method = "hold"
+GameFlag.HaveTrigger = 1
+local nb = #Harness.CallsNamed("cmd")
+local function held(rx, ry) return { x = 0, y = 0, rx = rx or 0, ry = ry or 0, hold = { R2 = true }, down = {} } end
+CoopPulse.Update(0.1, pad(0, 1))
+check(CoopPulse.active and inst.triggerObj == nil, "hold: cursor without R2 shows no emblem")
+CoopPulse.Update(0.1, pad(0, 0, true))
+check(inst.triggerObj ~= nil and CoopPulse.firing > 0, "hold: emblem on R2")
+cmds = Harness.CallsNamed("cmd")
+check(#cmds == nb + 1 and cmds[#cmds][3] == "ControlCommand_C_A_tail_pulse_ready", "hold: ready")
+local tph = Harness.tricoProps.currentInfo.ai2Ext.tailPulse
+tph.state = "Aim"
+CoopPulse.Update(0.1, held())
+cmds = Harness.CallsNamed("cmd")
+check(cmds[#cmds][3] == "ControlCommand_C_A_tail_pulse_shot", "hold: shot on Aim")
+tph.state = "Shot"
+for _ = 1, 150 do CoopPulse.Update(0.1, held(0, 1)) end
+check(inst.triggerObj ~= nil and CoopPulse.firing > 0, "hold: still firing after 15 s held")
+tph.state = "Finalize"
+CoopPulse.Update(0.1, held())
+check(inst.triggerObj ~= nil, "hold: the shot ending does not stop a held R2")
+CoopPulse.Update(0.1, pad())
+check(inst.triggerObj == nil and CoopPulse.firing <= 0, "hold: let go, put back")
+cmds = Harness.CallsNamed("cmd")
+check(cmds[#cmds][3] == "ControlCommand_C_A_tail_pulse_shot", "hold: no cancel after a shot")
+-- let go before it shot: cancelled
+tph.state = "Idle"
+CoopPulse.Update(0.1, pad(0, 0, true))
+CoopPulse.Update(0.1, pad())
+cmds = Harness.CallsNamed("cmd")
+check(cmds[#cmds][3] == "ControlCommand_C_A_tail_pulse_cancel" and inst.triggerObj == nil, "hold: early let-go cancels")
+CoopPulse.Release()
+GameFlag.HaveTrigger = 0
+CoopPulse.Update(0.1, pad())
+
 -- reports: the shield on change, the pulse state twice a second
 CoopDebug.enabled = true
 GameFlag.HaveTrigger = 1
@@ -156,8 +220,8 @@ CoopPulse.reportIn = 0
 CoopPulse.Update(0.1, pad())
 CoopDebug.Flush()
 check(#Harness.Find("^PU shield true") == 1, "shield change reported")
-check(#Harness.Find("^PU both sh=true aim=%? st=Aim md=Electricity tg=t1 zap=false") == 1,
-	"state report: " .. tostring((Harness.Find("^PU both")[1] or {})[2]))
+check(#Harness.Find("^PU hold sh=true aim=%? st=Aim md=Electricity tg=t1 zap=false") == 1,
+	"state report: " .. tostring((Harness.Find("^PU hold")[1] or {})[2]))
 
 -- leaving the Trico role puts things back
 CoopPulse.method = "emblem"
