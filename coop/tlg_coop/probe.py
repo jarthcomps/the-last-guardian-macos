@@ -113,7 +113,8 @@ def swapped_save(save: Path, targets: dict[str, Path], backup: Path):
 
 
 def runner_command(root: Path, tag: str, seconds: float, patch: Path, inputs: list[str],
-                   extra: list[str], engine: Path | None = None, coop: bool = False) -> list[str]:
+                   extra: list[str], engine: Path | None = None, coop: bool = False,
+                   one_per_sample: bool = True) -> list[str]:
     engine = engine or root / ENGINE
     sha = engine_sha256(engine)
     cmd = [sys.executable, str(root / "tools/guardian_outdoor_experiments.py"), tag, "combined",
@@ -122,6 +123,9 @@ def runner_command(root: Path, tag: str, seconds: float, patch: Path, inputs: li
            "--patch-file", str(patch), "--game-config", f"Log.filter={LOG_FILTER}"]
     for step in inputs:
         cmd += ["--input", step]
+    if inputs and one_per_sample:
+        # a press and its release never in the same frame (missed swaps otherwise)
+        cmd += ["--input-one-per-sample"]
     if coop:
         cmd += ["--env", "SHADPS4_TLG_COOP=1"]
     return cmd + list(extra)
@@ -159,6 +163,8 @@ def main(argv=None) -> int:
     p.add_argument("--pulse", default="aimhold",
                    choices=("aimhold", "both", "aim", "hold", "emblem", "command"),
                    help="how the scripts fire Trico's lightning")
+    p.add_argument("--input-all-at-once", action="store_true",
+                   help="send every due input step in the same metrics sample (the runner's default)")
     p.add_argument("--camera", metavar="SET",
                    help="game camera parameter set for the Trico framing (e.g. TricoAutoRunTest_near); "
                         "a comma-separated list cycles through them on each Select")
@@ -186,7 +192,7 @@ def main(argv=None) -> int:
         save_source(save)
     try:
         cmd = runner_command(root, args.tag, args.seconds, patch, args.input, args.runner_arg,
-                             engine, args.coop)
+                             engine, args.coop, one_per_sample=not args.input_all_at_once)
         with contextlib.ExitStack() as stack:
             if save:
                 backup = out_dir / "saves" / f"runtime-backup-{args.tag}"

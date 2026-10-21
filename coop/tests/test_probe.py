@@ -18,6 +18,7 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--patch-file") + 1], str(root / "p.xml"))
         self.assertIn("Log.filter=*:Warning Lib.Pad:Debug Loader:Info", cmd)
         self.assertEqual(cmd[cmd.index("--input") + 1], "5:screenshot")
+        self.assertIn("--input-one-per-sample", cmd)
         self.assertEqual(cmd[-1], "--pool")
 
     def test_runner_command_with_another_engine_and_coop_mode(self):
@@ -30,6 +31,14 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--engine-sha256") + 1],
                          probe.install.sha256_bytes(b"engine"))
         self.assertEqual(cmd[cmd.index("--env") + 1], "SHADPS4_TLG_COOP=1")
+        self.assertNotIn("--input-one-per-sample", cmd)   # no inputs
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = root / "shadps4"
+            engine.write_bytes(b"engine")
+            cmd = probe.runner_command(root, "t3", 30, root / "p.xml", ["1:button l3 1"], [], engine,
+                                       one_per_sample=False)
+        self.assertNotIn("--input-one-per-sample", cmd)
 
     def test_probe_lua_dir_turns_debug_on_and_picks_strategy(self):
         with tempfile.TemporaryDirectory() as tmp:
