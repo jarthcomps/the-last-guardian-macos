@@ -3,7 +3,7 @@ dofile(string.match(debug.getinfo(1, "S").source, "^@(.*/)") .. "harness.lua")
 Load("game/scripts/coop/coop_main")
 check(#Harness.ticks == 1, "one tick registered")
 local loaded = table.concat(Harness.loaded, ",")
-check(loaded == "coop_main,coop_debug,coop_input,coop_trico,coop_pulse,coop_config", "modules loaded: " .. loaded)
+check(loaded == "coop_main,coop_debug,coop_input,coop_trico,coop_pulse,coop_camera,coop_config", "modules loaded: " .. loaded)
 check(not CoopDebug.enabled, "debug channel off by default")
 
 -- loading again (state restart) keeps a single tick

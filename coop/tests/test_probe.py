@@ -43,6 +43,11 @@ class ProbeTest(unittest.TestCase):
             config = (probe.probe_lua_dir(Path(tmp), "steer", pulse="command")
                       / "coop_config.lua").read_text()
         self.assertIn('CoopPulse.method = "command"', config)
+        self.assertNotIn("CoopCamera", config)
+        with tempfile.TemporaryDirectory() as tmp:
+            config = (probe.probe_lua_dir(Path(tmp), "steer", camera="TricoAutoRunTest_near")
+                      / "coop_config.lua").read_text()
+        self.assertIn('CoopCamera.tricoParam = "TricoAutoRunTest_near"', config)
 
     def test_summary_prefers_log_with_messages(self):
         with tempfile.TemporaryDirectory() as tmp:
