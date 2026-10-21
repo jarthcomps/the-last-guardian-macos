@@ -27,6 +27,10 @@ local GOAL_DISTANCE = 8.0      -- metres ahead of Trico at full stick
 local MIN_GOAL_DISTANCE = 4.0
 local NAV_STEPS = { 1.0, 0.6, 0.35 }  -- shorter goals to try when the full one is off Trico's navmesh
 local REFRESH = 0.3            -- seconds between goal updates
+local REGOAL = 2.0             -- metres the goal must change by before it is moved (so Trico's
+                               -- path planner can commit to it)
+local ARRIVING = 3.0           -- ... or how close Trico must get to it
+local MIN_PATH_GOAL = 2.0      -- shortest navmesh path end worth walking to
 local REPORT = 0.5             -- seconds between debug reports
 
 CoopTrico.strategy = CoopTrico.strategy or "goal"
@@ -73,13 +77,14 @@ local function CameraPos()
 	return cam and cam.worldPosition
 end
 
--- Camera forward on the ground plane, as (x, z, source): the game camera's view direction (as
--- s16_soldiersden.lua reads it), else the direction from the camera to Trico.
+-- Camera forward on the ground plane, as (x, z, source): the game camera's view direction, else
+-- the direction from the camera to Trico. The camera looks along its local -Z (in the game, with
+-- the camera behind the boy facing Trico, local +Z pointed away from both).
 function CoopTrico.CameraForward(tricoPos)
 	local cam = FindObject and FindObject(CAMERA_NAME)
 	local rot = cam and cam.worldRotation
 	if rot then
-		local view = Vector(0, 0, 1):Rotate(rot)
+		local view = Vector(0, 0, -1):Rotate(rot)
 		local fx, fz = Flat(view.X, view.Z)
 		if fx then return fx, fz, "view" end
 	end
@@ -105,11 +110,17 @@ function CoopTrico.GoalFor(tricoPos, tricoDirX, tricoDirZ, sx, sy, len, fx, fz, 
 	return tricoPos.X + dx * dist, tricoPos.Y, tricoPos.Z + dz * dist, dx, dz
 end
 
--- Is `to` on Trico's navmesh island (no special edge on the way)? Unknown counts as yes.
+-- Is `to` on Trico's navmesh island (no special edge on the way)? Unknown counts as yes. Also
+-- returns where the straight navmesh path towards `to` ends.
 local function Reachable(props, from, to)
-	local ok, same = pcall(Ai2.Utils.Navmesh.CheckSameIsland, props, from, to, true)
+	local ok, same, pathEnd = pcall(Ai2.Utils.Navmesh.CheckSameIsland, props, from, to, true)
 	if not ok then return true, "?" end
-	return same, same and "y" or "n"
+	return same, same and "y" or "n", pathEnd
+end
+
+local function DistanceXZ(a, b)
+	local dx, dz = a.X - b.X, a.Z - b.Z
+	return math.sqrt(dx * dx + dz * dz)
 end
 
 local function OverwriteApproach(props, goal, dir)
@@ -252,21 +263,36 @@ function CoopTrico.Update(dt, input)
 	local okF, fx, fz, src = pcall(CoopTrico.CameraForward, pos)
 	if not okF then fx, fz, src = nil, nil, nil end
 	CoopTrico.forward = { fx or 0, fz or 0, src or "trico" }
-	local goal, dir
+	local goal, dir, nav, fallback
 	for _, scale in ipairs(NAV_STEPS) do
 		local gx, gy, gz, dx, dz = CoopTrico.GoalFor(pos, dirXZ and dirXZ.X or 0,
 			dirXZ and dirXZ.Z or 1, sx, sy, len, fx, fz, scale)
 		if not gx then return end
 		local candidate = Vector(gx, gy, gz)
-		local ok, nav = Reachable(props, pos, candidate)
-		if not goal or ok then
-			goal, dir = candidate, Vector(dx, 0, dz)
-			CoopTrico.nav = nav .. string.format("%.2f", scale)
+		local ok, why, pathEnd = Reachable(props, pos, candidate)
+		if ok then
+			goal, dir, nav = candidate, Vector(dx, 0, dz), why .. string.format("%.2f", scale)
+			break
 		end
-		if ok then break end
+		if not fallback then
+			-- nothing on the island yet: the full goal, or where the navmesh path towards it ends
+			fallback = { candidate, Vector(dx, 0, dz), "n1.00" }
+			if pathEnd and DistanceXZ(pos, pathEnd) >= MIN_PATH_GOAL then
+				fallback = { Vector(pathEnd), Vector(dx, 0, dz), "e1.00" }
+			end
+		end
+	end
+	if not goal then goal, dir, nav = fallback[1], fallback[2], fallback[3] end
+	-- keep the goal Trico is already walking to unless the stick asks for somewhere else
+	local old = CoopTrico.steering and CoopTrico.goal
+	if old and DistanceXZ(old, goal) < REGOAL and DistanceXZ(pos, old) > ARRIVING then
+		goal, dir = old, CoopTrico.goalDir or dir
+	else
+		CoopTrico.nav = nav
 	end
 	CoopTrico.steering = true
 	CoopTrico.goal = goal
+	CoopTrico.goalDir = dir
 	local steer = Steer[CoopTrico.strategy] or Steer.goal
 	local ok, err = pcall(steer, props, goal, dir)
 	if not ok and err ~= CoopTrico.lastError then

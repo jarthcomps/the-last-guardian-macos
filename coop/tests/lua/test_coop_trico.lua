@@ -28,7 +28,10 @@ check(near(gz, 24), "scaled goal")
 local s45 = math.sqrt(0.5)
 Harness.objects._trico_camera = { worldRotation = { X = 0, Y = s45, Z = 0, W = s45 } }
 local fx, fz, src = CoopTrico.CameraForward(Vector(0, 0, 0))
-check(near(fx, 1) and near(fz, 0) and src == "view", "view turned 90 degrees: forward is +X")
+check(near(fx, -1) and near(fz, 0) and src == "view", "view along local -Z turned 90 degrees: -X")
+Harness.objects._trico_camera = { worldRotation = { X = 0, Y = 1, Z = 0, W = 0 } }
+fx, fz, src = CoopTrico.CameraForward(Vector(0, 0, 0))
+check(near(fx, 0) and near(fz, 1) and src == "view", "turned around: forward is +Z")
 Harness.objects._trico_camera = { worldRotation = { X = s45, Y = 0, Z = 0, W = s45 },
 	worldPosition = Vector(0, 3, -8) }
 fx, fz, src = CoopTrico.CameraForward(Vector(0, 0, 0))
@@ -77,7 +80,30 @@ CoopTrico.refreshIn = 0
 CoopTrico.Update(0.016, pad)
 check(Harness.moved[#Harness.moved][2] == "0,0,8" and CoopTrico.nav == "n1.00",
 	"nothing reachable: full goal")
+Harness.reachable = function() return false, Vector(0, 0, 3) end
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, pad)
+check(Harness.moved[#Harness.moved][2] == "0,0,3" and CoopTrico.nav == "e1.00",
+	"nothing reachable: where the navmesh path ends")
+Harness.reachable = function() return false, Vector(0, 0, 1) end
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, pad)
+check(Harness.moved[#Harness.moved][2] == "0,0,8", "a path end too close is not used")
 Harness.reachable = function() return true end
+
+-- the goal stays put while the stick asks for about the same place and Trico is not there yet
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, 1)
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, pad)
+check(Harness.moved[#Harness.moved][2] == "0,0,8", "goal kept (new one 1 m away)")
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, 5.5)
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, pad)
+check(Harness.moved[#Harness.moved][2] == "0,0,13.5", "arriving: the goal moves on")
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, 0)
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 1, y = 0 })
+check(Harness.moved[#Harness.moved][2] == "-8,0,0", "new direction: the goal moves")
 
 -- release: the goal loses its level and is excluded, Trico is asked to stop, once
 CoopTrico.Update(0.016, { x = 0, y = 0 })
