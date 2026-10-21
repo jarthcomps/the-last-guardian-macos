@@ -40,6 +40,10 @@ sed 's#"library_path": *"[^"]*"#"library_path": "./libvulkan_kosmickrisp.dylib"#
 mkdir -p "$APP/Contents/Resources/tools"
 cp "$PKG_TOOL" "$APP/Contents/Resources/tools/ps4-pkg-tool"
 
+# No debug map in the download: it lists the object files' absolute build paths.
+strip -S "$ENGINE"/{libvulkan.dylib,libvulkan_kosmickrisp.dylib,shadps4} \
+  "$APP/Contents/Resources/tools/ps4-pkg-tool"
+
 # Ad-hoc signatures, inside out (no Apple developer account involved).
 for f in "$ENGINE"/{libvulkan.dylib,libvulkan_kosmickrisp.dylib,shadps4} \
          "$APP/Contents/Resources/tools/ps4-pkg-tool"; do
