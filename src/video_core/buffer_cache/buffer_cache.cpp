@@ -1210,7 +1210,12 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
         buffer_id = FindBuffer(device_addr, size);
     }
     Buffer& buffer = slot_buffers[buffer_id];
-    SynchronizeBuffer(buffer, device_addr, size, is_written, is_texel_buffer);
+    // A read of a range with no CPU modified page copies nothing and changes no tracking state,
+    // so SynchronizeBuffer would do nothing: skip the call (see MemoryTracker::NeedsUpload).
+    // Texel reads still run it, for the image aliasing check.
+    if (is_written || is_texel_buffer || memory_tracker->NeedsUpload(device_addr, size)) {
+        SynchronizeBuffer(buffer, device_addr, size, is_written, is_texel_buffer);
+    }
     if (is_written) {
         ReadbackStats::CpTimer t{ReadbackStats::CpTime::BufGpuMark};
         if (auto* events = ReadbackStats::CpEvents()) {

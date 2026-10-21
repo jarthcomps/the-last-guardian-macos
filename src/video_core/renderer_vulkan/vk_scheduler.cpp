@@ -93,6 +93,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
     }
+    ++pass_epoch;
     EndRendering();
     is_rendering = true;
     render_state = new_state;
@@ -152,6 +153,7 @@ void Scheduler::EndRendering() {
     if (!is_rendering) {
         return;
     }
+    ++pass_epoch;
     is_rendering = false;
     // KosmicKrisp ends the render encoder with a barrier after all its work.
     BarrierStats::OnFullSync();
@@ -248,6 +250,7 @@ void Scheduler::PopPendingOperations() {
     while (!pending_ops.empty() && master_semaphore.IsFree(pending_ops.front().gpu_tick)) {
         pending_ops.front().callback();
         pending_ops.pop();
+        num_pending_ops.store(static_cast<u32>(pending_ops.size()), std::memory_order_release);
     }
 }
 
@@ -360,6 +363,7 @@ void Scheduler::HandOffToEncoder(SubmitInfo& info, u64 signal_value) {
         pending_ops.emplace([this, slot, notes = std::move(job_notes), draws = job_draws]() mutable {
             ReadGpuTiming(slot, std::move(notes), draws);
         }, signal_value);
+        num_pending_ops.store(static_cast<u32>(pending_ops.size()), std::memory_order_release);
         job_notes.clear();
         job_draws = 0;
     }
@@ -619,6 +623,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         pending_ops.emplace([this, slot, notes = std::move(job_notes), draws = job_draws]() mutable {
             ReadGpuTiming(slot, std::move(notes), draws);
         }, signal_value);
+        num_pending_ops.store(static_cast<u32>(pending_ops.size()), std::memory_order_release);
         job_notes.clear();
         job_draws = 0;
     }

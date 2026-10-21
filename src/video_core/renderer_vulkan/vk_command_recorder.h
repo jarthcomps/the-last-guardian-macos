@@ -130,7 +130,13 @@ public:
             return nullptr;
         }
         auto* dst = static_cast<T*>(Allocate(sizeof(T) * count, alignof(T)));
-        std::memcpy(dst, data, sizeof(T) * count);
+        if (count == 1) {
+            // One element (most descriptor infos): a constant-size copy, which compiles to plain
+            // moves instead of a call into the C library.
+            std::memcpy(dst, data, sizeof(T));
+        } else {
+            std::memcpy(dst, data, sizeof(T) * count);
+        }
         return dst;
     }
 

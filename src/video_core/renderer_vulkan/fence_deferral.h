@@ -46,6 +46,15 @@ constexpr bool ShouldSkipCommandStreamBarrier(bool trust_encoder_ordering, bool 
     return trust_encoder_ordering && rendering && !pass_memory_writes;
 }
 
+/// A draw calls Scheduler::BeginRendering unless the render pass it checked is still open. That
+/// call returns at once when the same state is open, so it is skipped when the draw found its
+/// state open (`new_pass` false) and nothing began or ended a pass since (`pass_epoch`, which
+/// Scheduler::PassEpoch returns and the scheduler bumps on every begin and end).
+constexpr bool ShouldBeginDrawPass(bool new_pass, u64 pass_epoch_at_check,
+                                   u64 pass_epoch_now) noexcept {
+    return new_pass || pass_epoch_now != pass_epoch_at_check;
+}
+
 /// SHADPS4_HONOR_CS_FLUSH=1: a guest CS partial flush (EventWrite) or AcquireMem asks for the
 /// compute work before it to finish before later work starts. Upstream ignores both. A compute
 /// barrier is recorded when work was recorded since the previous one; inside a render pass none

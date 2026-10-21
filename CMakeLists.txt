@@ -1126,6 +1126,11 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_common.h
                src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
                src/video_core/renderer_vulkan/vk_compute_pipeline.h
+               src/video_core/renderer_vulkan/vk_compute_dispatch_capture.cpp
+               src/video_core/renderer_vulkan/vk_compute_dispatch_capture.h
+               src/video_core/renderer_vulkan/compute_dispatch_capture_plan.h
+               src/video_core/renderer_vulkan/vk_compute_kernel_replacements.cpp
+               src/video_core/renderer_vulkan/vk_compute_kernel_replacements.h
                src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
                src/video_core/renderer_vulkan/vk_graphics_pipeline.h
                src/video_core/renderer_vulkan/vk_instance.cpp
@@ -1451,7 +1456,11 @@ cmrc_add_resource_library(embedded-resources
         src/resources/silver.png
         src/resources/trophy.wav
         src/resources/amd_rcp_index_table.bin.zstd
-        src/resources/amd_rsqrt_index_table.bin.zstd)
+        src/resources/amd_rsqrt_index_table.bin.zstd
+        src/resources/compute_kernels/1d99a308.source.spv
+        src/resources/compute_kernels/1d99a308.replacement.spv
+        src/resources/compute_kernels/ee29a0b1.source.spv
+        src/resources/compute_kernels/ee29a0b1.replacement.spv)
 target_link_libraries(shadps4 PRIVATE res::embedded)
 
 # ImGui resources

@@ -345,10 +345,12 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 
     return barriers;
 }
 
-void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
-                    std::optional<SubresourceRange> range,
-                    Vulkan::CommandRecorder cmdbuf /*= {}*/) {
-    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::ImageTransit};
+// Kept out of line on purpose. Inlined into a caller (BindTextures, under LTO), the barrier vector
+// of GetBarriers (32 inline elements, 3 KB) joins the caller's stack frame, and BindTextures' frame
+// then reaches 6.7 KB, which is probed by ___chkstk_darwin on every call. Here it stays in Transit.
+SHAD_NO_INLINE void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
+                                   std::optional<SubresourceRange> range,
+                                   Vulkan::CommandRecorder cmdbuf /*= {}*/) {
     // Adjust pipeline stage
     const vk::PipelineStageFlags2 dst_pl_stage =
         (dst_mask == vk::AccessFlagBits2::eTransferRead ||
@@ -358,8 +360,11 @@ void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
 
     const auto barriers = GetBarriers(dst_layout, dst_mask, dst_pl_stage, range);
     if (barriers.empty()) {
+        // Nothing to record (the common case): no barrier source needs to be set up.
         return;
     }
+    // Barriers are recorded below, attributed to this transition.
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::ImageTransit};
     VideoCore::ReadbackStats::NoteMutation(VideoCore::ReadbackStats::Mutation::ImageBarrier);
 
     if (!cmdbuf) {

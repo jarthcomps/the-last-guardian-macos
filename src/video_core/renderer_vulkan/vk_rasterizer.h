@@ -3,11 +3,14 @@
 
 #pragma once
 
+#include <vector>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/fence_deferral.h"
+#include "video_core/renderer_vulkan/vk_compute_dispatch_capture.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -268,6 +271,8 @@ private:
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
+    std::vector<ComputeCapture::BoundBuffer> capture_buffers;
+    bool capture_bindings_enabled{};
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
 
     u32 set_write_index{};
@@ -288,7 +293,15 @@ private:
 
     using BufferBindingInfo = std::tuple<VideoCore::BufferId, AmdGpu::Buffer, u64>;
     boost::container::static_vector<BufferBindingInfo, Shader::NUM_BUFFERS> buffer_bindings;
-    using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
+    /// One image binding of the stage being bound (BindTextures). The T# is decoded into an
+    /// ImageDesc only on a lookup miss; the T# and resource stay for a lookup that must be redone.
+    struct ImageBindingInfo {
+        VideoCore::ImageId image_id{};
+        VideoCore::TextureCache::BindingType type{VideoCore::TextureCache::BindingType::Texture};
+        VideoCore::ImageViewInfo view_info{};
+        AmdGpu::Image tsharp{};
+        const Shader::ImageResource* resource{};
+    };
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};

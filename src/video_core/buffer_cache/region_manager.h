@@ -163,7 +163,6 @@ public:
     template <Type type, bool clear>
     void ForEachModifiedRange(VAddr query_cpu_range, s64 size, auto&& func,
                               bool keep_hot = false) {
-        RENDERER_TRACE;
         const size_t offset = query_cpu_range - cpu_addr;
         const size_t start_page = SanitizeAddress(offset) / TRACKER_BYTES_PER_PAGE;
         const size_t end_page =
@@ -173,6 +172,16 @@ public:
         }
 
         RegionBits& bits = GetRegionBits<type>();
+        if constexpr (clear && type == Type::CPU) {
+            if (keep_hot && end_page <= NUM_PAGES_PER_REGION &&
+                !bits.AnyInRange(start_page, end_page)) {
+                // A read of pages that are not CPU modified finds nothing to copy, and the
+                // updates below would leave every bit and the page protection as they are: the
+                // protection matches the CPU bits after each update (see UpdateProtection).
+                return;
+            }
+        }
+        RENDERER_TRACE;
         RegionBits mask(bits, start_page, end_page);
 
         if constexpr (clear) {
@@ -216,7 +225,6 @@ public:
      */
     template <Type type>
     [[nodiscard]] bool IsRegionModified(u64 offset, u64 size) noexcept {
-        RENDERER_TRACE;
         const size_t start_page = SanitizeAddress(offset) / TRACKER_BYTES_PER_PAGE;
         const size_t end_page =
             Common::DivCeil(SanitizeAddress(offset + size), TRACKER_BYTES_PER_PAGE);
@@ -233,6 +241,11 @@ public:
 private:
     /**
      * Notify tracker about changes in the CPU tracking state of a word in the buffer
+     *
+     * Invariant, relied on by the clean read path of ForEachModifiedRange: after every update the
+     * write protection matches the CPU bits over the whole region (writeable == cpu). Any change
+     * of the CPU bits must therefore be followed by this call for the same pages, under the same
+     * lock hold.
      *
      * @param word_index   Index to the word to notify to the tracker
      * @param current_bits Current state of the word

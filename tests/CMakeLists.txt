@@ -34,6 +34,44 @@ add_executable(shadps4_shader_diagnostic_names_test test_shader_diagnostic_names
 target_include_directories(shadps4_shader_diagnostic_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME shader_diagnostic_names COMMAND shadps4_shader_diagnostic_names_test)
 
+add_executable(shadps4_compute_dispatch_capture_plan_test test_compute_dispatch_capture_plan.cpp)
+target_include_directories(shadps4_compute_dispatch_capture_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if (MSVC)
+    target_compile_options(shadps4_compute_dispatch_capture_plan_test PRIVATE /UNDEBUG)
+else()
+    target_compile_options(shadps4_compute_dispatch_capture_plan_test PRIVATE -UNDEBUG)
+endif()
+add_test(NAME compute_dispatch_capture_plan COMMAND shadps4_compute_dispatch_capture_plan_test)
+add_executable(shadps4_compute_capture_env_test test_compute_capture_env.cpp)
+target_include_directories(shadps4_compute_capture_env_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if (MSVC)
+    target_compile_options(shadps4_compute_capture_env_test PRIVATE /UNDEBUG)
+else()
+    target_compile_options(shadps4_compute_capture_env_test PRIVATE -UNDEBUG)
+endif()
+add_test(NAME compute_capture_env COMMAND shadps4_compute_capture_env_test)
+
+include("${CMAKE_SOURCE_DIR}/cmake/CMakeRC.cmake")
+cmrc_add_resource_library(compute-kernel-test-resources
+    ALIAS res::embedded
+    NAMESPACE res
+    WHENCE "${CMAKE_SOURCE_DIR}"
+    "${CMAKE_SOURCE_DIR}/src/resources/compute_kernels/1d99a308.source.spv"
+    "${CMAKE_SOURCE_DIR}/src/resources/compute_kernels/1d99a308.replacement.spv"
+    "${CMAKE_SOURCE_DIR}/src/resources/compute_kernels/ee29a0b1.source.spv"
+    "${CMAKE_SOURCE_DIR}/src/resources/compute_kernels/ee29a0b1.replacement.spv")
+add_executable(shadps4_compute_kernel_replacements_test
+               test_compute_kernel_replacements.cpp
+               ${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_compute_kernel_replacements.cpp)
+target_include_directories(shadps4_compute_kernel_replacements_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(shadps4_compute_kernel_replacements_test PRIVATE res::embedded)
+if (MSVC)
+    target_compile_options(shadps4_compute_kernel_replacements_test PRIVATE /UNDEBUG)
+else()
+    target_compile_options(shadps4_compute_kernel_replacements_test PRIVATE -UNDEBUG)
+endif()
+add_test(NAME compute_kernel_replacements COMMAND shadps4_compute_kernel_replacements_test)
+
 add_executable(shadps4_fence_submission_test test_fence_submissions.cpp)
 target_include_directories(shadps4_fence_submission_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME fence_submissions COMMAND shadps4_fence_submission_test)
@@ -489,3 +527,6 @@ add_test(NAME env_switch COMMAND shadps4_env_switch_test)
 add_executable(shadps4_texture_gc_policy_test test_texture_gc_policy.cpp)
 target_include_directories(shadps4_texture_gc_policy_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME texture_gc_policy COMMAND shadps4_texture_gc_policy_test)
+add_executable(shadps4_pipeline_memo_test test_pipeline_memo.cpp)
+target_include_directories(shadps4_pipeline_memo_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME pipeline_memo COMMAND shadps4_pipeline_memo_test)

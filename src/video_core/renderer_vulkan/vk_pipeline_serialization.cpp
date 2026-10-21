@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+
 #include "common/serdes.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
+#include "video_core/renderer_vulkan/vk_compute_kernel_replacements.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -141,6 +144,11 @@ bool ComputePipeline::SerializationSupport::Deserialize(Serialization::Archive& 
 }
 
 bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
+    // A serialized compute pipeline has no replacement identity. Skip it when an opt-in
+    // replacement is requested so dispatch recompiles the guarded source and applies the selector.
+    if (IsComputeKernelReplacementModeActive(ComputeKernelReplacementOptionsFromEnvironment())) {
+        return false;
+    }
     compute_key.Deserialize(ar);
 
     ComputePipeline::SerializationSupport sdata{};
@@ -293,7 +301,19 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
             module = CompileSPV(spv, instance.GetDevice());
         }
     }
-    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
+    Program::Module::CaptureStorage capture{};
+    const char* capture_directory = std::getenv("SHADPS4_CAPTURE_COMPUTE_DIR");
+    const auto& loaded_info = it_pgm.value()->info;
+    if (loaded_info.hw_stage == Shader::HwStage::Compute &&
+        IsComputeKernelCaptureTarget(loaded_info.pgm_hash) && capture_directory &&
+        IsComputeCaptureRetentionEnabled(capture_directory)) {
+        capture.guest_hash = loaded_info.pgm_hash;
+        capture.program_hash = loaded_info.pgm_hash;
+        capture.permutation = perm_idx;
+        capture.original_spv = spv;
+        capture.active_spv = spv;
+    }
+    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx, std::move(capture));
 
     infos[stage] = &it_pgm.value()->info;
     modules[stage] = module;

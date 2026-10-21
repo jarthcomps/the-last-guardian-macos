@@ -6,6 +6,7 @@
 #include "common/env_switch.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/kernel/process.h"
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -16,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/compute_dispatch_labels.h"
+#include "video_core/renderer_vulkan/vk_compute_dispatch_capture.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/image_view.h"
@@ -23,6 +25,7 @@
 #include "video_core/frame_path_stats.h"
 #include "video_core/texture_cache/texture_gc_policy.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
+#include "video_core/renderer_vulkan/bind_resources_policy.h"
 #include "video_core/texture_cache/image_barrier_policy.h"
 
 #ifdef MemoryBarrier
@@ -218,16 +221,21 @@ bool Rasterizer::CommandStreamBarrier(u64 producer_tick) {
 namespace {
 
 /// Reports a draw or dispatch to the per-shader profile when it goes out of scope, if a kind was
-/// set (the call was recorded, handled or skipped).
+/// set (the call was recorded, handled or skipped). The record is only constructed while the stats
+/// are on: zeroing it for every draw and dispatch is about 900 bytes of stores on the command
+/// thread. Everything that reads `call` or `start_times` is guarded by `start`.
 struct ShaderCallScope {
-    VideoCore::ReadbackStats::ShaderCall call{};
+    union {
+        VideoCore::ReadbackStats::ShaderCall call;
+    };
     const u64 start = VideoCore::ReadbackStats::IsEnabled() ? VideoCore::ReadbackStats::NowNs() : 0;
     bool report = false;
-    VideoCore::ReadbackStats::CpTimeArray start_times{};
+    VideoCore::ReadbackStats::CpTimeArray start_times; ///< set by the constructor when active
     VideoCore::ReadbackStats::CpEventCounters start_events{};
 
     ShaderCallScope() {
         if (start != 0) {
+            std::construct_at(&call);
             start_times = VideoCore::ReadbackStats::CpTimeSnapshot();
             start_events = VideoCore::ReadbackStats::Detail::cp_events;
         }
@@ -596,7 +604,10 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::Prepare};
-        scheduler.PopPendingOperations();
+        // Without queued operations PopPendingOperations only takes the lock and returns.
+        if (scheduler.HasPendingOperations()) {
+            scheduler.PopPendingOperations();
+        }
         if (!FilterDraw()) {
             return;
         }
@@ -624,6 +635,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return BeginRendering(pipeline);
     }();
     const bool new_pass = !scheduler.IsRenderingState(state);
+    const u64 pass_epoch = scheduler.PassEpoch();
     const bool writes_memory = PipelineWritesMemory(pipeline);
     if (!deferred_fences.Empty()) {
         // The pass the fences waited for ends here, or this draw may write memory they read.
@@ -665,7 +677,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::BeginPass};
-        scheduler.BeginRendering(state);
+        // The same state being open returns at once in Scheduler::BeginRendering, so the call is
+        // skipped unless the pass was begun or ended since the check above.
+        if (ShouldBeginDrawPass(new_pass, pass_epoch, scheduler.PassEpoch())) {
+            scheduler.BeginRendering(state);
+        }
     }
 
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
@@ -921,6 +937,37 @@ void Rasterizer::DispatchDirect() {
         pipeline->BindResources(set_writes, buffer_barriers, push_data);
     }
 
+    std::optional<ComputeCapture::ReplayResult> capture_result;
+    if (capture_bindings_enabled) {
+        if (const auto modules = pipeline_cache.GetActiveComputeCaptureModules()) {
+            const auto& cs_program = liverpool->GetCsRegs();
+            const ComputeCapture::DispatchShape shape{
+                .groups = {cs_program.dim_x, cs_program.dim_y, cs_program.dim_z},
+                .local_size = {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                               cs_program.num_thread_z.full},
+            };
+            const auto result = ComputeCapture::CaptureAndReplay(
+                instance, scheduler, *pipeline, push_data, set_writes, capture_buffers, *modules,
+                shape);
+            capture_result = result;
+            if (result.attempted) {
+                const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+                if (result.captured) {
+                    LOG_WARNING(Render_Vulkan,
+                                "Compute replay capture {:#x}: outputs_equal={} original={}ns active={}ns differing_bytes={} path={}",
+                                cs.pgm_hash, result.outputs_equal, result.original_gpu_ns,
+                                result.active_gpu_ns, result.differing_bytes,
+                                result.directory.string());
+                } else {
+                    LOG_WARNING(Render_Vulkan, "Compute replay capture {:#x} rejected: {}",
+                                cs.pgm_hash, result.reason);
+                }
+                const Pipeline::BufferBarriers no_barriers;
+                pipeline->BindResources(set_writes, no_barriers, push_data, true);
+            }
+        }
+    }
+
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     {
@@ -940,6 +987,10 @@ void Rasterizer::DispatchDirect() {
         cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     }
     SerializeAfterDispatch();
+    if (capture_result && capture_result->attempted) {
+        scheduler.Finish();
+        ComputeCapture::MarkGameDispatchComplete(*capture_result);
+    }
     record_dispatch(VideoCore::ReadbackStats::ShaderCallKind::Dispatch, cs_program.NumWorkgroups());
     DebugState.IncDispatch();
     VideoCore::ReadbackStats::OnDispatch();
@@ -1091,6 +1142,11 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     binding_compute = pipeline->IsCompute();
     buffer_infos.clear();
     image_infos.clear();
+    capture_buffers.clear();
+    // Graphics pipelines are never capture targets, so they skip the capture check.
+    capture_bindings_enabled = pipeline->IsCompute() && ComputeCapture::IsEnabled() &&
+                               ComputeCapture::IsTarget(
+                                   pipeline->GetStage(Shader::SwStage::Compute).pgm_hash);
 
     bool uses_dma = false;
 
@@ -1113,7 +1169,11 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         }
         {
             VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::BindTextures};
-            BindTextures(*stage, binding);
+            // A stage with no images or samplers has nothing to bind. BindTextures would only
+            // clear its scratch list, and its large stack frame makes each call pay a stack probe.
+            if (HasTextureBindings(*stage)) {
+                BindTextures(*stage, binding);
+            }
         }
         uses_dma |= stage->uses_dma;
     }
@@ -1339,6 +1399,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     for (u32 i = 0; i < buffer_bindings.size(); i++) {
         const auto& [buffer_id, vsharp, size] = buffer_bindings[i];
         const auto& desc = stage.buffers[i];
+        VideoCore::Buffer* capture_owner{};
+        u64 capture_guest_size{};
+        u64 capture_guest_offset{};
         const u32 alignment = instance.StorageMinAlignment();
         // Buffer is not from the cache, either a special buffer or unbound.
         if (!buffer_id) {
@@ -1389,6 +1452,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         } else {
             const auto [vk_buffer, offset] = buffer_cache.ObtainBuffer(
                 vsharp.base_address, size, desc.is_written, desc.is_formatted, buffer_id);
+            capture_owner = vk_buffer;
+            capture_guest_size = size;
             if (desc.is_written && VideoCore::ReadbackStats::IsEnabled()) {
                 VideoCore::ReadbackStats::CpTimer t{
                     VideoCore::ReadbackStats::CpTime::StatsOverhead};
@@ -1397,6 +1462,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             }
             const u32 offset_aligned = Common::AlignDown(offset, alignment);
             const u32 adjust = offset - offset_aligned;
+            capture_guest_offset = adjust;
             if (adjust % 4 != 0) {
                 LOG_WARNING(Render_Vulkan, "Buffer binding {} in shader {:#x} isn't dword aligned",
                             i, stage.pgm_hash);
@@ -1457,6 +1523,28 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         set_write.descriptorCount = 1;
         set_write.descriptorType = vk::DescriptorType::eStorageBuffer;
         set_write.pBufferInfo = &buffer_infos.back();
+        if (capture_bindings_enabled) {
+            ComputeCapture::BoundBuffer capture{};
+            capture.binding = set_write.dstBinding;
+            capture.descriptor_write_index = set_write_index - 1;
+            capture.type = desc.buffer_type;
+            capture.used_types = desc.used_types;
+            capture.written = desc.is_written;
+            capture.formatted = desc.is_formatted;
+            capture.guest_backed = capture_owner != nullptr;
+            capture.guest_begin = capture.guest_backed ? vsharp.base_address : 0;
+            capture.guest_size = capture_guest_size;
+            capture.guest_offset = capture_guest_offset;
+            capture.owner = capture_owner;
+            capture.descriptor = buffer_infos.back();
+            if (desc.buffer_type == Shader::BufferType::Flatbuf &&
+                capture.descriptor.buffer != VK_NULL_HANDLE &&
+                capture.descriptor.range == stage.flattened_ud_buf.size() * sizeof(u32)) {
+                const auto* bytes = reinterpret_cast<const u8*>(stage.flattened_ud_buf.data());
+                capture.constant_bytes.assign(bytes, bytes + capture.descriptor.range);
+            }
+            capture_buffers.push_back(std::move(capture));
+        }
         ++binding.buffer;
     }
 }
@@ -1470,6 +1558,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         const char* v = std::getenv("SHADPS4_TEXTURE_LOOKUP_VERIFY");
         return v && std::string_view{v} == "1";
     }();
+    using ImageDesc = VideoCore::TextureCache::ImageDesc;
+    using BindingType = VideoCore::TextureCache::BindingType;
     auto& lookups = texture_lookups.at(static_cast<size_t>(stage.sw_stage));
     size_t lookup_slot = 0;
     image_bindings.clear();
@@ -1490,7 +1580,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
-            image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
+            image_bindings.emplace_back();
             image_descriptor_array_sizes.push_back(1);
             continue;
         }
@@ -1502,56 +1592,89 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         "data_format={}, num_format={}",
                         tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
                         static_cast<u32>(num_fmt));
-            image_bindings.emplace_back(std::piecewise_construct, std::tuple{}, std::tuple{});
+            image_bindings.emplace_back();
             image_descriptor_array_sizes.push_back(1);
             continue;
         }
 
         const Shader::MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
         const u32 num_bindings = image_desc.NumBindings(stage);
+        // The alt tile flag of the image, as ImageInfo computes it from the T#.
+        const bool alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && tsharp.alt_tile_mode;
+        const auto binding_type =
+            image_desc.is_written ? BindingType::Storage : BindingType::Texture;
 
         for (auto i = 0; i < num_bindings; i++) {
-            auto& [image_id, desc] = image_bindings.emplace_back(
-                std::piecewise_construct, std::tuple{}, std::tuple{tsharp, image_desc});
+            auto& info = image_bindings.emplace_back();
+            info.type = binding_type;
+            info.tsharp = tsharp;
+            info.resource = &image_desc;
 
-            if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
-                ASSERT(num_bindings == 1);
-                desc.view_info.range.base.level += image_desc.constant_mip_index;
-                desc.view_info.range.extent.levels = 1;
-            } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
-                desc.view_info.range.base.level += i;
-                desc.view_info.range.extent.levels = 1;
-            }
+            // For a mip fallback array, each binding views one mip level.
+            const auto apply_mip_fallback = [&](VideoCore::ImageViewInfo& view_info) {
+                if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
+                    ASSERT(num_bindings == 1);
+                    view_info.range.base.level += image_desc.constant_mip_index;
+                    view_info.range.extent.levels = 1;
+                } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
+                    view_info.range.base.level += i;
+                    view_info.range.extent.levels = 1;
+                }
+            };
+            const auto make_key = [&] {
+                return VideoCore::TextureLookupKey{
+                    .descriptor = std::bit_cast<std::array<u32, 8>>(tsharp),
+                    .resource_flags = u32(image_desc.is_depth) |
+                                      (u32(image_desc.is_atomic) << 1) |
+                                      (u32(image_desc.is_array) << 2) |
+                                      (u32(image_desc.is_written) << 3) |
+                                      (u32(image_desc.is_r128) << 4),
+                    .mip_mode = static_cast<u32>(mip_fallback_mode),
+                    .mip_index = image_desc.constant_mip_index,
+                    .binding_index = static_cast<u32>(i),
+                    .alt_tile = alt_tile,
+                };
+            };
 
             {
                 VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::TexFindImage};
-                if (reuse) {
+                if (reuse && !verify) {
+                    // A valid cached result is used as it is, so the T# is decoded only on a miss.
                     if (lookup_slot == lookups.size()) {
                         lookups.emplace_back();
                     }
-                    const VideoCore::TextureLookupKey key{
-                        .descriptor = std::bit_cast<std::array<u32, 8>>(tsharp),
-                        .specialization = &stage,
-                        .program = stage.pgm_hash,
-                        .resource_flags = u32(image_desc.is_depth) | (u32(image_desc.is_atomic) << 1) |
-                                          (u32(image_desc.is_array) << 2) | (u32(image_desc.is_written) << 3) |
-                                          (u32(image_desc.is_r128) << 4),
-                        .mip_mode = static_cast<u32>(mip_fallback_mode),
-                        .mip_index = image_desc.constant_mip_index,
-                        .binding_index = static_cast<u32>(i),
-                        .alt_tile = desc.info.alt_tile,
-                    };
-                    image_id = texture_cache.FindImageCached(desc, key, lookups[lookup_slot++], verify);
+                    const auto key = make_key();
+                    auto& lookup = lookups[lookup_slot++];
+                    if (const auto hit = texture_cache.FindCachedImage(key, lookup)) {
+                        info.image_id = hit->id;
+                        info.view_info = hit->view;
+                    } else {
+                        ImageDesc desc{tsharp, image_desc};
+                        apply_mip_fallback(desc.view_info);
+                        info.image_id = texture_cache.StoreImageLookup(desc, key, lookup);
+                        info.view_info = desc.view_info;
+                    }
                 } else {
-                    image_id = texture_cache.FindImage(desc);
+                    ImageDesc desc{tsharp, image_desc};
+                    apply_mip_fallback(desc.view_info);
+                    if (reuse) {
+                        if (lookup_slot == lookups.size()) {
+                            lookups.emplace_back();
+                        }
+                        info.image_id = texture_cache.FindImageCached(
+                            desc, make_key(), lookups[lookup_slot++], verify);
+                    } else {
+                        info.image_id = texture_cache.FindImage(desc);
+                    }
+                    info.view_info = desc.view_info;
                 }
             }
-            auto* image = &texture_cache.GetImage(image_id);
+            auto* image = &texture_cache.GetImage(info.image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                 // If this image has an associated depth image, it's a stencil attachment.
                 // Redirect the access to the actual depth-stencil buffer.
-                image_id = depth_image_id;
-                image = &texture_cache.GetImage(image_id);
+                info.image_id = depth_image_id;
+                image = &texture_cache.GetImage(info.image_id);
             }
             if (image->binding.is_bound) {
                 // The image is already bound. In case if it is about to be used as storage we
@@ -1565,23 +1688,27 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     }
 
     // Second pass to re-bind images that were updated after binding
-    for (auto& [image_id, desc] : image_bindings) {
-        bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
-        if (!image_id) {
+    for (auto& info : image_bindings) {
+        const bool is_storage = info.type == BindingType::Storage;
+        if (!info.image_id) {
             image_infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         } else {
-            if (auto& old_image = texture_cache.GetImage(image_id);
+            if (auto& old_image = texture_cache.GetImage(info.image_id);
                 old_image.binding.needs_rebind) {
                 old_image.binding = {};
-                image_id = texture_cache.FindImage(desc);
+                // The lookup is redone, so the T# is decoded again.
+                ImageDesc desc{info.tsharp, *info.resource};
+                desc.view_info = info.view_info;
+                info.image_id = texture_cache.FindImage(desc);
+                info.view_info = desc.view_info;
             }
 
-            bound_images.emplace_back(image_id);
+            bound_images.emplace_back(info.image_id);
 
             VideoCore::ReadbackStats::CpTimer view_timer{
                 VideoCore::ReadbackStats::CpTime::TexViewLayout};
-            auto& image = texture_cache.GetImage(image_id);
-            auto& image_view = texture_cache.FindTexture(image_id, desc);
+            auto& image = texture_cache.GetImage(info.image_id);
+            auto& image_view = texture_cache.FindTexture(info.image_id, info.type, info.view_info);
 
             // The image is either bound as storage in a separate descriptor or bound as render
             // target in feedback loop. Depth images are excluded because they can't be bound as
@@ -1603,13 +1730,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                     image.Transit(vk::ImageLayout::eGeneral,
                                   vk::AccessFlagBits2::eShaderRead |
                                       vk::AccessFlagBits2::eShaderWrite,
-                                  desc.view_info.range);
+                                  info.view_info.range);
                 } else {
                     const auto new_layout = image.info.props.is_depth
                                                 ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
                                                 : vk::ImageLayout::eShaderReadOnlyOptimal;
                     image.Transit(new_layout, vk::AccessFlagBits2::eShaderRead,
-                                  desc.view_info.range);
+                                  info.view_info.range);
                 }
             }
             image.usage.storage |= is_storage;
@@ -1623,8 +1750,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     u32 image_info_idx = first_image_idx;
     u32 image_binding_idx = 0;
     for (u32 array_size : image_descriptor_array_sizes) {
-        const auto& [_, desc] = image_bindings[image_binding_idx];
-        const bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
+        const auto& info = image_bindings[image_binding_idx];
+        const bool is_storage = info.type == BindingType::Storage;
         auto& set_write = set_writes[set_write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
         set_write.dstBinding = binding.unified;
@@ -1719,9 +1846,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
 
         image->usage.render_target = 1u;
     }
-    for (u32 cb = state.num_color_attachments; cb < state.color_attachments.size(); ++cb) {
-        state.color_attachments[cb] = {};
-    }
+    // The attachments past num_color_attachments were zeroed by the RenderState above.
 
     if (auto image_id = db_desc.first; image_id) {
         auto& desc = db_desc.second;

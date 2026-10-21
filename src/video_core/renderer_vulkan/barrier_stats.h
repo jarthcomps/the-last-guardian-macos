@@ -153,6 +153,12 @@ inline bool Enabled() {
     return enabled;
 }
 
+/// Whether a Scope has any effect. Only the statistics (Enabled) and SHADPS4_DROP_BARRIERS
+/// (DropMask) read the source of a barrier, so without either a Scope can be skipped.
+[[nodiscard]] constexpr bool ScopeNeeded(bool stats_enabled, std::uint32_t drop_mask) noexcept {
+    return stats_enabled || drop_mask != 0;
+}
+
 inline Counters& Global() {
     static Counters counters;
     return counters;

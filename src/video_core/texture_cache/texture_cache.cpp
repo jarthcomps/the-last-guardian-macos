@@ -600,7 +600,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 ImageId TextureCache::FindImageCached(ImageDesc& desc, const TextureLookupKey& key,
                                      CachedImageLookup& cached, bool verify) {
     std::scoped_lock lock{mutex};
-    if (const auto* hit = cached.Find(key, ImageGeneration());
+    if (const auto* hit = cached.Find(key, ImageGeneration(), gc_tick);
         hit && !slot_images[hit->id].binding.needs_rebind) {
         const auto expected = *hit;
         if (verify) {
@@ -620,7 +620,30 @@ ImageId TextureCache::FindImageCached(ImageDesc& desc, const TextureLookupKey& k
         return expected.id;
     }
     const auto id = FindImageLocked(desc, false);
-    cached.Store(key, ImageGeneration(), {id, desc.view_info});
+    cached.Store(key, ImageGeneration(), gc_tick, {id, desc.view_info});
+    return id;
+}
+
+std::optional<TextureCache::CachedImageResult> TextureCache::FindCachedImage(
+    const TextureLookupKey& key, CachedImageLookup& cached) {
+    std::scoped_lock lock{mutex};
+    const auto* hit = cached.Find(key, ImageGeneration(), gc_tick);
+    if (!hit || slot_images[hit->id].binding.needs_rebind) {
+        return std::nullopt;
+    }
+    // Same bookkeeping as a FindImage that finds the image again.
+    const CachedImageResult expected = *hit;
+    auto& image = slot_images[expected.id];
+    image.tick_accessed_last = gc_tick;
+    TouchImage(image);
+    return expected;
+}
+
+ImageId TextureCache::StoreImageLookup(ImageDesc& desc, const TextureLookupKey& key,
+                                       CachedImageLookup& cached) {
+    std::scoped_lock lock{mutex};
+    const auto id = FindImageLocked(desc, false);
+    cached.Store(key, ImageGeneration(), gc_tick, {id, desc.view_info});
     return id;
 }
 
@@ -738,9 +761,10 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
     return {};
 }
 
-ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
+ImageView& TextureCache::FindTexture(ImageId image_id, BindingType type,
+                                     const ImageViewInfo& view_info) {
     Image& image = slot_images[image_id];
-    if (desc.type == BindingType::Storage) {
+    if (type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
@@ -749,7 +773,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
         }
     }
     UpdateImage(image_id);
-    return image.FindView(desc.view_info);
+    return image.FindView(view_info);
 }
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
@@ -825,10 +849,11 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 }
 
 void TextureCache::RefreshImage(Image& image) {
-    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::ImageRefresh};
+    // Clean images (almost every bound texture) return here, before the barrier source is set.
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
     }
+    Vulkan::BarrierStats::Scope barrier_scope{Vulkan::BarrierStats::Source::ImageRefresh};
     ReadbackStats::CpPhase phase{"image upload (RefreshImage)"};
     ReadbackStats::CpTimer timer{ReadbackStats::CpTime::Upload};
     if (auto* events = ReadbackStats::CpEvents()) {

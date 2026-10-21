@@ -68,6 +68,18 @@ public:
             });
     }
 
+    /// Returns true if a CPU modified page lies in the range, so a read upload of it copies data.
+    /// Each region is checked under its lock and created where missing, as ForEachUploadRange
+    /// does; when this returns false that upload copies nothing and changes no tracking state.
+    [[nodiscard]] bool NeedsUpload(VAddr query_cpu_range, u64 query_size) {
+        return IteratePages<true>(query_cpu_range, query_size,
+                                  [](RegionManager* manager, u64 offset, size_t size) {
+                                      std::scoped_lock lk{manager->lock};
+                                      return manager->template IsRegionModified<Type::CPU>(
+                                          offset, size);
+                                  });
+    }
+
     /// Mark region as CPU modified, notifying the device_tracker about this change
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
         IteratePages<false>(dirty_cpu_addr, query_size,
@@ -165,7 +177,6 @@ private:
      */
     template <bool create_region_on_fail, typename Func>
     bool IteratePages(VAddr cpu_address, size_t size, Func&& func) {
-        RENDERER_TRACE;
         using FuncReturn = typename std::invoke_result<Func, RegionManager*, u64, size_t>::type;
         static constexpr bool BOOL_BREAK = std::is_same_v<FuncReturn, bool>;
         std::size_t remaining_size{size};

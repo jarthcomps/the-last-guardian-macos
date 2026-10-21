@@ -12,6 +12,7 @@
 #include <queue>
 
 #include "common/types.h"
+#include "core/waiting_dump_flag.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/regs.h"
 #include "video_core/renderer_vulkan/vk_common.h"
@@ -155,6 +156,9 @@ class DebugStateImpl {
     s32 gnm_frame_dump_request_count = -1;
     std::unordered_map<size_t, FrameDump*> waiting_reg_dumps;
     std::unordered_map<size_t, std::string> waiting_reg_dumps_dbg;
+    /// Mirrors !waiting_reg_dumps.empty() for DumpingCurrentReg; updated after every change to
+    /// waiting_reg_dumps, under frame_dump_list_mutex.
+    WaitingDumpFlag waiting_reg_dumps_flag;
     bool waiting_submit_pause = false;
     std::atomic_bool should_show_frame_dump = false;
 
@@ -238,9 +242,9 @@ public:
         return gnm_frame_dump_request_count > 0;
     }
 
+    /// Called for every draw and dispatch by the command processor: lock-free.
     bool DumpingCurrentReg() {
-        std::shared_lock lock{frame_dump_list_mutex};
-        return !waiting_reg_dumps.empty();
+        return waiting_reg_dumps_flag.Waiting();
     }
 
     bool ShouldPauseInSubmit() const {

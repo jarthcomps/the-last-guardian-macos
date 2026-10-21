@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <optional>
+
 #include <boost/container/static_vector.hpp>
 
 #include "shader_recompiler/resource.h"
@@ -22,7 +24,12 @@ Pipeline::~Pipeline() = default;
 
 void Pipeline::BindResources(DescriptorWrites& set_writes, const BufferBarriers& buffer_barriers,
                              const Shader::PushData& push_data, bool skip_barriers) const {
-    BarrierStats::Scope barrier_scope{BarrierStats::Source::Resources};
+    // Only the barrier statistics and SHADPS4_DROP_BARRIERS read the scope. Without either it is
+    // skipped, since its thread-local updates ran for every draw and dispatch.
+    std::optional<BarrierStats::Scope> barrier_scope;
+    if (BarrierStats::ScopeNeeded(BarrierStats::Enabled(), BarrierStats::DropMask())) {
+        barrier_scope.emplace(BarrierStats::Source::Resources);
+    }
     const auto cmdbuf = scheduler.CommandBuffer();
     const auto bind_point =
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;

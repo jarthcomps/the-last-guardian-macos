@@ -123,11 +123,19 @@ public:
     [[nodiscard]] ImageId FindImageCached(ImageDesc& desc, const TextureLookupKey& key,
                                           CachedImageLookup& cached, bool verify);
 
+    /// The cached result of a lookup if it is still valid, without an ImageDesc. Empty on a miss.
+    [[nodiscard]] std::optional<CachedImageResult> FindCachedImage(const TextureLookupKey& key,
+                                                                   CachedImageLookup& cached);
+    /// Resolves a lookup that has no valid cached result and stores the result.
+    [[nodiscard]] ImageId StoreImageLookup(ImageDesc& desc, const TextureLookupKey& key,
+                                           CachedImageLookup& cached);
+
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 
-    /// Retrieves an image view with the properties of the specified image id.
-    [[nodiscard]] ImageView& FindTexture(ImageId image_id, const ImageDesc& desc);
+    /// Retrieves an image view of the specified image id, for a binding of the given type.
+    [[nodiscard]] ImageView& FindTexture(ImageId image_id, BindingType type,
+                                         const ImageViewInfo& view_info);
 
     /// Retrieves the render target with specified properties
     [[nodiscard]] ImageView& FindRenderTarget(ImageId image_id, const ImageDesc& desc);

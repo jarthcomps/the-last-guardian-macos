@@ -348,6 +348,12 @@ public:
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
 
+    /// True while deferred operations are queued (PopPendingOperations has work to look at). Read
+    /// without the lock, so a draw can skip the call when nothing is queued.
+    [[nodiscard]] bool HasPendingOperations() const noexcept {
+        return num_pending_ops.load(std::memory_order_acquire) != 0;
+    }
+
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
 
@@ -393,6 +399,12 @@ public:
     /// it would continue the pass instead of starting a new one.
     [[nodiscard]] bool IsRenderingState(const RenderState& state) const noexcept {
         return is_rendering && render_state == state;
+    }
+
+    /// Changes whenever a render pass begins or ends (BeginRendering, EndRendering). Equal values
+    /// before and after a call mean the open pass did not change in between.
+    [[nodiscard]] u64 PassEpoch() const noexcept {
+        return pass_epoch;
     }
 
     /// Returns the current pipeline dynamic state tracking.
@@ -454,6 +466,7 @@ public:
     void DeferOperation(Common::UniqueFunction<void>&& func) {
         std::unique_lock lk(pending_ops_mutex);
         pending_ops.emplace(std::move(func), CurrentTick());
+        num_pending_ops.store(static_cast<u32>(pending_ops.size()), std::memory_order_release);
     }
 
     /// Defers an operation until the gpu has reached the current cpu tick.
@@ -561,6 +574,8 @@ private:
         u64 gpu_tick;
     };
     std::queue<PendingOp> pending_ops;
+    /// pending_ops.size(), updated under pending_ops_mutex after every change to the queue.
+    std::atomic<u32> num_pending_ops{};
     std::recursive_mutex pending_ops_mutex;
     std::queue<PendingOp> priority_pending_ops;
     std::mutex priority_pending_ops_mutex;
@@ -606,6 +621,8 @@ private:
     u64 last_timing_end{};
     RenderState render_state;
     bool is_rendering = false;
+    /// Bumped by every BeginRendering that starts over and every EndRendering that ends a pass.
+    u64 pass_epoch{};
     static inline std::atomic<u64> last_priority_op_start_ns{};
     PassEndCounts pass_end_counts{};
     u32 pass_draws{};
