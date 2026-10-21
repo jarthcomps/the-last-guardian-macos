@@ -15,12 +15,16 @@ check(near(len, 1) and near(sx, sy), "clamped diagonal")
 
 -- goals are camera-relative: forward along +Z, right is -X (looking along +Z)
 local p = Vector(10, 2, 20)
-local gx, gy, gz, dx, dz = CoopTrico.GoalFor(p, 1, 0, 0, 1, 1, 0, 1)
+local gx, gy, gz, dx, dz = CoopTrico.GoalFor(p, 0, 1, 0, 1, 1, 0, 1)
 check(near(gx, 10) and near(gy, 2) and near(gz, 28) and near(dz, 1), "full forward is 8 m ahead")
-gx, gy, gz, dx, dz = CoopTrico.GoalFor(p, 1, 0, 1, 0, 0.3, 0, 1)
+gx, gy, gz, dx, dz = CoopTrico.GoalFor(p, 0, 1, 1, 0, 0.3, 0, 1)
 check(near(gx, 10 - 5.2) and near(gz, 20) and near(dx, -1), "light right")
 gx, gy, gz = CoopTrico.GoalFor(p, 0, 1, 0, -1, 1, nil, nil)
 check(near(gz, 12), "no camera: Trico's facing is forward, back goes behind")
+gx, gy, gz = CoopTrico.GoalFor(p, 0, 1, 0, -1, 1, nil, nil, 0.35)
+check(near(gz, 13), "a shortened goal behind Trico stays a body length away")
+gx, gy, gz = CoopTrico.GoalFor(p, 0, 1, 1, 0, 1, nil, nil, 0.35)
+check(near(gx, 10 - 2.8), "a shortened goal beside Trico is not stretched")
 gx, gy, gz = CoopTrico.GoalFor(p, 0, 1, 0, 1, 1, 0, 1, 0.5)
 check(near(gz, 24), "scaled goal")
 
@@ -172,6 +176,7 @@ local ts = Harness.Find("^TS ")
 check(#ts == 1, "second report line")
 check(string.find(ts[1][2], "st=s05 inj=true boy=1.0,0.0,-2.0 cam=0.0,3.0,-8.0 f=0.00,1.00,cam", 1,
 	true), "stage, injured, boy, camera and forward: " .. ts[1][2])
+check(string.find(ts[1][2], "dir=0.00,1.00$"), "Trico's facing: " .. ts[1][2])
 
 -- no Trico yet (title screen): nothing happens
 Harness.tricoProps = nil

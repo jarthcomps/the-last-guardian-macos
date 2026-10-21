@@ -26,6 +26,9 @@ local DEADZONE = 0.3
 local GOAL_DISTANCE = 8.0      -- metres ahead of Trico at full stick
 local MIN_GOAL_DISTANCE = 4.0
 local NAV_STEPS = { 1.0, 0.6, 0.35 }  -- shorter goals to try when the full one is off Trico's navmesh
+local BEHIND = -0.3            -- cosine to Trico's facing below which a goal is behind it
+local BEHIND_MIN = 7.0         -- a goal behind Trico stays at least a body length away, so it
+                               -- turns round instead of shuffling under its own hindquarters
 local REFRESH = 0.3            -- seconds between goal updates
 local REGOAL = 2.0             -- metres the goal must change by before it is moved (so Trico's
                                -- path planner can commit to it)
@@ -96,8 +99,10 @@ function CoopTrico.CameraForward(tricoPos)
 	return nil
 end
 
--- The goal for a stick vector: camera-relative, on Trico's height. `scale` shortens it.
+-- The goal for a stick vector: camera-relative, on Trico's height. `scale` shortens it, but a
+-- goal behind Trico (its facing is tricoDirX, tricoDirZ) stays BEHIND_MIN away.
 function CoopTrico.GoalFor(tricoPos, tricoDirX, tricoDirZ, sx, sy, len, fx, fz, scale)
+	local faceX, faceZ = tricoDirX, tricoDirZ
 	if not fx then fx, fz = tricoDirX, tricoDirZ end
 	-- right = forward rotated -90 degrees about Y (looking along +Z, right is -X)
 	local rx, rz = -fz, fx
@@ -107,6 +112,7 @@ function CoopTrico.GoalFor(tricoPos, tricoDirX, tricoDirZ, sx, sy, len, fx, fz, 
 	if dlen < 0.001 then return nil end
 	dx, dz = dx / dlen, dz / dlen
 	local dist = (MIN_GOAL_DISTANCE + (GOAL_DISTANCE - MIN_GOAL_DISTANCE) * len) * (scale or 1)
+	if dx * faceX + dz * faceZ < BEHIND and dist < BEHIND_MIN then dist = BEHIND_MIN end
 	return tricoPos.X + dx * dist, tricoPos.Y, tricoPos.Z + dz * dist, dx, dz
 end
 
@@ -227,13 +233,15 @@ local function Report(props)
 		return Ai2.Utils.GetPlayerAI().pos
 	end)
 	local okCam, cam = pcall(CameraPos)
+	local face = info.ai2Ext and info.ai2Ext.dirXZ
 	local okF, fx, fz, src = pcall(CoopTrico.CameraForward, p)
 	local f = CoopTrico.forward
-	CoopDebug.Print("TS st=%s inj=%s boy=%s cam=%s f=%s nav=%s goal=%s",
+	CoopDebug.Print("TS st=%s inj=%s boy=%s cam=%s f=%s nav=%s goal=%s dir=%s",
 		tostring(okStage and stage or "?"), tostring(props.isInjuredMovementMode),
 		okBoy and Vec(boy) or "?", okCam and Vec(cam) or "?",
 		okF and fx and string.format("%.2f,%.2f,%s", fx, fz, src) or "-",
-		tostring(CoopTrico.nav), f and string.format("%.2f,%.2f,%s", f[1], f[2], f[3]) or "-")
+		tostring(CoopTrico.nav), f and string.format("%.2f,%.2f,%s", f[1], f[2], f[3]) or "-",
+		face and string.format("%.2f,%.2f", face.X, face.Z) or "-")
 end
 
 -- Call once per frame with the Trico player's input (nil when nobody plays Trico).
