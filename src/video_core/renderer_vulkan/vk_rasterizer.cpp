@@ -26,6 +26,7 @@
 #include "video_core/texture_cache/texture_gc_policy.h"
 #include "video_core/renderer_vulkan/barrier_stats.h"
 #include "video_core/renderer_vulkan/bind_resources_policy.h"
+#include "video_core/renderer_vulkan/target_inputs.h"
 #include "video_core/texture_cache/image_barrier_policy.h"
 
 #ifdef MemoryBarrier
@@ -45,10 +46,7 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
     Shader::PushData push_data{};
-    push_data.xoffset = regs.viewport_control.xoffset_enable ? regs.viewports[0].xoffset : 0.f;
-    push_data.xscale = regs.viewport_control.xscale_enable ? regs.viewports[0].xscale : 1.f;
-    push_data.yoffset = regs.viewport_control.yoffset_enable ? regs.viewports[0].yoffset : 0.f;
-    push_data.yscale = regs.viewport_control.yscale_enable ? regs.viewports[0].yscale : 1.f;
+    FillViewportPush(regs, push_data);
     return push_data;
 }
 
@@ -457,8 +455,9 @@ bool Rasterizer::FilterDraw() {
 
 void Rasterizer::TouchCachedTarget(CachedTarget& cache, VideoCore::ImageId image_id) {
     // A reused target only needs one touch per GC tick (once per guest submission) to stay
-    // out of the collector's reach; touching takes the texture cache lock, and with
-    // SHADPS4_TOUCH_TARGETS_ONCE=1 the other ~250,000 touches a second outdoors are skipped.
+    // out of the collector's reach. Touching needs the texture cache lock, which
+    // PrepareRenderState holds. With SHADPS4_TOUCH_TARGETS_ONCE=1 the other ~250,000 touches a
+    // second outdoors are skipped.
     // Measured outdoors (tower view, alternating 150 s runs): with 24.4/24.0 FPS, without
     // 25.7/25.5, so it stays off.
     static const bool once = Common::EnvOverrideNamed("SHADPS4_TOUCH_TARGETS_ONCE", false);
@@ -466,31 +465,22 @@ void Rasterizer::TouchCachedTarget(CachedTarget& cache, VideoCore::ImageId image
     if (!VideoCore::NeedsTargetTouch(once, cache.touched_tick, tick)) {
         return;
     }
-    texture_cache.TouchFoundImage(image_id);
+    texture_cache.TouchFoundImageLocked(image_id);
     cache.touched_tick = tick;
 }
 
 template <typename... Ts>
 bool Rasterizer::TargetInputsMatch(CachedTarget& cache, const Ts&... parts) {
-    std::array<u8, 256> inputs;
-    u32 size = 0;
-    static_assert((sizeof(Ts) + ...) <= inputs.size());
-    ((std::memcpy(inputs.data() + size, &parts, sizeof(parts)), size += sizeof(parts)), ...);
-    const bool match = cache.valid && cache.size == size &&
-                       cache.generation == texture_cache.ImageGeneration() &&
-                       std::memcmp(cache.inputs.data(), inputs.data(), size) == 0;
-    if (!match) {
-        // The caller does a full lookup and marks the cache valid afterwards.
-        cache.valid = false;
-        cache.size = size;
-        std::memcpy(cache.inputs.data(), inputs.data(), size);
-    }
-    return match;
+    // The parts are compared with the stored bytes directly (no staging copy, no memcmp call per
+    // lookup); see target_inputs.h. The texture cache generation is read only when needed.
+    return MatchTargetInputs(cache, [this] { return texture_cache.ImageGeneration(); }, parts...);
 }
 
 void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     VideoCore::ReadbackStats::CpTimer rt_timer{VideoCore::ReadbackStats::CpTime::RtPrepare};
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
+    // One texture cache lock for the target lookups below (the *Locked calls).
+    const auto images_lock = texture_cache.LockImages();
     const auto& key = pipeline->GetGraphicsKey();
     const auto& regs = liverpool->regs;
     if (regs.color_control.degamma_enable) {
@@ -517,7 +507,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             TouchCachedTarget(rt_cache[cb], image_id);
         } else {
             std::construct_at(&desc, col_buf, hint);
-            image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+            image_id = bound_images.emplace_back(texture_cache.FindImageLocked(desc, false));
             if (rt_reuse_enabled) {
                 rt_cache[cb].valid = true;
                 rt_cache[cb].generation = texture_cache.ImageGeneration();
@@ -542,7 +532,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         } else {
             std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
                               htile_address, hint);
-            image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+            image_id = bound_images.emplace_back(texture_cache.FindImageLocked(desc, false));
             if (rt_reuse_enabled) {
                 cache.valid = true;
                 cache.generation = texture_cache.ImageGeneration();
@@ -730,7 +720,10 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::Prepare};
-        scheduler.PopPendingOperations();
+        // Without queued operations PopPendingOperations only takes the lock and returns.
+        if (scheduler.HasPendingOperations()) {
+            scheduler.PopPendingOperations();
+        }
         if (!FilterDraw()) {
             return;
         }
@@ -887,7 +880,10 @@ void Rasterizer::DispatchDirect() {
 
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::Prepare};
-        scheduler.PopPendingOperations();
+        // Without queued operations PopPendingOperations only takes the lock and returns.
+        if (scheduler.HasPendingOperations()) {
+            scheduler.PopPendingOperations();
+        }
     }
 
     const auto& cs_program = liverpool->GetCsRegs();
@@ -1129,8 +1125,10 @@ void Rasterizer::CommitHazards() {
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
     {
         VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::ComputeChecks};
-        if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
-            IsComputeImageClear(pipeline)) {
+        // Each check returns false at once for a graphics pipeline, so they are not called for one.
+        if (pipeline->IsCompute() &&
+            (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
+             IsComputeImageClear(pipeline))) {
             return false;
         }
     }
@@ -1150,15 +1148,15 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
 
     bool uses_dma = false;
 
-    // Bind resource buffers and textures.
+    // Bind resource buffers and textures. BindBuffers and BindTextures fill set_writes by index,
+    // so the array is sized once for all stages (one write per buffer, image and sampler).
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
+    set_writes.resize(DescriptorWriteTotal(pipeline->GetStages()));
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
         }
-        set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
-                          stage->samplers.size());
         stage->PushUd(binding, push_data);
         if (VideoCore::ReadbackStats::IsEnabled()) {
             NoteBindReuse(*stage);
@@ -1560,6 +1558,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     }();
     using ImageDesc = VideoCore::TextureCache::ImageDesc;
     using BindingType = VideoCore::TextureCache::BindingType;
+    // One texture cache lock for all the lookups and views of this stage (the *Locked calls
+    // below). The samplers at the end take no lock: GetSampler is lock free.
+    const auto images_lock = stage.images.empty() ? VideoCore::TextureCache::ImageLock{}
+                                                  : texture_cache.LockImages();
     auto& lookups = texture_lookups.at(static_cast<size_t>(stage.sw_stage));
     size_t lookup_slot = 0;
     image_bindings.clear();
@@ -1639,19 +1641,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             {
                 VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::TexFindImage};
                 if (reuse && !verify) {
-                    // A valid cached result is used as it is, so the T# is decoded only on a miss.
+                    // A valid cached result is used as it is, so the T# is decoded only on a miss,
+                    // and a miss with the slot's last key takes that decode (DecodeReuseEntry).
                     if (lookup_slot == lookups.size()) {
                         lookups.emplace_back();
                     }
                     const auto key = make_key();
-                    auto& lookup = lookups[lookup_slot++];
-                    if (const auto hit = texture_cache.FindCachedImage(key, lookup)) {
+                    auto& slot = lookups[lookup_slot++];
+                    if (const auto hit = texture_cache.FindCachedImageLocked(key, slot.lookup)) {
                         info.image_id = hit->id;
                         info.view_info = hit->view;
                     } else {
-                        ImageDesc desc{tsharp, image_desc};
+                        ImageDesc desc = slot.decoded.Get(
+                            key, [&] { return ImageDesc{tsharp, image_desc}; });
                         apply_mip_fallback(desc.view_info);
-                        info.image_id = texture_cache.StoreImageLookup(desc, key, lookup);
+                        info.image_id =
+                            texture_cache.StoreImageLookupLocked(desc, key, slot.lookup);
                         info.view_info = desc.view_info;
                     }
                 } else {
@@ -1661,10 +1666,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         if (lookup_slot == lookups.size()) {
                             lookups.emplace_back();
                         }
-                        info.image_id = texture_cache.FindImageCached(
-                            desc, make_key(), lookups[lookup_slot++], verify);
+                        info.image_id = texture_cache.FindImageCachedLocked(
+                            desc, make_key(), lookups[lookup_slot++].lookup, verify);
                     } else {
-                        info.image_id = texture_cache.FindImage(desc);
+                        info.image_id = texture_cache.FindImageLocked(desc, false);
                     }
                     info.view_info = desc.view_info;
                 }
@@ -1699,7 +1704,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 // The lookup is redone, so the T# is decoded again.
                 ImageDesc desc{info.tsharp, *info.resource};
                 desc.view_info = info.view_info;
-                info.image_id = texture_cache.FindImage(desc);
+                info.image_id = texture_cache.FindImageLocked(desc, false);
                 info.view_info = desc.view_info;
             }
 
@@ -1708,7 +1713,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             VideoCore::ReadbackStats::CpTimer view_timer{
                 VideoCore::ReadbackStats::CpTime::TexViewLayout};
             auto& image = texture_cache.GetImage(info.image_id);
-            auto& image_view = texture_cache.FindTexture(info.image_id, info.type, info.view_info);
+            auto& image_view =
+                texture_cache.FindTextureLocked(info.image_id, info.type, info.view_info);
 
             // The image is either bound as storage in a separate descriptor or bound as render
             // target in feedback loop. Depth images are excluded because they can't be bound as
@@ -1785,6 +1791,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
 RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     attachment_feedback_loop = false;
+    // One texture cache lock for the color and depth targets (the *Locked calls below). It is
+    // taken once per draw instead of once per target lookup.
+    const auto images_lock = texture_cache.LockImages();
     const auto& regs = liverpool->regs;
     const auto& key = pipeline->GetGraphicsKey();
     RenderState state;
@@ -1801,14 +1810,14 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         auto* image = &texture_cache.GetImage(image_id);
         if (image->binding.needs_rebind) {
             rt_cache[cb].valid = false;
-            image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+            image_id = bound_images.emplace_back(texture_cache.FindImageLocked(desc, false));
             image = &texture_cache.GetImage(image_id);
         }
-        texture_cache.UpdateImage(image_id);
+        texture_cache.UpdateImageLocked(image_id);
         image->SetBackingSamples(key.color_samples[cb]);
         const auto& image_view = [&]() -> const auto& {
             VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::RtViews};
-            return texture_cache.FindRenderTarget(image_id, desc);
+            return texture_cache.FindRenderTargetLocked(image_id, desc);
         }();
         const auto slice = image_view.info.range.base.layer;
         const auto mip = image_view.info.range.base.level;
@@ -1853,7 +1862,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
         const auto& image_view = [&]() -> const auto& {
             VideoCore::ReadbackStats::CpTimer t{VideoCore::ReadbackStats::CpTime::RtViews};
-            return texture_cache.FindDepthTarget(image_id, desc);
+            return texture_cache.FindDepthTargetLocked(image_id, desc);
         }();
         auto& image = texture_cache.GetImage(image_id);
 

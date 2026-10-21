@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstdlib>
+#include <cstring>
 #include <execinfo.h>
 #include <string_view>
 #include <algorithm>
@@ -90,6 +91,12 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                           "BDA Page Table Buffer");
 
     memory_tracker = std::make_unique<MemoryTracker>(tracker);
+
+    // SHADPS4_HOT_PAGE_COMPARE=1 (read once): skip the copies of hot pages whose guest bytes did
+    // not change since their last copy into the same buffer (see HotShadow).
+    if (const char* value = std::getenv("SHADPS4_HOT_PAGE_COMPARE")) {
+        hot_compare = std::string_view{value} == "1";
+    }
 
     std::memset(gds_buffer.mapped_data.data(), 0, DataShareBufferSize);
 
@@ -377,6 +384,10 @@ void BufferCache::AdvanceHotEpoch() {
     if (hot_epoch % HotPageLifetime == 0) {
         memory_tracker->DecayHotPages();
         ReadbackStats::OnHotPageDecay();
+        if (hot_compare) {
+            LogHotCompare();
+            memory_tracker->ClearHotShadows();
+        }
     }
 }
 
@@ -618,6 +629,10 @@ bool BufferCache::IsDownloadInFlight(VAddr device_addr, u64 size) {
 }
 
 bool BufferCache::IsReadbackCopyInFlight(VAddr device_addr, u64 size) {
+    // Lock-free unless a pending copy may cover these bytes (see PendingBackingCopies::MayOverlap).
+    if (!pending_backing_copies.MayOverlap(device_addr, size)) {
+        return false;
+    }
     std::scoped_lock lk{pending_unmarks_mutex};
     return pending_backing_copies.Overlaps(device_addr, size);
 }
@@ -1431,6 +1446,11 @@ BufferId BufferCache::CreateBuffer(VAddr device_addr, u32 wanted_size) {
         slot_buffers.insert(instance, scheduler, MemoryUsage::DeviceLocal, overlap.begin,
                             AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress, size);
     auto& new_buffer = slot_buffers[new_buffer_id];
+    // Serial 0 means no shadow (see HotShadow), so the counter skips it when it wraps.
+    if (++next_buffer_serial == 0) {
+        ++next_buffer_serial;
+    }
+    new_buffer.serial = next_buffer_serial;
     for (const BufferId overlap_id : overlap.ids) {
         JoinOverlap(new_buffer_id, overlap_id, !overlap.has_stream_leap);
     }
@@ -1505,13 +1525,88 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
     size_t total_size_bytes = 0;
     VAddr buffer_start = buffer.CpuAddr();
     vk::Buffer src_buffer = VK_NULL_HANDLE;
+    // Hot page shadows (SHADPS4_HOT_PAGE_COMPARE). A write, or a texel read whose image copy writes
+    // the buffer after the copies, makes the shadows of its range stale. A read that is not a texel
+    // read takes its hot pages out of the upload pass and decides them below; every other dirty
+    // page is copied as before.
+    const bool shadows = hot_compare && buffer.serial != 0;
+    if (shadows && (is_written || is_texel_buffer)) {
+        memory_tracker->ForgetHotShadows(device_addr, size);
+    }
+    const bool compare_hot = shadows && !is_written && !is_texel_buffer;
     memory_tracker->ForEachUploadRange(
         device_addr, size, is_written,
         [&](u64 device_addr_out, u64 range_size) {
+            if (shadows) {
+                // Copied without a snapshot, so the buffer no longer holds a shadow of these pages.
+                memory_tracker->ForgetHotShadows(device_addr_out, range_size);
+            }
             copies.emplace_back(total_size_bytes, device_addr_out - buffer_start, range_size);
             total_size_bytes += range_size;
         },
-        [&] { src_buffer = UploadCopies(buffer, copies, total_size_bytes); });
+        [&] {
+            if (compare_hot) {
+                // The hot pages that have a shadow of this buffer are compared with the guest
+                // memory in one pass. A hot page is then skipped when its guest bytes equal its
+                // shadow, and copied otherwise.
+                hot_matches.clear();
+                for (const HotPageRef& ref : hot_refs) {
+                    const HotShadow& shadow = memory_tracker->HotShadowAt(ref);
+                    if (shadow.data && shadow.serial == buffer.serial) {
+                        hot_matches.push_back({ref.page, TRACKER_BYTES_PER_PAGE,
+                                               shadow.data->data(), false});
+                    }
+                }
+                if (!hot_matches.empty()) {
+                    memory->MatchSparseRanges(hot_matches);
+                }
+                size_t next_match = 0;
+                bool run_open = false;
+                VAddr run_start = 0;
+                u64 run_size = 0;
+                const auto close_run = [&] {
+                    if (run_open) {
+                        copies.emplace_back(total_size_bytes, run_start - buffer_start, run_size);
+                        total_size_bytes += run_size;
+                        run_open = false;
+                    }
+                };
+                for (const HotPageRef& ref : hot_refs) {
+                    HotShadow& shadow = memory_tracker->HotShadowAt(ref);
+                    const HotShadowDecision decision = DecideHotShadow(
+                        shadow, buffer.serial, memory_tracker->HotLedger(),
+                        [&](const u8* bytes) {
+                            // DecideHotShadow compares exactly the shadows listed in hot_matches,
+                            // in the same order. Anything else counts as changed.
+                            if (next_match >= hot_matches.size()) {
+                                return false;
+                            }
+                            const auto& match = hot_matches[next_match++];
+                            DEBUG_ASSERT(match.source == ref.page && match.expected == bytes);
+                            return match.equal;
+                        });
+                    if (decision.action == HotShadowAction::Skip) {
+                        close_run();
+                        continue;
+                    }
+                    if (!run_open || run_start + run_size != ref.page) {
+                        close_run();
+                        run_open = true;
+                        run_start = ref.page;
+                        run_size = 0;
+                    }
+                    run_size += TRACKER_BYTES_PER_PAGE;
+                    if (decision.action == HotShadowAction::CopyAndCommit) {
+                        hot_snapshots.push_back({ref.page, &shadow, buffer.serial});
+                    }
+                }
+                close_run();
+            }
+            src_buffer = UploadCopies(buffer, copies, total_size_bytes);
+            hot_snapshots.clear();
+        },
+        compare_hot ? &hot_refs : nullptr);
+    hot_refs.clear();
 
     if (src_buffer) {
         ReadbackStats::NoteMutation(ReadbackStats::Mutation::BufferUpload);
@@ -1571,6 +1666,9 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
             u8* const src_pointer = staging + copy.srcOffset;
             const VAddr device_addr = buffer.CpuAddr() + copy.dstOffset;
             memory->CopySparseMemory(device_addr, src_pointer, copy.size);
+            if (!hot_snapshots.empty()) {
+                SnapshotHotPages(device_addr, src_pointer, copy.size);
+            }
             // Apply the staging offset
             copy.srcOffset += offset;
         }
@@ -1587,10 +1685,45 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
             u8* const src_pointer = staging + copy.srcOffset;
             const VAddr device_addr = buffer.CpuAddr() + copy.dstOffset;
             memory->CopySparseMemory(device_addr, src_pointer, copy.size);
+            if (!hot_snapshots.empty()) {
+                SnapshotHotPages(device_addr, src_pointer, copy.size);
+            }
         }
         scheduler.DeferOperation([buffer = std::move(temp_buffer)]() mutable { buffer.reset(); });
         return src_buffer;
     }
+}
+
+void BufferCache::SnapshotHotPages(VAddr device_addr, const u8* staged, u64 size) {
+    // Snapshots are in ascending page order, and every copy holds whole pages.
+    const auto first = std::lower_bound(
+        hot_snapshots.begin(), hot_snapshots.end(), device_addr,
+        [](const HotSnapshot& snapshot, VAddr addr) { return snapshot.page < addr; });
+    for (auto it = first; it != hot_snapshots.end() && it->page < device_addr + size; ++it) {
+        DEBUG_ASSERT(it->page + TRACKER_BYTES_PER_PAGE <= device_addr + size);
+        std::memcpy(it->shadow->data->data(), staged + (it->page - device_addr),
+                    TRACKER_BYTES_PER_PAGE);
+        CommitHotShadow(*it->shadow, it->serial, memory_tracker->HotLedger());
+    }
+}
+
+void BufferCache::LogHotCompare() {
+    HotShadowLedger& ledger = memory_tracker->HotLedger();
+    if (ledger.checks != 0 || ledger.commits != 0) {
+        const double skipped_mb =
+            static_cast<double>(ledger.skips * TRACKER_BYTES_PER_PAGE) / (1024.0 * 1024.0);
+        LOG_INFO(Render_Vulkan,
+                 "Hot page compare: {} checks, {} unchanged ({:.1f} MB not copied), {} changed, "
+                 "{} shadows taken, {} disarmed, {} refused, {} kept",
+                 ledger.checks, ledger.skips, skipped_mb, ledger.changed, ledger.commits,
+                 ledger.disarms, ledger.refused, ledger.armed);
+    }
+    ledger.checks = 0;
+    ledger.skips = 0;
+    ledger.changed = 0;
+    ledger.commits = 0;
+    ledger.disarms = 0;
+    ledger.refused = 0;
 }
 
 bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, u32 size) {

@@ -30,7 +30,6 @@
 namespace VideoCore {
 
 static constexpr u64 PageShift = 12;
-static constexpr u64 NumFramesBeforeRemoval = 32;
 
 TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                            AmdGpu::Liverpool* liverpool_, BufferCache& buffer_cache_,
@@ -342,14 +341,25 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
     return cache_image_id;
 }
 
+// Records that a decision of a lookup depends on whether this image is old enough to delete. The
+// lookup's result then holds only for GC ticks before the image becomes old enough
+// (LookupValidity).
+static void NoteAge(const Image& image, LookupValidity* validity) {
+    if (validity) {
+        validity->tick_limit =
+            std::min(validity->tick_limit, FirstAgedOutTick(image.tick_accessed_last));
+    }
+}
+
 std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& image_info,
                                                            BindingType binding,
                                                            ImageId cache_image_id,
-                                                           ImageId merged_image_id) {
+                                                           ImageId merged_image_id,
+                                                           LookupValidity* validity) {
     auto& cache_image = slot_images[cache_image_id];
     // Age is counted in guest submissions (gc_tick advances once per submit), not scheduler ticks:
     // those advance at every flush, and with async readback fences that is many times per frame.
-    const bool safe_to_delete = gc_tick - cache_image.tick_accessed_last > NumFramesBeforeRemoval;
+    const bool safe_to_delete = AgedOut(gc_tick, cache_image.tick_accessed_last);
 
     // Equal address
     if (image_info.guest_address == cache_image.info.guest_address) {
@@ -358,6 +368,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         if (image_info.BlockDim() != cache_image.info.BlockDim() ||
             lhs_block_size != rhs_block_size) {
             // Very likely this kind of overlap is caused by allocation from a pool.
+            NoteAge(cache_image, validity);
             if (safe_to_delete) {
                 FreeImage(cache_image_id);
             }
@@ -398,6 +409,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         // Size is greater but resources are not, because the tiling mode is different.
         // Likely the address is reused for a image with a different tiling mode.
         if (image_info.tile_mode != cache_image.info.tile_mode) {
+            NoteAge(cache_image, validity);
             if (safe_to_delete) {
                 FreeImage(cache_image_id);
             }
@@ -521,6 +533,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
         // Seen in The Last Guardian: a 3D texture at the same address grows in depth. Replace
         // the old image when it hasn't been used recently instead of aborting.
+        NoteAge(cache_image, validity);
         ASSERT_MSG(safe_to_delete,
                    "Encountered unresolvable image overlap with equal memory address.");
         FreeImage(cache_image_id);
@@ -536,6 +549,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         }
 
         // Image isn't a subresource but a chance overlap.
+        NoteAge(cache_image, validity);
         if (safe_to_delete) {
             FreeImage(cache_image_id);
         }
@@ -545,6 +559,10 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         // Left overlap, the image from cache is a possible subresource of the image requested
         if (auto mip = cache_image.info.MipOf(image_info); mip >= 0) {
             if (auto slice = cache_image.info.SliceOf(image_info, mip); slice >= 0) {
+                // The decision below reads a binding flag, which is set and cleared for every draw.
+                if (validity) {
+                    validity->reusable = false;
+                }
                 // We have a larger image created and a separate one, representing a subres of it
                 // bound as render target. In this case we need to rebind render target.
                 if (cache_image.binding.is_target) {
@@ -597,10 +615,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     return FindImageLocked(desc, exact_fmt);
 }
 
-ImageId TextureCache::FindImageCached(ImageDesc& desc, const TextureLookupKey& key,
-                                     CachedImageLookup& cached, bool verify) {
-    std::scoped_lock lock{mutex};
-    if (const auto* hit = cached.Find(key, ImageGeneration(), gc_tick);
+ImageId TextureCache::FindImageCachedLocked(ImageDesc& desc, const TextureLookupKey& key,
+                                            CachedImageLookup& cached, bool verify) {
+    if (const auto* hit = cached.Find(key, registry_stamps, gc_tick);
         hit && !slot_images[hit->id].binding.needs_rebind) {
         const auto expected = *hit;
         if (verify) {
@@ -619,15 +636,15 @@ ImageId TextureCache::FindImageCached(ImageDesc& desc, const TextureLookupKey& k
         }
         return expected.id;
     }
-    const auto id = FindImageLocked(desc, false);
-    cached.Store(key, ImageGeneration(), gc_tick, {id, desc.view_info});
+    LookupValidity validity;
+    const auto id = FindImageLocked(desc, false, &validity);
+    cached.Store(key, validity, {id, desc.view_info});
     return id;
 }
 
-std::optional<TextureCache::CachedImageResult> TextureCache::FindCachedImage(
+std::optional<TextureCache::CachedImageResult> TextureCache::FindCachedImageLocked(
     const TextureLookupKey& key, CachedImageLookup& cached) {
-    std::scoped_lock lock{mutex};
-    const auto* hit = cached.Find(key, ImageGeneration(), gc_tick);
+    const auto* hit = cached.Find(key, registry_stamps, gc_tick);
     if (!hit || slot_images[hit->id].binding.needs_rebind) {
         return std::nullopt;
     }
@@ -639,17 +656,27 @@ std::optional<TextureCache::CachedImageResult> TextureCache::FindCachedImage(
     return expected;
 }
 
-ImageId TextureCache::StoreImageLookup(ImageDesc& desc, const TextureLookupKey& key,
-                                       CachedImageLookup& cached) {
-    std::scoped_lock lock{mutex};
-    const auto id = FindImageLocked(desc, false);
-    cached.Store(key, ImageGeneration(), gc_tick, {id, desc.view_info});
+ImageId TextureCache::StoreImageLookupLocked(ImageDesc& desc, const TextureLookupKey& key,
+                                             CachedImageLookup& cached) {
+    LookupValidity validity;
+    const auto id = FindImageLocked(desc, false, &validity);
+    cached.Store(key, validity, {id, desc.view_info});
     return id;
 }
 
-ImageId TextureCache::FindImageLocked(ImageDesc& desc, bool exact_fmt) {
+ImageId TextureCache::FindImageLocked(ImageDesc& desc, bool exact_fmt, LookupValidity* validity) {
     const auto& info = desc.info;
     ASSERT(info.guest_address != 0);
+    if (validity) {
+        // Taken before the lookup can register or unregister anything (see LookupValidity).
+        const auto [first_page, last_page] = PageSpan(info.guest_address, info.guest_size);
+        *validity = LookupValidity{
+            .first_page = first_page,
+            .last_page = last_page,
+            .registry_seq = registry_stamps.Seq(),
+            .reusable = first_page <= last_page,
+        };
+    }
 
     ImageIds image_ids;
     ForEachImageInRegion(info.guest_address, info.guest_size,
@@ -689,7 +716,7 @@ ImageId TextureCache::FindImageLocked(ImageDesc& desc, bool exact_fmt) {
 
             const auto& merged_info = image_id ? slot_images[image_id].info : info;
             auto [overlap_image_id, overlap_view_mip, overlap_view_slice] =
-                ResolveOverlap(merged_info, desc.type, cache_id, image_id);
+                ResolveOverlap(merged_info, desc.type, cache_id, image_id, validity);
             if (overlap_image_id) {
                 image_id = overlap_image_id;
                 view_mip = overlap_view_mip;
@@ -761,8 +788,8 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
     return {};
 }
 
-ImageView& TextureCache::FindTexture(ImageId image_id, BindingType type,
-                                     const ImageViewInfo& view_info) {
+ImageView& TextureCache::FindTextureLocked(ImageId image_id, BindingType type,
+                                           const ImageViewInfo& view_info) {
     Image& image = slot_images[image_id];
     if (type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
@@ -772,11 +799,16 @@ ImageView& TextureCache::FindTexture(ImageId image_id, BindingType type,
             download_images.emplace(image_id);
         }
     }
-    UpdateImage(image_id);
+    UpdateImageLocked(image_id);
     return image.FindView(view_info);
 }
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
+    std::scoped_lock lock{mutex};
+    return FindRenderTargetLocked(image_id, desc);
+}
+
+ImageView& TextureCache::FindRenderTargetLocked(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (False(image.flags & ImageFlagBits::GpuModified)) {
         ReadbackStats::NoteMutation(ReadbackStats::Mutation::TargetMarked);
@@ -787,7 +819,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
         download_images.emplace(image_id);
     }
     image.usage.render_target = 1u;
-    UpdateImage(image_id);
+    UpdateImageLocked(image_id);
 
     // Register meta data for this color buffer
     if (desc.info.meta_info.cmask_addr) {
@@ -805,14 +837,14 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     return image.FindView(desc.view_info, false);
 }
 
-ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
+ImageView& TextureCache::FindDepthTargetLocked(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (False(image.flags & ImageFlagBits::GpuModified)) {
         ReadbackStats::NoteMutation(ReadbackStats::Mutation::TargetMarked);
     }
     image.flags |= ImageFlagBits::GpuModified;
     image.usage.depth_target = 1u;
-    UpdateImage(image_id);
+    UpdateImageLocked(image_id);
 
     // Register meta data for this depth buffer
     if (desc.info.meta_info.htile_addr) {
@@ -986,7 +1018,8 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
                                      AmdGpu::BorderColorBuffer border_color_base) {
     const u64 hash = XXH3_64bits(&sampler, sizeof(sampler));
 
-    std::scoped_lock lock{samplers_mutex};
+    // No lock: the samplers are used and collected only on the command processor thread
+    // (BindTextures, and RunGarbageCollector from Rasterizer::OnSubmit).
     const auto [it, new_sampler] = samplers.try_emplace(hash, instance, sampler, border_color_base);
     if (new_sampler) {
         samplers.at(hash).lru_id = sampler_lru_cache.Insert(hash, gc_tick);
@@ -1026,6 +1059,8 @@ void TextureCache::RegisterImage(ImageId image_id) {
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
     ForEachPage(image.info.guest_address, image.info.guest_size,
                 [this, image_id](u64 page) { page_table[page].push_back(image_id); });
+    const auto [first_page, last_page] = PageSpan(image.info.guest_address, image.info.guest_size);
+    registry_stamps.Bump(first_page, last_page);
 }
 
 void TextureCache::UnregisterImage(ImageId image_id) {
@@ -1052,6 +1087,8 @@ void TextureCache::UnregisterImage(ImageId image_id) {
         }
         image_ids.erase(vector_it);
     });
+    const auto [first_page, last_page] = PageSpan(image.info.guest_address, image.info.guest_size);
+    registry_stamps.Bump(first_page, last_page);
 }
 
 void TextureCache::TrackImage(ImageId image_id) {
@@ -1237,7 +1274,7 @@ void TextureCache::GarbageCollectSamplers() {
     if (total_used_samplers < trigger_gc_samplers) {
         return;
     }
-    std::scoped_lock lock{samplers_mutex};
+    // No lock, as in GetSampler: command processor thread only.
     bool pressured = false;
     bool aggresive = false;
     u64 ticks_to_destroy = 0;
@@ -1281,8 +1318,7 @@ void TextureCache::RunGarbageCollector() {
     GarbageCollectSamplers();
 }
 
-void TextureCache::TouchFoundImage(ImageId image_id) {
-    std::scoped_lock lock{mutex};
+void TextureCache::TouchFoundImageLocked(ImageId image_id) {
     Image& image = slot_images[image_id];
     image.tick_accessed_last = gc_tick;
     TouchImage(image);

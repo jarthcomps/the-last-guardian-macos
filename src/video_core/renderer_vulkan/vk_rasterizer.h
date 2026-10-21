@@ -219,7 +219,14 @@ private:
     /// with SHADPS4_TOUCH_TARGETS_ONCE=1).
     void TouchCachedTarget(CachedTarget& cache, VideoCore::ImageId image_id);
     const bool rt_reuse_enabled;
-    std::array<std::vector<VideoCore::TextureCache::CachedImageLookup>, 8> texture_lookups{};
+    /// One texture lookup slot of a stage: its reuse entry and the T# decode behind the last miss.
+    struct TextureLookupSlot {
+        VideoCore::TextureCache::CachedImageLookup lookup;
+        VideoCore::DecodeReuseEntry<VideoCore::TextureLookupKey,
+                                    VideoCore::TextureCache::ImageDesc>
+            decoded;
+    };
+    std::array<std::vector<TextureLookupSlot>, 8> texture_lookups{};
     const u32 encoder_debug;
     /// Encoder thread: fences without readbacks wait for all work recorded before them.
     const bool full_eop_fences;

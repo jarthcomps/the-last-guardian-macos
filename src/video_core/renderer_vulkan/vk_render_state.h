@@ -7,6 +7,7 @@
 #include <cstring>
 #include <type_traits>
 #include "common/types.h"
+#include "video_core/renderer_vulkan/bytes_equal.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -36,7 +37,10 @@ struct RenderState {
     u16 num_color_attachments{};
 
     bool operator==(const RenderState& other) const noexcept {
-        return std::memcmp(this, &other, sizeof(RenderState)) == 0;
+        // Compares the same bytes memcmp did (see bytes_equal.h). The struct has no padding (the
+        // static_assert below), so equal bytes mean equal values.
+        return BytesEqual(reinterpret_cast<const u8*>(this), reinterpret_cast<const u8*>(&other),
+                          sizeof(RenderState));
     }
 };
 static_assert(std::has_unique_object_representations_v<RenderState>);

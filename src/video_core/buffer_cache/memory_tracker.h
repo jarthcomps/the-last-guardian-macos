@@ -52,6 +52,32 @@ public:
     }
     ~MemoryTracker() = default;
 
+    /// Hot page shadows (SHADPS4_HOT_PAGE_COMPARE). Command processor thread only.
+    [[nodiscard]] HotShadow& HotShadowAt(const HotPageRef& ref) {
+        return ref.manager->ShadowAt(ref.page);
+    }
+
+    [[nodiscard]] HotShadowLedger& HotLedger() noexcept {
+        return hot_shadow_ledger;
+    }
+
+    /// Drops the data of the shadows of a range that was written in a buffer.
+    void ForgetHotShadows(VAddr cpu_addr, u64 size) {
+        IteratePages<false>(cpu_addr, size,
+                            [](RegionManager* manager, u64 offset, size_t range_size) {
+                                manager->ForgetShadows(manager->GetCpuAddr() + offset, range_size);
+                            });
+    }
+
+    /// Drops every shadow (decay).
+    void ClearHotShadows() {
+        for (auto& pool : manager_pool) {
+            for (auto& manager : pool) {
+                manager.ClearShadows();
+            }
+        }
+    }
+
     /// Returns true if a region has been modified from the CPU
     bool IsRegionCpuModified(VAddr query_cpu_addr, u64 query_size) noexcept {
         return IteratePages<true>(
@@ -132,14 +158,17 @@ public:
             });
     }
 
-    /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
+    /// Call 'func' for each CPU modified range and unmark those pages as CPU modified. With hot_out
+    /// (reads only), hot pages are not passed to func: they are appended to hot_out instead.
     void ForEachUploadRange(VAddr query_cpu_range, u64 query_size, bool is_written, auto&& func,
-                            auto&& on_upload) {
+                            auto&& on_upload, std::vector<HotPageRef>* hot_out = nullptr) {
         IteratePages<true>(query_cpu_range, query_size,
-                           [&func, is_written](RegionManager* manager, u64 offset, size_t size) {
+                           [&func, is_written, hot_out](RegionManager* manager, u64 offset,
+                                                        size_t size) {
                                manager->lock.lock();
                                manager->template ForEachModifiedRange<Type::CPU, true>(
-                                   manager->GetCpuAddr() + offset, size, func, !is_written);
+                                   manager->GetCpuAddr() + offset, size, func, !is_written,
+                                   hot_out);
                                if (!is_written) {
                                    manager->lock.unlock();
                                }
@@ -227,6 +256,7 @@ private:
         new_manager->SetCpuAddress(base_cpu_addr);
         new_manager->SetHotPagesEnabled(hot_pages_enabled);
         new_manager->SetRangeProtectionEnabled(range_protection_enabled);
+        new_manager->SetShadowLedger(&hot_shadow_ledger);
         free_managers.pop_back();
         top_tier[page_index] = new_manager;
     }
@@ -237,6 +267,7 @@ private:
     std::array<RegionManager*, NUM_HIGH_PAGES> top_tier{};
     bool hot_pages_enabled{};
     bool range_protection_enabled{};
+    HotShadowLedger hot_shadow_ledger{};
 };
 
 } // namespace VideoCore

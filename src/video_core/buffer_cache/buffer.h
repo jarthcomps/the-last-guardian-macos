@@ -215,6 +215,9 @@ public:
     int stream_score = 0;
     size_t size_bytes = 0;
     u64 lru_id = 0;
+    /// Identifies this buffer object for the hot page shadows (never reused; 0 for buffers that
+    /// are not cached guest memory).
+    u32 serial = 0;
     std::span<u8> mapped_data;
     const Vulkan::Instance* instance;
     Vulkan::Scheduler* scheduler;

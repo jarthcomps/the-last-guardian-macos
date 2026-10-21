@@ -5,6 +5,7 @@
 
 #include <map>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include "common/enum.h"
@@ -240,6 +241,20 @@ public:
 
     void CopySparseMemory(VAddr source, u8* dest, u64 size);
 
+    /// A guest range to compare with bytes the caller holds, and the result of the comparison.
+    struct SparseRangeMatch {
+        VAddr source;
+        u64 size;
+        const u8* expected;
+        bool equal;
+    };
+
+    /// Sets equal for each range whose guest bytes are the expected bytes. A range counts only
+    /// when it lies in one mapped area: an unmapped area reads as zeros in CopySparseMemory, and
+    /// a range across areas is reported as not equal. Reads the guest memory without copying it,
+    /// under one lock for all the ranges.
+    void MatchSparseRanges(std::span<SparseRangeMatch> ranges);
+
     /// Same as CopySparseMemory, for small copies done very often (stream buffer copies at every
     /// draw). When the range lies in a mapped area this thread already looked up and no mapping
     /// changed since, it copies without taking the lock or searching the mappings again.
@@ -309,6 +324,10 @@ private:
     VMAHandle FindVMA(VAddr target) {
         return std::prev(vma_map.upper_bound(target));
     }
+
+    /// MatchSparseRanges for one range. cached is the mapping of the previous range, reused while
+    /// it holds this range. The caller holds the shared lock.
+    bool MatchSparseRange(VAddr source, u64 size, const u8* expected, VMAHandle& cached);
 
     PhysHandle FindDmemArea(PAddr target) {
         return std::prev(dmem_map.upper_bound(target));

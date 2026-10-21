@@ -19,6 +19,7 @@
 #include "common/unique_function.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/fault_manager.h"
+#include "video_core/buffer_cache/hot_page_shadow.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/multi_level_page_table.h"
 
@@ -272,6 +273,13 @@ private:
     vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
                             size_t total_size_bytes);
 
+    /// Copies the staged bytes of the hot pages to snapshot (see HotShadow) out of one copy's
+    /// staging memory, and commits their shadows. Called by UploadCopies after each copy.
+    void SnapshotHotPages(VAddr device_addr, const u8* staged, u64 size);
+
+    /// Logs the hot page compare counters (SHADPS4_HOT_PAGE_COMPARE) and resets them.
+    void LogHotCompare();
+
     bool SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, u32 size);
 
     void WriteDataBuffer(Buffer& buffer, VAddr address, const void* value, u32 num_bytes);
@@ -358,6 +366,22 @@ private:
     VAddr pending_stream_max{};
     u64 next_inflight_id{};
     u64 hot_epoch{};
+    /// SHADPS4_HOT_PAGE_COMPARE=1: hot pages are copied only when their guest bytes changed since
+    /// their last copy into the same buffer (see HotShadow). Read once, at construction.
+    bool hot_compare{};
+    u32 next_buffer_serial{};
+    /// Hot pages of the read being synchronized, as reported by the upload pass.
+    std::vector<HotPageRef> hot_refs;
+    /// The hot pages with a shadow of the buffer, compared with the guest memory in one pass.
+    std::vector<Core::MemoryManager::SparseRangeMatch> hot_matches;
+    /// Hot pages whose staged copy becomes their shadow after the copies of the read. The shadow
+    /// is committed to serial once the copy has been made.
+    struct HotSnapshot {
+        VAddr page;
+        HotShadow* shadow;
+        u32 serial;
+    };
+    std::vector<HotSnapshot> hot_snapshots;
     SplitRangeMap<BufferId> buffer_ranges;
     PageTable page_table;
 };

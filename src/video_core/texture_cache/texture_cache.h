@@ -101,13 +101,15 @@ public:
     /// Schedules a copy of pending images for download back to CPU memory.
     void ProcessDownloadImages();
 
-    /// Changes whenever the set of registered images changes.
+    /// Changes whenever the set of registered images changes. Used by the render target reuse
+    /// (rt_lookup_reuse_enabled); texture lookups check the page stamps instead (LookupValidity).
     u64 ImageGeneration() const noexcept {
         return image_generation.load(std::memory_order_acquire);
     }
 
-    /// Does what FindImage does for an image found again: marks it as recently used.
-    void TouchFoundImage(ImageId image_id);
+    /// Does what FindImage does for an image found again: marks it as recently used. Caller holds
+    /// the cache lock (LockImages).
+    void TouchFoundImageLocked(ImageId image_id);
 
     /// Records downloads of all pending images into a batch instead of waiting per image.
     void RecordImageDownloads(ReadbackBatch& batch);
@@ -118,48 +120,65 @@ public:
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
 
+    /// The cache lock, for a sequence of calls made by the command processor thread. Take it once
+    /// (LockImages) and call only the *Locked functions while it is held: the other functions take
+    /// the lock themselves, and std::mutex does not nest, so calling one of them there deadlocks.
+    using ImageLock = std::unique_lock<std::mutex>;
+    [[nodiscard]] ImageLock LockImages() {
+        return ImageLock{mutex};
+    }
+
     struct CachedImageResult { ImageId id{}; ImageViewInfo view{}; };
     using CachedImageLookup = LookupReuseEntry<TextureLookupKey, CachedImageResult>;
-    [[nodiscard]] ImageId FindImageCached(ImageDesc& desc, const TextureLookupKey& key,
-                                          CachedImageLookup& cached, bool verify);
+    // The *Locked lookups in this block and below expect the caller to hold the lock.
+    [[nodiscard]] ImageId FindImageCachedLocked(ImageDesc& desc, const TextureLookupKey& key,
+                                                CachedImageLookup& cached, bool verify);
 
     /// The cached result of a lookup if it is still valid, without an ImageDesc. Empty on a miss.
-    [[nodiscard]] std::optional<CachedImageResult> FindCachedImage(const TextureLookupKey& key,
-                                                                   CachedImageLookup& cached);
-    /// Resolves a lookup that has no valid cached result and stores the result.
-    [[nodiscard]] ImageId StoreImageLookup(ImageDesc& desc, const TextureLookupKey& key,
-                                           CachedImageLookup& cached);
+    [[nodiscard]] std::optional<CachedImageResult> FindCachedImageLocked(
+        const TextureLookupKey& key, CachedImageLookup& cached);
+    /// Resolves a lookup that has no valid cached result and stores the result with its validity.
+    [[nodiscard]] ImageId StoreImageLookupLocked(ImageDesc& desc, const TextureLookupKey& key,
+                                                 CachedImageLookup& cached);
 
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 
     /// Retrieves an image view of the specified image id, for a binding of the given type.
-    [[nodiscard]] ImageView& FindTexture(ImageId image_id, BindingType type,
-                                         const ImageViewInfo& view_info);
+    [[nodiscard]] ImageView& FindTextureLocked(ImageId image_id, BindingType type,
+                                               const ImageViewInfo& view_info);
 
     /// Retrieves the render target with specified properties
     [[nodiscard]] ImageView& FindRenderTarget(ImageId image_id, const ImageDesc& desc);
+    [[nodiscard]] ImageView& FindRenderTargetLocked(ImageId image_id, const ImageDesc& desc);
 
     /// Retrieves the depth target with specified properties
-    [[nodiscard]] ImageView& FindDepthTarget(ImageId image_id, const ImageDesc& desc);
+    [[nodiscard]] ImageView& FindDepthTargetLocked(ImageId image_id, const ImageDesc& desc);
 
     /// Updates image contents if it was modified by CPU.
     void UpdateImage(ImageId image_id) {
         std::scoped_lock lock{mutex};
+        UpdateImageLocked(image_id);
+    }
+    void UpdateImageLocked(ImageId image_id) {
         Image& image = slot_images[image_id];
         TrackImage(image_id);
         TouchImage(image);
         RefreshImage(image);
     }
 
-    /// Internal lookup; caller holds mutex.
-    [[nodiscard]] ImageId FindImageLocked(ImageDesc& desc, bool exact_fmt);
+    /// Internal lookup; caller holds mutex. With `validity`, records what the result depends on
+    /// (LookupValidity), as the lookup starts.
+    [[nodiscard]] ImageId FindImageLocked(ImageDesc& desc, bool exact_fmt,
+                                          LookupValidity* validity = nullptr);
 
-    /// Resolves overlap between existing cache image and pending merged image
+    /// Resolves overlap between existing cache image and pending merged image. `validity` is
+    /// updated with what the decision depends on (LookupValidity), when given.
     [[nodiscard]] std::tuple<ImageId, int, int> ResolveOverlap(const ImageInfo& info,
                                                                BindingType binding,
                                                                ImageId cache_img_id,
-                                                               ImageId merged_image_id);
+                                                               ImageId merged_image_id,
+                                                               LookupValidity* validity = nullptr);
 
     /// Resolves depth overlap and either re-creates the image or returns existing one
     [[nodiscard]] ImageId ResolveDepthOverlap(const ImageInfo& requested_info, BindingType binding,
@@ -326,6 +345,12 @@ private:
         }
     }
 
+    /// The first and last page index of an address range, as ForEachPage visits them (last < first
+    /// when the range is empty).
+    static std::pair<u64, u64> PageSpan(VAddr addr, size_t size) {
+        return {addr >> Traits::PageBits, (addr + size - 1) >> Traits::PageBits};
+    }
+
     /// Copies image memory back to CPU.
     void DownloadImageMemory(ImageId image_id, bool sync = false);
 
@@ -403,10 +428,13 @@ private:
     bool readback_linear_images;
     PageTable page_table;
     std::mutex mutex;
-    /// Bumped whenever an image is registered or unregistered: a lookup result stays valid while
-    /// it is unchanged (rt_lookup_reuse_enabled).
+    /// Bumped whenever an image is registered or unregistered (ImageGeneration, for the render
+    /// target reuse).
     std::atomic<u64> image_generation{};
-    std::mutex samplers_mutex;
+    /// Per-page sequence of the last register or unregister over each page. Texture lookups keep
+    /// their results while the pages they cover are unchanged (LookupValidity). Used only under
+    /// `mutex`.
+    PageStamps registry_stamps;
     std::mutex download_images_mutex;
     struct MetaDataInfo {
         MetaType type;

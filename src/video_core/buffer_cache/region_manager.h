@@ -15,7 +15,10 @@
 #include "common/debug.h"
 #include "common/types.h"
 #include <array>
+#include <memory>
+#include <vector>
 
+#include "video_core/buffer_cache/hot_page_shadow.h"
 #include "video_core/buffer_cache/region_definitions.h"
 #include "video_core/page_manager.h"
 
@@ -96,6 +99,47 @@ public:
         }
     }
 
+    /// Shared limit and counters of the hot page shadows. Set before tracking begins.
+    void SetShadowLedger(HotShadowLedger* ledger) noexcept {
+        shadow_ledger = ledger;
+    }
+
+    /// Shadow of a page of this region (see HotShadow). Only the command processor thread uses the
+    /// shadows, and it does so without the region lock: nothing else reads or writes them.
+    HotShadow& ShadowAt(VAddr page) {
+        if (!shadows) {
+            shadows = std::make_unique<std::array<HotShadow, NUM_PAGES_PER_REGION>>();
+        }
+        return (*shadows)[(page - cpu_addr) / TRACKER_BYTES_PER_PAGE];
+    }
+
+    /// Drops the data of the shadows of the pages in [query_cpu_addr, query_cpu_addr + size), since
+    /// the buffer memory of those pages was written. Command processor thread only.
+    void ForgetShadows(VAddr query_cpu_addr, u64 size) {
+        if (!shadows) {
+            return;
+        }
+        const size_t offset = query_cpu_addr - cpu_addr;
+        const size_t start_page = SanitizeAddress(offset) / TRACKER_BYTES_PER_PAGE;
+        const size_t end_page = std::min<size_t>(
+            Common::DivCeil(SanitizeAddress(offset + size), TRACKER_BYTES_PER_PAGE),
+            NUM_PAGES_PER_REGION);
+        for (size_t page = start_page; page < end_page; ++page) {
+            ReleaseHotShadow((*shadows)[page], *shadow_ledger);
+        }
+    }
+
+    /// Drops every shadow of this region (decay). Command processor thread only.
+    void ClearShadows() {
+        if (!shadows) {
+            return;
+        }
+        for (auto& shadow : *shadows) {
+            ReleaseHotShadow(shadow, *shadow_ledger);
+        }
+        shadows.reset();
+    }
+
     VAddr GetCpuAddr() const {
         return cpu_addr;
     }
@@ -162,7 +206,7 @@ public:
      */
     template <Type type, bool clear>
     void ForEachModifiedRange(VAddr query_cpu_range, s64 size, auto&& func,
-                              bool keep_hot = false) {
+                              bool keep_hot = false, std::vector<HotPageRef>* hot_out = nullptr) {
         const size_t offset = query_cpu_range - cpu_addr;
         const size_t start_page = SanitizeAddress(offset) / TRACKER_BYTES_PER_PAGE;
         const size_t end_page =
@@ -194,6 +238,18 @@ public:
                         const RegionBits cleared = range & ~hot;
                         bits &= ~cleared;
                         reprotected |= mask & cleared;
+                        if (hot_out) {
+                            // The hot pages stay modified and are left out of func: the caller
+                            // decides their copy from their shadows (see HotShadow).
+                            const RegionBits kept = mask & hot;
+                            for (const auto& [start, end] : kept) {
+                                for (size_t page = start; page < end; ++page) {
+                                    hot_out->push_back(
+                                        {this, cpu_addr + page * TRACKER_BYTES_PER_PAGE});
+                                }
+                            }
+                            mask &= ~kept;
+                        }
                     } else {
                         // Uploaded before a GPU write: every page goes back to normal tracking.
                         bits.UnsetRange(start_page, end_page);
@@ -288,6 +344,8 @@ private:
     RegionBits hot{};         ///< Kept CPU-modified and writable (see SetHotPagesEnabled).
     RegionBits reprotected{}; ///< Write-protected again by an upload, not rewritten since.
     std::array<u8, NUM_PAGES_PER_REGION> refaults{}; ///< CPU rewrites after an upload.
+    std::unique_ptr<std::array<HotShadow, NUM_PAGES_PER_REGION>> shadows; ///< Lazily allocated.
+    HotShadowLedger* shadow_ledger{};
 };
 
 } // namespace VideoCore

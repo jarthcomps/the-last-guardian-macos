@@ -110,7 +110,7 @@ struct StageSpecialization {
                      });
         ForEachSharp(binding, images, info->images,
                      [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
-                         FillImage(spec, desc, sharp, *info);
+                         FillImage(spec, desc, sharp);
                      });
         ForEachSharp(
             binding, fmasks, info->fmasks,
@@ -160,18 +160,19 @@ struct StageSpecialization {
     }
 
     static void FillImage(ImageSpecialization& spec, const ImageResource& desc,
-                          const AmdGpu::Image& sharp, const Info& info) {
+                          const AmdGpu::Image& sharp) {
         spec.type = sharp.GetViewType(desc.is_array);
-        spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
+        const auto num_fmt = sharp.GetNumberFmt();
+        spec.is_integer = AmdGpu::IsInteger(num_fmt);
         spec.is_storage = desc.is_written;
         spec.is_cube = sharp.IsCube();
         if (spec.is_storage) {
             spec.dst_select = sharp.DstSelect();
         } else {
-            spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
+            spec.is_srgb = num_fmt == AmdGpu::NumberFormat::Srgb;
         }
         spec.num_conversion = sharp.GetNumberConversion();
-        spec.num_bindings = desc.NumBindings(info);
+        spec.num_bindings = desc.NumBindingsOf(sharp);
     }
 
     static void FillFMask(FMaskSpecialization& spec, const AmdGpu::Image& sharp) {
@@ -261,7 +262,7 @@ struct StageSpecialization {
                 return false;
             }
             ImageSpecialization spec{};
-            FillImage(spec, info_.images[i], sharp, info_);
+            FillImage(spec, info_.images[i], sharp);
             if (images[i] != spec) {
                 return false;
             }

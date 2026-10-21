@@ -6,6 +6,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/copy_bytes.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "core/backing_range.h"
@@ -157,7 +158,7 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
     while (size) {
         u64 copy_size = std::min<u64>(vma->second.size - (virtual_addr - vma->first), size);
         if (vma->second.IsMapped()) {
-            std::memcpy(dest, std::bit_cast<const u8*>(virtual_addr), copy_size);
+            Common::CopyBytes(dest, std::bit_cast<const u8*>(virtual_addr), copy_size);
         } else {
             std::memset(dest, 0, copy_size);
         }
@@ -166,6 +167,30 @@ void MemoryManager::CopySparseMemory(VAddr virtual_addr, u8* dest, u64 size) {
         dest += copy_size;
         ++vma;
     }
+}
+
+void MemoryManager::MatchSparseRanges(std::span<SparseRangeMatch> ranges) {
+    std::shared_lock lk{mutex};
+    VMAHandle cached = vma_map.end();
+    for (SparseRangeMatch& range : ranges) {
+        range.equal = MatchSparseRange(range.source, range.size, range.expected, cached);
+    }
+}
+
+bool MemoryManager::MatchSparseRange(VAddr source, u64 size, const u8* expected,
+                                     VMAHandle& cached) {
+    if (size == 0 || vma_map.empty() || source < vma_map.begin()->first) {
+        return false;
+    }
+    if (cached == vma_map.end() || !cached->second.Contains(source, size)) {
+        cached = FindVMA(source);
+        if (!cached->second.Contains(source, size)) {
+            return false;
+        }
+    }
+    // CopySparseMemory fills an unmapped area with zeros, so such a range is never equal.
+    return cached->second.IsMapped() &&
+           std::memcmp(std::bit_cast<const u8*>(source), expected, size) == 0;
 }
 
 void MemoryManager::CopyMemoryFast(VAddr virtual_addr, u8* dest, u64 size) {
@@ -183,7 +208,7 @@ void MemoryManager::CopyMemoryFast(VAddr virtual_addr, u8* dest, u64 size) {
         for (const auto& area : areas) {
             if (area.generation == generation && virtual_addr >= area.base &&
                 virtual_addr + size <= area.end) {
-                std::memcpy(dest, std::bit_cast<const u8*>(virtual_addr), size);
+                Common::CopyBytes(dest, std::bit_cast<const u8*>(virtual_addr), size);
                 return;
             }
         }
@@ -204,7 +229,7 @@ void MemoryManager::CopyMemoryFast(VAddr virtual_addr, u8* dest, u64 size) {
         .end = vma_end,
         .generation = mutex.WriteGeneration(),
     };
-    std::memcpy(dest, std::bit_cast<const u8*>(virtual_addr), size);
+    Common::CopyBytes(dest, std::bit_cast<const u8*>(virtual_addr), size);
 }
 
 const u8* MemoryManager::BackingPointer(VAddr virtual_addr, u64 size) {
