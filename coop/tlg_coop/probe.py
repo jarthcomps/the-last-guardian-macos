@@ -6,7 +6,7 @@ apply. The mod is installed into the private runtime's CUSA03745-mods only for t
 removed afterwards; the user's own game folders are never touched.
 
     python3 -m tlg_coop.probe TAG [--seconds 40] [--input "20:button cross 1"] [--no-pad2]
-        [--engine PATH --coop] [--strategy goal|steer|interest|forward] [--pulse emblem|command|both|aim|hold] [--save DIR]
+        [--engine PATH --coop] [--strategy goal|steer|interest|forward] [--pulse aimhold|both|aim|hold|emblem|command] [--save DIR]
 
 The probe always installs the scripts with the debug channel on (its own coop_config.lua).
 
@@ -49,7 +49,7 @@ def engine_sha256(engine: Path) -> str:
     return install.sha256_file(engine)
 
 
-def probe_config(strategy: str, pulse: str = "emblem") -> str:
+def probe_config(strategy: str, pulse: str = "aimhold") -> str:
     return ("-- tlg-coop settings written by tlg_coop.probe\n"
             "CoopDebug.enabled = true\n"
             f"CoopTrico.strategy = \"{strategy}\"\n"
@@ -57,7 +57,7 @@ def probe_config(strategy: str, pulse: str = "emblem") -> str:
 
 
 def probe_lua_dir(dest: Path, strategy: str, lua_dir: Path = install.LUA_DIR,
-                  pulse: str = "emblem") -> Path:
+                  pulse: str = "aimhold") -> Path:
     """A copy of the scripts with the probe's coop_config.lua."""
     for script in lua_dir.glob("*.lua"):
         shutil.copy2(script, dest / script.name)
@@ -150,7 +150,8 @@ def main(argv=None) -> int:
     p.add_argument("--coop", action="store_true", help="turn on the emulator's co-op mode")
     p.add_argument("--strategy", default="goal", choices=("goal", "steer", "interest", "forward"),
                    help="how the scripts steer Trico")
-    p.add_argument("--pulse", default="emblem", choices=("emblem", "command", "both", "aim", "hold"),
+    p.add_argument("--pulse", default="aimhold",
+                   choices=("aimhold", "both", "aim", "hold", "emblem", "command"),
                    help="how the scripts fire Trico's lightning")
     p.add_argument("--save", type=Path, help="play this save (copied in, originals put back)")
     args = p.parse_args(argv)

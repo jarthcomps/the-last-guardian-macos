@@ -38,7 +38,7 @@ class ProbeTest(unittest.TestCase):
             self.assertTrue((out / "coop_main.lua").is_file())
         self.assertIn("CoopDebug.enabled = true", config)
         self.assertIn('CoopTrico.strategy = "forward"', config)
-        self.assertIn('CoopPulse.method = "emblem"', config)
+        self.assertIn('CoopPulse.method = "aimhold"', config)
         with tempfile.TemporaryDirectory() as tmp:
             config = (probe.probe_lua_dir(Path(tmp), "steer", pulse="command")
                       / "coop_config.lua").read_text()

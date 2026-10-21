@@ -1,7 +1,8 @@
 -- tlg-coop: the Trico player aims and fires Trico's tail lightning.
 --
 -- Only while the boy has the shield (GameFlag.HaveTrigger, as BoyHaveTrigger reads it). The right
--- stick moves a cursor on the ground ahead of Trico (camera-relative) and R2 fires at it. Trico's
+-- stick moves a cursor on the ground ahead of Trico (camera-relative) and R2 fires at it (the
+-- "aimhold" method, the default: hold L2 to aim, see below). Trico's
 -- stock lightning keeps following the boy's own shield aim: nothing here is touched unless the
 -- Trico player fires, the boy's aim is never overridden, and everything is put back after a shot.
 --
@@ -17,7 +18,12 @@
 --              the boy holds the shield up, so this one fires without R2);
 --   "hold":    hold R2 to aim and fire, like the boy holding the shield up: while R2 is held the
 --              emblem is on the cursor and the ready and shot commands go out as in "both";
---              letting go puts everything back.
+--              letting go puts everything back;
+--   "aimhold": hold L2 to aim: the emblem is the cursor (starting AIMHOLD_START ahead) and Trico
+--              charges and fires on its own as with the boy's shield; R2 while aiming sends the
+--              ready and shot commands at once. The shield's green guide beam is hidden while the
+--              Trico player aims (the player gets the shield's cursor, not its beam). Letting go
+--              of L2 puts everything back.
 -- Both also turn on the free pulse mode (fire without the emblem being Trico's interest) and point
 -- Trico's tail at the cursor (OverwriteTailPulseDst).
 
@@ -31,6 +37,7 @@ local CMD_CANCEL = "ControlCommand_C_A_tail_pulse_cancel"
 local DEADZONE = 0.25
 local SPEED = 8.0          -- cursor metres per second at full stick
 local START_RANGE = 10.0   -- where the cursor appears, ahead of Trico
+local AIMHOLD_START = 7.0  -- "aimhold": nearer, so Trico's own search for the emblem is shorter
 local MIN_RANGE = 4.0
 local MAX_RANGE = 25.0
 local HIDE_AFTER = 8.0     -- seconds without aiming before the cursor goes away
@@ -40,7 +47,7 @@ local SHOT_AFTER = 1.0     -- "command": seconds from ready to shot
 local SHOT_AFTER_BOTH = 2.0  -- emblem methods: shot after this long even if the pulse never aims
 local REPORT = 0.5
 
-CoopPulse.method = CoopPulse.method or "emblem"
+CoopPulse.method = CoopPulse.method or "aimhold"
 
 function CoopPulse.Reset()
 	CoopPulse.active = false      -- the cursor is shown
@@ -145,6 +152,32 @@ local function HideCursor()
 	if CoopPulse.method == "aim" and CoopPulse.firing <= 0 then ClearEmblem() end
 end
 
+-- The shield's guide beam (PlayerAI.instruction.rayObj): hidden while the Trico player aims, its
+-- own flags put back after.
+local function HideBeam()
+	local inst = PlayerInstruction()
+	local ray = inst and inst.rayObj
+	if not ray then CoopPulse.beam = "none" return end
+	if CoopPulse.beamFlags == nil then
+		local ok, flags = pcall(function() return ray.entityFlags end)
+		CoopPulse.beamFlags = ok and type(flags) == "string" and flags or false
+		CoopPulse.beamObj = ray
+	end
+	ray.entityFlags = "|Hide"
+	CoopPulse.beam = "hidden"
+end
+
+local function RestoreBeam()
+	local ray = CoopPulse.beamObj
+	if ray then
+		if CoopPulse.beamFlags then ray.entityFlags = CoopPulse.beamFlags
+		else ray.entityFlags = "~Hide" end
+	end
+	CoopPulse.beamFlags = nil
+	CoopPulse.beamObj = nil
+	CoopPulse.beam = nil
+end
+
 local function SetEmblem(pos)
 	local inst = PlayerInstruction()
 	if not inst then error("no PlayerAI") end
@@ -196,6 +229,7 @@ local function EndFire(props, cancel)
 	CoopPulse.firing = 0
 	CoopPulse.shotIn = nil
 	ClearEmblem()
+	if CoopPulse.beamObj then RestoreBeam() end
 	if not props then return end
 	local cu = Ai2.CondorUtils
 	pcall(cu.ResetOverwriteTailPulseDst, props)
@@ -222,6 +256,60 @@ local function Report(props, shield)
 		c and string.format("%.1f,%.1f,%.1f", c.X, c.Y, c.Z) or "-", tostring(CoopPulse.effect),
 		CoopPulse.firing, CoopPulse.shots, tostring(CoopPulse.shot), tostring(CoopPulse.ownEmblem),
 		tostring(inst and inst.triggerObj ~= nil), CoopPulse.refused and (" no=" .. CoopPulse.refused) or "")
+	if CoopPulse.beam then CoopDebug.Print("PU beam %s", CoopPulse.beam) end
+end
+
+-- "aimhold": L2 held aims (the emblem is the cursor), R2 shoots at once, letting go puts it back.
+local function StepAimHold(dt, input, props, pos, fx, fz)
+	local info = props.currentInfo
+	local aiming = input.hold and input.hold.L2
+	if not aiming then
+		if CoopPulse.active then HideCursor() end
+		CoopPulse.active = false
+		EndFire(props, not CoopPulse.shot)
+		return
+	end
+	local inst = PlayerInstruction()
+	if inst and inst.triggerObj and not CoopPulse.ownEmblem then
+		CoopPulse.refused = "boy-aiming"
+		return
+	end
+	local cu = Ai2.CondorUtils
+	if not CoopPulse.active then
+		CoopPulse.active = true
+		CoopPulse.cursor = Vector(pos.X + fx * AIMHOLD_START, pos.Y, pos.Z + fz * AIMHOLD_START)
+		CoopPulse.shot = false
+		CoopPulse.shotIn = nil
+		CoopPulse.shots = CoopPulse.shots + 1
+		CoopPulse.refused = nil
+		cu.EnableFreePulseMode(props)
+	end
+	CoopPulse.firing = FIRE_HOLD    -- for as long as L2 is held
+	local dx, dz = CoopPulse.Step(input.rx or 0, input.ry or 0, fx, fz, dt)
+	local c = CoopPulse.cursor
+	local x, z = CoopPulse.Clamp(pos, c.X + (dx or 0), c.Z + (dz or 0))
+	CoopPulse.cursor = Ground(props, Vector(x, c.Y, z))
+	if CoopPulse.ownEmblem then inst.triggerAimPos = CoopPulse.cursor
+	else SetEmblem(CoopPulse.cursor) end
+	pcall(cu.OverwriteTailPulseDst, props, CoopPulse.cursor)
+	HideBeam()
+
+	local tp = info.ai2Ext and info.ai2Ext.tailPulse
+	local state = tp and tp.state
+	local okZap, zap = pcall(cu.IsShootingPulse)
+	if state == "Shot" or (okZap and zap) then CoopPulse.shot = true end
+	if input.down and input.down.R2 then
+		Ai2.Utils.ReqCtrlCmd(info.ai2Ext, CMD_READY)
+		Ai2.Utils.ReqCtrlCmd(info.ai2Ext, CMD_SHOT)
+		-- and once more when the pulse aims, if it was still searching
+		CoopPulse.shotIn = (state == "Aim" or CoopPulse.shot) and nil or SHOT_AFTER_BOTH
+	elseif CoopPulse.shotIn then
+		CoopPulse.shotIn = CoopPulse.shotIn - dt
+		if state == "Aim" or CoopPulse.shotIn <= 0 then
+			CoopPulse.shotIn = nil
+			Ai2.Utils.ReqCtrlCmd(info.ai2Ext, CMD_SHOT)
+		end
+	end
 end
 
 local function Step(dt, input, props, shield)
@@ -243,6 +331,7 @@ local function Step(dt, input, props, shield)
 		local d = info.ai2Ext and info.ai2Ext.dirXZ
 		fx, fz = d and d.X or 0, d and d.Z or 1
 	end
+	if CoopPulse.method == "aimhold" then return StepAimHold(dt, input, props, pos, fx, fz) end
 	local dx, dz = CoopPulse.Step(input.rx or 0, input.ry or 0, fx, fz, dt)
 	local fire = input.down and input.down.R2
 	if dx or fire or (input.hold and input.hold.R2) then

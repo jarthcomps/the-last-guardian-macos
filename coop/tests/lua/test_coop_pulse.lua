@@ -2,6 +2,8 @@ dofile(string.match(debug.getinfo(1, "S").source, "^@(.*/)") .. "harness.lua")
 
 Load("game/scripts/coop/coop_debug")
 Load("game/scripts/coop/coop_pulse")
+check(CoopPulse.method == "aimhold", "aimhold is the default")
+CoopPulse.method = "emblem"
 
 local function near(a, b) return math.abs(a - b) < 1e-3 end
 local function pad(rx, ry, r2)
@@ -211,6 +213,66 @@ check(cmds[#cmds][3] == "ControlCommand_C_A_tail_pulse_cancel" and inst.triggerO
 CoopPulse.Release()
 GameFlag.HaveTrigger = 0
 CoopPulse.Update(0.1, pad())
+
+-- aimhold: L2 held aims with the emblem as the cursor (7 m ahead), the beam is hidden, R2 shoots
+CoopPulse.method = "aimhold"
+GameFlag.HaveTrigger = 1
+local ray = { entityFlags = "TransformInWorld" }
+inst.rayObj = ray
+local function l2(rx, ry, r2)
+	return { x = 0, y = 0, rx = rx or 0, ry = ry or 0, hold = { L2 = true, R2 = r2 }, down = { R2 = r2 } }
+end
+local na = #Harness.CallsNamed("cmd")
+local nf = #Harness.CallsNamed("free")
+CoopPulse.Update(0.1, pad(0, 1))
+check(not CoopPulse.active and inst.triggerObj == nil, "aimhold: the right stick alone does nothing")
+CoopPulse.Update(0.1, pad(0, 0, true))
+check(not CoopPulse.active and #Harness.CallsNamed("cmd") == na, "aimhold: R2 without L2 does nothing")
+Harness.tricoProps.currentInfo.ai2Ext.tailPulse.state = "Idle"
+CoopPulse.Update(0.1, l2())
+check(CoopPulse.active and inst.triggerObj ~= nil and near(CoopPulse.cursor.Z, 7), "aimhold: emblem 7 m ahead")
+check(#Harness.CallsNamed("free") == nf + 1 and #Harness.CallsNamed("cmd") == na, "aimhold: free mode, no commands")
+check(ray.entityFlags == "|Hide", "aimhold: beam hidden")
+CoopPulse.Update(0.25, l2(0, 1))
+check(near(inst.triggerAimPos.Z, 9), "aimhold: the right stick moves the emblem")
+for _ = 1, 150 do CoopPulse.Update(0.1, l2()) end
+check(inst.triggerObj ~= nil and CoopPulse.active, "aimhold: held 15 s, still aiming")
+CoopPulse.Update(0.1, l2(0, 0, true))
+cmds = Harness.CallsNamed("cmd")
+check(#cmds == na + 2 and cmds[na + 1][3] == "ControlCommand_C_A_tail_pulse_ready"
+	and cmds[na + 2][3] == "ControlCommand_C_A_tail_pulse_shot", "aimhold: R2 readies and shoots at once")
+Harness.tricoProps.currentInfo.ai2Ext.tailPulse.state = "Aim"
+CoopPulse.Update(0.1, l2())
+cmds = Harness.CallsNamed("cmd")
+check(#cmds == na + 3 and cmds[#cmds][3] == "ControlCommand_C_A_tail_pulse_shot", "aimhold: shot again on Aim")
+CoopPulse.Update(0.1, l2())
+check(#Harness.CallsNamed("cmd") == na + 3, "aimhold: only once")
+Harness.tricoProps.currentInfo.ai2Ext.tailPulse.state = "Shot"
+CoopPulse.Update(0.1, l2())
+CoopPulse.Update(0.1, pad())
+check(inst.triggerObj == nil and not CoopPulse.active and ray.entityFlags == "TransformInWorld",
+	"aimhold: let go, emblem cleared and the beam's own flags back")
+check(#Harness.CallsNamed("cmd") == na + 3, "aimhold: no cancel after a shot")
+-- let go before any shot: cancelled
+Harness.tricoProps.currentInfo.ai2Ext.tailPulse.state = "Idle"
+CoopPulse.Update(0.1, l2())
+CoopPulse.Update(0.1, pad())
+cmds = Harness.CallsNamed("cmd")
+check(cmds[#cmds][3] == "ControlCommand_C_A_tail_pulse_cancel", "aimhold: early let-go cancels")
+-- the boy's own aim wins, his beam untouched
+inst.triggerObj = boyTrigger
+ray.entityFlags = "TransformInWorld"
+CoopPulse.Update(0.1, l2(0, 0, true))
+check(inst.triggerObj == boyTrigger and CoopPulse.refused == "boy-aiming" and ray.entityFlags == "TransformInWorld",
+	"aimhold: refused while the boy aims")
+inst.triggerObj = nil
+-- no shield: nothing
+GameFlag.HaveTrigger = 0
+CoopPulse.Update(0.1, l2())
+check(not CoopPulse.active and inst.triggerObj == nil, "aimhold: no shield, no aim")
+CoopPulse.Update(0.1, pad())
+inst.rayObj = nil
+CoopPulse.method = "hold"
 
 -- reports: the shield on change, the pulse state twice a second
 CoopDebug.enabled = true
