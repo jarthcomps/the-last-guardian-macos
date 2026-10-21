@@ -66,7 +66,7 @@ cd the-last-guardian-macos
    ```sh
    cmake -S engine -B engine/build-release -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
      -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
-     -DENABLE_SYSTEM_VULKAN=ON -DENABLE_UPDATER=OFF -DENABLE_DISCORD_RPC=OFF
+     -DENABLE_SYSTEM_VULKAN=ON -DENABLE_UPDATER=OFF -DENABLE_DISCORD_RPC=OFF -DTRACY_ENABLE=OFF
    cmake --build engine/build-release --target shadps4
    ```
 2. **Driver:** apply `driver/kosmickrisp-tlg.patch` to `engine/externals/mesa-kosmickrisp/externals/mesa` (`git apply -p1`). Then build the wrapper for x86_64 (needs Meson, Mako, LLVM, SPIRV-Tools and SPIRV-LLVM-Translator):
