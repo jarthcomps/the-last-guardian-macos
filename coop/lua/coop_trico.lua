@@ -35,13 +35,11 @@ local function Props()
 	return nil
 end
 
--- Stick vector (x right, y up), 0..1 long, or nil inside the dead zone.
-function CoopTrico.Stick(pad)
-	if not pad then return nil end
-	local mag = pad.LMag or 0
-	if mag < DEADZONE then return nil end
-	local x = (pad.LX or 0) * mag
-	local y = (pad.LY or 0) * mag
+-- Stick vector (x right, y up), 0..1 long, or nil inside the dead zone. `input` is the Trico
+-- player's input from CoopInput (x, y in -1..1).
+function CoopTrico.Stick(input)
+	if not input then return nil end
+	local x, y = input.x or 0, input.y or 0
 	local len = math.sqrt(x * x + y * y)
 	if len < DEADZONE then return nil end
 	if len > 1 then x, y, len = x / len, y / len, 1 end
@@ -131,8 +129,8 @@ local function Report(props)
 		tostring(info.aiMode and info.aiMode.name))
 end
 
--- Call once per frame with the Trico player's pad (nil when nobody plays Trico).
-function CoopTrico.Update(dt, pad)
+-- Call once per frame with the Trico player's input (nil when nobody plays Trico).
+function CoopTrico.Update(dt, input)
 	dt = dt or 0
 	local props = Props()
 	CoopTrico.reportIn = CoopTrico.reportIn - dt
@@ -142,7 +140,7 @@ function CoopTrico.Update(dt, pad)
 	end
 	if not props or not props.currentInfo or not props.currentInfo.aiPos then return end
 
-	local sx, sy, len = CoopTrico.Stick(pad)
+	local sx, sy, len = CoopTrico.Stick(input)
 	if not sx then
 		if CoopTrico.steering then Release(props) end
 		return

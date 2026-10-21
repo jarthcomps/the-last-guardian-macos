@@ -27,7 +27,15 @@ local function report()
 		tostring(CoopInput.tricoHuman), tostring(CoopInput.twoPlayers),
 		tostring(CoopInput.tricoCamera), tostring(CoopInput.sequence))
 	CoopDebug.Print("%s", padLine("P1", Input.pad1))
-	CoopDebug.Print("%s", padLine("P2", Input.pad2))
+	local t = CoopInput.trico
+	if t then
+		local held = {}
+		for _, name in ipairs(CoopInput.BUTTONS) do
+			if t.hold[name] then held[#held + 1] = name end
+		end
+		CoopDebug.Print("TP L=%.2f,%.2f R=%.2f,%.2f hold=[%s]", t.x, t.y, t.rx, t.ry,
+			table.concat(held, ","))
+	end
 end
 
 local function tick(dt)
