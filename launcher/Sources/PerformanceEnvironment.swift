@@ -2,8 +2,7 @@
 enum PerformanceEnvironment {
     /// `fastShaderMath` also drops the driver's NaN-preserving comparisons (workarounds 14 and
     /// 17): a few percent faster outdoors, with a small chance of drawing differences.
-    /// Switches still being tested in play (launcher toggle "Experimental speedups", off by
-    /// default). Each is also off in the engine and driver unless set here.
+    /// Launcher toggle "Experimental speedups" (on by default since launcher 1.1.7). Each is also off in the engine and driver unless set here.
     /// Measured outdoors (alternating 120 s runs, 2026-10-19): with the profile-guided engine,
     /// about +9 to +12 % together. Hot write pages stop most guest page faults; fence batching
     /// cuts ~180 command buffer submissions per frame to ~40; precise hazards drop the barriers

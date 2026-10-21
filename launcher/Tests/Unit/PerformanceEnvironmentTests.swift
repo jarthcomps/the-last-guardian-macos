@@ -132,12 +132,25 @@ final class PerformanceEnvironmentTests: XCTestCase {
         XCTAssertEqual(settings.resolution, "540p")
         XCTAssertTrue(settings.fullscreen)
         XCTAssertTrue(settings.fastShaderMath)
-        XCTAssertFalse(settings.experimentalSpeedups)
+        XCTAssertTrue(settings.experimentalSpeedups)
         var off = settings
         off.fastShaderMath = false
         let round = try JSONDecoder().decode(LauncherSettings.self,
                                              from: JSONEncoder().encode(off))
         XCTAssertFalse(round.fastShaderMath)
+    }
+
+    func testSpeedupsTurnOnOnceForSettingsFromBefore117() throws {
+        XCTAssertTrue(LauncherSettings().experimentalSpeedups)
+        XCTAssertTrue(LauncherSettings().fastShaderMath)
+        let from116 = #"{"metalTweaks":true,"fastShaderMath":true,"experimentalSpeedups":false}"#
+        let migrated = try JSONDecoder().decode(LauncherSettings.self, from: Data(from116.utf8))
+        XCTAssertTrue(migrated.experimentalSpeedups)
+        XCTAssertEqual(migrated.settingsVersion, 2)
+        var off = migrated
+        off.experimentalSpeedups = false
+        let kept = try JSONDecoder().decode(LauncherSettings.self, from: JSONEncoder().encode(off))
+        XCTAssertFalse(kept.experimentalSpeedups) // a choice made in 1.1.7 or later is kept
     }
 
     func testConfigMergeAddsNewKeysAndKeepsUserValues() throws {

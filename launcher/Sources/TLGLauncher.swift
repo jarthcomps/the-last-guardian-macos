@@ -69,8 +69,11 @@ struct LauncherSettings: Codable {
     var showFPS = false
     var metalTweaks = true
     var fastShaderMath = true
-    var experimentalSpeedups = false
+    var experimentalSpeedups = true
     var copyShaderShortcut = false
+    /// 2 (launcher 1.1.7): the speedups became the default, so settings saved before turn them on
+    /// once; a choice made after that is kept.
+    var settingsVersion = 2
 
     init() {}
 
@@ -91,6 +94,11 @@ struct LauncherSettings: Codable {
             ?? defaults.experimentalSpeedups
         copyShaderShortcut = try c.decodeIfPresent(Bool.self, forKey: .copyShaderShortcut)
             ?? defaults.copyShaderShortcut
+        let version = try c.decodeIfPresent(Int.self, forKey: .settingsVersion) ?? 1
+        if version < 2 {
+            experimentalSpeedups = true
+        }
+        settingsVersion = defaults.settingsVersion
     }
 }
 
@@ -687,7 +695,7 @@ struct ContentView: View {
                     Toggle("Faster shader math", isOn: $launcher.settings.fastShaderMath)
                         .disabled(!launcher.settings.metalTweaks)
                         .help("A few percent faster outdoors. Turn off if something looks wrong.")
-                    Toggle("Experimental speedups (testing)",
+                    Toggle("Experimental speedups",
                            isOn: $launcher.settings.experimentalSpeedups)
                         .disabled(!launcher.settings.metalTweaks)
                         .help("Changes still being tested in play. Turn off if anything goes wrong.")
@@ -760,7 +768,9 @@ func selfTest() -> Int32 {
                     "SHADPS4_TEXTURE_LOOKUP_REUSE", "SHADPS4_DOWNLOAD_RESCAN_REUSE",
                     "SHADPS4_IMAGE_BACKING_READS", "SHADPS4_READBACK_WINDOW_KB",
                     "SHADPS4_DYNAMIC_STATE_REUSE", "SHADPS4_RANGE_PROTECTION",
-                    "KK_UPLOAD_CACHE_EXPANDED"] {
+                    "KK_UPLOAD_CACHE_EXPANDED"]
+                    + PerformanceEnvironment.experimentalSwitches.keys.sorted()
+                    + ["KK_SHADPS4_MSL_RECIPES", "KK_SHADPS4_MSL_OVERRIDE_DIR"] {
             print("\(key)=\(env[key] ?? "")")
         }
         print("working directory: \(launcher.dataDir.path)")
