@@ -6,7 +6,7 @@ apply. The mod is installed into the private runtime's CUSA03745-mods only for t
 removed afterwards; the user's own game folders are never touched.
 
     python3 -m tlg_coop.probe TAG [--seconds 40] [--input "20:button cross 1"] [--no-pad2]
-        [--engine PATH --coop] [--strategy goal|interest|forward] [--save DIR]
+        [--engine PATH --coop] [--strategy goal|steer|interest|forward] [--pulse emblem|command|both] [--save DIR]
 
 The probe always installs the scripts with the debug channel on (its own coop_config.lua).
 
@@ -49,17 +49,19 @@ def engine_sha256(engine: Path) -> str:
     return install.sha256_file(engine)
 
 
-def probe_config(strategy: str) -> str:
+def probe_config(strategy: str, pulse: str = "emblem") -> str:
     return ("-- tlg-coop settings written by tlg_coop.probe\n"
             "CoopDebug.enabled = true\n"
-            f"CoopTrico.strategy = \"{strategy}\"\n")
+            f"CoopTrico.strategy = \"{strategy}\"\n"
+            f"CoopPulse.method = \"{pulse}\"\n")
 
 
-def probe_lua_dir(dest: Path, strategy: str, lua_dir: Path = install.LUA_DIR) -> Path:
+def probe_lua_dir(dest: Path, strategy: str, lua_dir: Path = install.LUA_DIR,
+                  pulse: str = "emblem") -> Path:
     """A copy of the scripts with the probe's coop_config.lua."""
     for script in lua_dir.glob("*.lua"):
         shutil.copy2(script, dest / script.name)
-    (dest / "coop_config.lua").write_text(probe_config(strategy))
+    (dest / "coop_config.lua").write_text(probe_config(strategy, pulse))
     return dest
 
 
@@ -146,8 +148,10 @@ def main(argv=None) -> int:
                    help="extra argument passed to guardian_outdoor_experiments.py")
     p.add_argument("--engine", type=Path, help="emulator build to run (default: release 117)")
     p.add_argument("--coop", action="store_true", help="turn on the emulator's co-op mode")
-    p.add_argument("--strategy", default="goal", choices=("goal", "interest", "forward"),
+    p.add_argument("--strategy", default="goal", choices=("goal", "steer", "interest", "forward"),
                    help="how the scripts steer Trico")
+    p.add_argument("--pulse", default="emblem", choices=("emblem", "command", "both"),
+                   help="how the scripts fire Trico's lightning")
     p.add_argument("--save", type=Path, help="play this save (copied in, originals put back)")
     args = p.parse_args(argv)
 
@@ -164,7 +168,7 @@ def main(argv=None) -> int:
     game = runtime / "CUSA03745"
     engine = args.engine if args.engine is None or args.engine.is_absolute() else root / args.engine
     with tempfile.TemporaryDirectory() as tmp:
-        lua_dir = probe_lua_dir(Path(tmp), args.strategy)
+        lua_dir = probe_lua_dir(Path(tmp), args.strategy, pulse=args.pulse)
         print(json.dumps({"install": install.install(game, lua_dir)}), flush=True)
     save = None
     if args.save:

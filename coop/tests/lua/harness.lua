@@ -57,8 +57,14 @@ function NewObject(class)
 end
 function Connect(parent, child)
 	if type(parent) == "string" then parent = Harness.objects[parent] or { children = {} } end
+	parent.children = parent.children or {}
 	parent.children[#parent.children + 1] = child
 	child.parent = parent
+end
+function Clone(name)
+	local obj = NewObject("Clone")
+	obj.source = name
+	return obj._object_name
 end
 function RenameObject(old, new)
 	local obj = Harness.objects[old]
@@ -97,7 +103,18 @@ Ai2 = {
 	},
 	Approach = { Overwrite = { Request = record("overwrite") } },
 	Condor = { StageScripts = { GetBoyStageID = function() return "s05" end } },
+	CondorUtils = {
+		EnableFreePulseMode = record("free"),
+		DisableFreePulseMode = record("unfree"),
+		OverwriteTailPulseDst = record("tail"),
+		ResetOverwriteTailPulseDst = record("tailReset"),
+		IsShootingPulse = function() return false end,
+	},
 }
+Ai2.Utils.ReqCtrlCmd = record("cmd")
+-- the navmesh under a point is 0.5 m up
+function Ai2FindNearestPosition(ai, pos, ext) return { found = 1, pos = Vector(pos.X, 0.5, pos.Z) } end
+GameFlag = { HaveTrigger = 0 }
 function Harness.CallsNamed(name)
 	local hits = {}
 	for _, c in ipairs(Harness.calls) do

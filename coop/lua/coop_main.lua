@@ -1,12 +1,13 @@
 -- tlg-coop: entry point, loaded at the end of game/scripts/states/main.lua.
 --
 -- Every frame: read what the emulator says about the players (coop_input), let the Trico player
--- steer Trico (coop_trico). coop_config.lua, when present, overrides settings (the test runs
+-- steer Trico (coop_trico) and aim and fire its lightning (coop_pulse). coop_config.lua, when present, overrides settings (the test runs
 -- use it to turn on the debug channel and pick the steering strategy).
 
 Load("game/scripts/coop/coop_debug")
 Load("game/scripts/coop/coop_input")
 Load("game/scripts/coop/coop_trico")
+Load("game/scripts/coop/coop_pulse")
 pcall(Load, "game/scripts/coop/coop_config")
 
 Coop = Coop or {}
@@ -44,9 +45,13 @@ local function tick(dt)
 	CoopInput.Update(dt)
 	for _, e in ipairs(CoopInput.events) do
 		CoopDebug.Print("COOP event %s %s", e.kind, tostring(e.value))
-		if e.kind == "roles" and not CoopInput.tricoHuman then CoopTrico.Release() end
+		if e.kind == "roles" and not CoopInput.tricoHuman then
+			CoopTrico.Release()
+			CoopPulse.Release()
+		end
 	end
 	CoopTrico.Update(dt, CoopInput.TricoPad())
+	CoopPulse.Update(dt, CoopInput.TricoPad())
 	if CoopDebug.enabled and Coop.clock >= Coop.nextReport then
 		Coop.nextReport = Coop.clock + 1
 		report()

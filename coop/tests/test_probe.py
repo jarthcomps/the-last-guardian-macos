@@ -38,6 +38,11 @@ class ProbeTest(unittest.TestCase):
             self.assertTrue((out / "coop_main.lua").is_file())
         self.assertIn("CoopDebug.enabled = true", config)
         self.assertIn('CoopTrico.strategy = "forward"', config)
+        self.assertIn('CoopPulse.method = "emblem"', config)
+        with tempfile.TemporaryDirectory() as tmp:
+            config = (probe.probe_lua_dir(Path(tmp), "steer", pulse="command")
+                      / "coop_config.lua").read_text()
+        self.assertIn('CoopPulse.method = "command"', config)
 
     def test_summary_prefers_log_with_messages(self):
         with tempfile.TemporaryDirectory() as tmp:
