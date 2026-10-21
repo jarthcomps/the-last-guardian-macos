@@ -13,6 +13,8 @@
 CoopCamera = CoopCamera or {}
 
 CoopCamera.tricoParam = CoopCamera.tricoParam or "TricoAutoRunTest_middle"
+-- CoopCamera.cycle (a list of set names), when set, uses the next one each time the Trico
+-- framing is switched on (for trying sets in game).
 local CHECK = 0.5          -- seconds between checks of the camera
 local REPORT = 1.0
 
@@ -23,6 +25,7 @@ function CoopCamera.Reset()
 	CoopCamera.reportIn = 0
 	CoopCamera.lastError = nil
 	CoopCamera.missing = false
+	CoopCamera.cycleIndex = 0
 end
 
 local function Camera()
@@ -90,6 +93,11 @@ function CoopCamera.Update(dt, tricoFraming)
 	dt = dt or 0
 	local want = tricoFraming and "trico" or "boy"
 	local changed = want ~= CoopCamera.want
+	if changed and want == "trico" and type(CoopCamera.cycle) == "table" and #CoopCamera.cycle > 0 then
+		CoopCamera.cycleIndex = CoopCamera.cycleIndex % #CoopCamera.cycle + 1
+		CoopCamera.tricoParam = CoopCamera.cycle[CoopCamera.cycleIndex]
+		CoopCamera.missing = false
+	end
 	CoopCamera.want = want
 	CoopCamera.checkIn = CoopCamera.checkIn - dt
 	if changed or CoopCamera.checkIn <= 0 then

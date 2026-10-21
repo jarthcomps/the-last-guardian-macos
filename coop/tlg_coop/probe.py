@@ -54,7 +54,10 @@ def probe_config(strategy: str, pulse: str = "aimhold", camera: str | None = Non
             "CoopDebug.enabled = true\n"
             f"CoopTrico.strategy = \"{strategy}\"\n"
             f"CoopPulse.method = \"{pulse}\"\n")
-    if camera:
+    if camera and "," in camera:
+        sets = ", ".join(f'"{name.strip()}"' for name in camera.split(",") if name.strip())
+        text += f"CoopCamera.cycle = {{ {sets} }}\n"
+    elif camera:
         text += f"CoopCamera.tricoParam = \"{camera}\"\n"
     return text
 
@@ -157,7 +160,8 @@ def main(argv=None) -> int:
                    choices=("aimhold", "both", "aim", "hold", "emblem", "command"),
                    help="how the scripts fire Trico's lightning")
     p.add_argument("--camera", metavar="SET",
-                   help="game camera parameter set for the Trico framing (e.g. TricoAutoRunTest_near)")
+                   help="game camera parameter set for the Trico framing (e.g. TricoAutoRunTest_near); "
+                        "a comma-separated list cycles through them on each Select")
     p.add_argument("--save", type=Path, help="play this save (copied in, originals put back)")
     args = p.parse_args(argv)
 

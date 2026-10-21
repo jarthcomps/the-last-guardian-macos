@@ -68,6 +68,21 @@ CoopCamera.tricoParam = "TricoAutoRunTest_far"
 CoopCamera.Update(0.6, true)
 check(CoopCamera.mode == "trico" and fixes[#fixes] == "TricoAutoRunTest_far", "another set")
 
+-- a cycle of sets: the next one each time the Trico framing goes on
+CoopCamera.Update(0.016, false)
+CoopCamera.cycle = { "TricoEye", "TricoAutoRunTest_middle" }
+CoopCamera.Update(0.016, true)
+check(fixes[#fixes] == "TricoEye", "first set of the cycle")
+CoopCamera.Update(0.016, false)
+CoopCamera.Update(0.016, true)
+check(fixes[#fixes] == "TricoAutoRunTest_middle", "second set")
+CoopCamera.Update(0.016, false)
+CoopCamera.Update(0.016, true)
+check(fixes[#fixes] == "TricoEye", "round again")
+CoopCamera.cycle = nil
+CoopCamera.tricoParam = "TricoAutoRunTest_far"
+CoopCamera.Update(0.016, false)
+
 -- report line and release
 CoopDebug.enabled = true
 CoopCamera.reportIn = 0
