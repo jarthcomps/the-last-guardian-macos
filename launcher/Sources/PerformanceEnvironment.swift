@@ -15,6 +15,9 @@ enum PerformanceEnvironment {
         "SHADPS4_PRECISE_BUFFER_HAZARDS": "1",
         "SHADPS4_PRECISE_HAZARD_SHADERS": "1d99a308,96d32d22,ee29a0b1,a3c4525b,eb218825",
         "KK_SHADPS4_GPU_KEEPALIVE": "2",
+        // Hot write pages are compared with their last upload and skipped when unchanged
+        // (alternating runs 2026-10-21: about +2% with it, slightly slower without it).
+        "SHADPS4_HOT_PAGE_COMPARE": "1",
     ]
 
     /// The engine's shortcut for the game's copy shader a912f7d4 (it copies data with a plain
