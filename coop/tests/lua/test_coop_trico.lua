@@ -152,6 +152,37 @@ check(#fw == 1 and fw[1][3].isFreeMove and near(fw[1][3].goalPos.Z, 8), "forward
 check(near(Harness.tricoProps.currentInfo.apDestination.Z, 8), "approach destination set")
 CoopTrico.Release()
 
+-- turn start: a goal far round from Trico's facing becomes one to the side
+local tg, td = CoopTrico.TurnGoal(Vector(0, 0, 0), 0, 1, 0, -1)
+check(tg and near(math.abs(tg.X), 5) and near(tg.Z, 0) and near(math.abs(td.X), 1), "straight behind: a side goal")
+tg = CoopTrico.TurnGoal(Vector(0, 0, 0), 0, 1, -0.6, -0.8)
+check(tg and near(tg.X, -5), "behind on the right (-X): turn right")
+tg = CoopTrico.TurnGoal(Vector(0, 0, 0), 0, 1, 0.6, -0.8)
+check(tg and near(tg.X, 5), "behind on the left (+X): turn left")
+check(CoopTrico.TurnGoal(Vector(0, 0, 0), 0, 1, 1, 0) == nil, "90 degrees: no turn start")
+check(CoopTrico.TurnGoal(Vector(0, 0, 0), 0, 1, 1, 0, true) ~= nil, "a started turn goes on past 90")
+check(CoopTrico.TurnGoal(Vector(0, 0, 0), 0, 1, 0.6, 0.8, true) == nil, "within 60 degrees: done")
+
+-- steer: the goal interest plus the approach overwrite, with the turn start
+CoopTrico.strategy = "steer"
+Harness.calls = {}
+Harness.tricoProps = Harness.NewTricoProps(0, 0, 0)   -- facing +Z
+Harness.objects._trico_camera = { worldPosition = Vector(0, 3, -8) }  -- forward is +Z
+CoopTrico.Update(0.016, { x = 0, y = -1 })  -- back: straight behind Trico
+check(CoopTrico.turning and CoopTrico.nav == "turn", "turn started")
+check(near(math.abs(CoopTrico.goal.X), 5) and near(CoopTrico.goal.Z, 0), "side goal")
+check(#Harness.CallsNamed("level") == 1 and #Harness.CallsNamed("overwrite") == 1, "interest and overwrite")
+ow = Harness.CallsNamed("overwrite")[1][4]
+check(near(math.abs(ow.destination.X), 5) and ow.condition(), "overwrite on the side goal")
+-- Trico has turned round: the real goal, 8 m behind where it started
+Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, -1)
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+check(not CoopTrico.turning and near(CoopTrico.goal.Z, -8) and CoopTrico.nav == "y1.00", "real goal after the turn")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+check(not ow.condition() and not CoopTrico.turning, "released")
+Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
+
 -- errors in the game's AI are contained and reported once (with the debug channel on)
 CoopDebug.enabled = true
 CoopTrico.strategy = "interest"

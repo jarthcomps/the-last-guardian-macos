@@ -12,6 +12,9 @@
 --               to be interested in it; the approach destination is overwritten with the goal.
 --   "forward":  the move manager is asked for a free forward move towards the overwritten
 --               approach destination (the game stops free moves while Trico is injured).
+--   "steer":    "goal" plus the approach overwrite (destination and direction), and a turn
+--               start: a goal far round from Trico's facing is first replaced by one to the
+--               side, re-placed as Trico turns, until Trico faces the stick's way.
 -- With the stick released, Trico is asked to stop and its AI is left alone.
 
 CoopTrico = CoopTrico or {}
@@ -27,6 +30,11 @@ local GOAL_DISTANCE = 8.0      -- metres ahead of Trico at full stick
 local MIN_GOAL_DISTANCE = 4.0
 local NAV_STEPS = { 1.0, 0.6, 0.35 }  -- shorter goals to try when the full one is off Trico's navmesh
 local BEHIND = -0.3            -- cosine to Trico's facing below which a goal is behind it
+local TURN_START = -0.17       -- cosine to Trico's facing (about 100 degrees) beyond which
+                               -- "steer" starts the turn with a goal to the side
+local TURN_DONE = 0.5          -- ... until Trico faces within 60 degrees of the stick's way
+local TURN_DISTANCE = 5.0
+local TURNING = { steer = true }
 local BEHIND_MIN = 7.0         -- a goal behind Trico stays at least a body length away, so it
                                -- turns round instead of shuffling under its own hindquarters
 local REFRESH = 0.3            -- seconds between goal updates
@@ -47,6 +55,7 @@ function CoopTrico.Reset()
 	CoopTrico.lastError = nil
 	CoopTrico.forward = nil        -- { x, z, source } of the last goal
 	CoopTrico.nav = nil
+	CoopTrico.turning = false
 end
 
 local function Props()
@@ -184,6 +193,23 @@ function Steer.forward(props, goal, dir)
 	props.moveMngr:RequestForward({ isFreeMove = true, goalPos = goal, goalDir = dir })
 end
 
+function Steer.steer(props, goal, dir)
+	Steer.goal(props, goal, dir)
+	OverwriteApproach(props, goal, dir)
+end
+
+-- The side goal that starts a turn from Trico's facing (faceX, faceZ) towards the way (dx, dz),
+-- or nil when Trico already faces close enough. `turning` keeps a started turn going until
+-- TURN_DONE.
+function CoopTrico.TurnGoal(pos, faceX, faceZ, dx, dz, turning)
+	local cos = dx * faceX + dz * faceZ
+	if cos >= (turning and TURN_DONE or TURN_START) then return nil end
+	-- the perpendicular of the facing on the side of the wanted way
+	local lx, lz = -faceZ, faceX
+	if lx * dx + lz * dz < 0 then lx, lz = faceZ, -faceX end
+	return Vector(pos.X + lx * TURN_DISTANCE, pos.Y, pos.Z + lz * TURN_DISTANCE), Vector(lx, 0, lz)
+end
+
 local function DropGoal(props)
 	if not CoopTrico.goalLive then return end
 	CoopTrico.goalLive = false
@@ -197,6 +223,7 @@ end
 local function Release(props)
 	CoopTrico.steering = false
 	CoopTrico.goal = nil
+	CoopTrico.turning = false
 	DropGoal(props)
 	if not props then return end
 	if CoopTrico.strategy == "interest" then
@@ -291,9 +318,24 @@ function CoopTrico.Update(dt, input)
 		end
 	end
 	if not goal then goal, dir, nav = fallback[1], fallback[2], fallback[3] end
-	-- keep the goal Trico is already walking to unless the stick asks for somewhere else
+	local wasTurning = CoopTrico.turning
+	CoopTrico.turning = false
+	if TURNING[CoopTrico.strategy] and dirXZ then
+		local wayX, wayZ = Flat(goal.X - pos.X, goal.Z - pos.Z)
+		local turnGoal, turnDir = nil, nil
+		if wayX then
+			turnGoal, turnDir = CoopTrico.TurnGoal(pos, dirXZ.X, dirXZ.Z, wayX, wayZ, wasTurning)
+		end
+		if turnGoal then
+			goal, dir, nav = turnGoal, turnDir, "turn"
+			CoopTrico.turning = true
+		end
+	end
+	-- keep the goal Trico is already walking to unless the stick asks for somewhere else (a
+	-- turn goal follows Trico round, and the real goal replaces it at once)
 	local old = CoopTrico.steering and CoopTrico.goal
-	if old and DistanceXZ(old, goal) < REGOAL and DistanceXZ(pos, old) > ARRIVING then
+	if old and not CoopTrico.turning and not wasTurning and DistanceXZ(old, goal) < REGOAL
+		and DistanceXZ(pos, old) > ARRIVING then
 		goal, dir = old, CoopTrico.goalDir or dir
 	else
 		CoopTrico.nav = nav
