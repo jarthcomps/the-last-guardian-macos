@@ -188,7 +188,7 @@ Harness.tricoProps = Harness.NewTricoProps(0, 0, 0)   -- facing +Z
 Harness.objects._trico_camera = { worldPosition = Vector(0, 3, -8) }  -- forward is +Z
 -- standing: turns on the spot at once
 CoopTrico.Update(0.016, { x = 0, y = -1 })  -- back: straight behind Trico
-check(CoopTrico.turning and CoopTrico.nav == "spot-aboutRight" and #Harness.CallsNamed("cmd") == 1, "standing: turns on the spot")
+check(CoopTrico.turning and CoopTrico.nav == "spot-aboutRight" and #Harness.CallsNamed("slide") == 1, "standing: turns on the spot")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 Harness.calls = {}
 -- walking, with the old side goals on (CoopTrico.sideTurns): curves round through a side goal
@@ -214,7 +214,7 @@ CoopTrico.sideTurns = false
 Harness.calls = {}
 Harness.tricoProps.plannedMove = "MoveForward"
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(not CoopTrico.turning and CoopTrico.goal and near(CoopTrico.goal.Z, -8) and #Harness.CallsNamed("cmd") == 0,
+check(not CoopTrico.turning and CoopTrico.goal and near(CoopTrico.goal.Z, -8) and #Harness.CallsNamed("slide") == 0,
 	"walking: the goal goes straight behind, no side goal, no spot turn")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 Harness.tricoProps.plannedMove = nil
@@ -248,49 +248,44 @@ Harness.reachable = function(from, to) return math.abs(to.X) < 1 end   -- 2 m wi
 Harness.calls = {}
 CoopTrico.turnIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-local spot = Harness.CallsNamed("cmd")
-check(#spot == 1 and spot[1][3] == "ControlCommand_C_turn_180_right" and CoopTrico.nav == "spot-aboutRight"
-	and #Harness.CallsNamed("level") == 0, "about-turn on the spot, no goal: " .. tostring(spot[1] and spot[1][3]))
+local spot = Harness.CallsNamed("slide")
+check(#spot == 1 and near(spot[1][3].destinationDir.Z, -1) and CoopTrico.nav == "spot-aboutRight"
+	and #Harness.CallsNamed("level") == 0, "about-turn on the spot (his own slide, facing back), no goal")
 CoopTrico.refreshIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(#Harness.CallsNamed("cmd") == 1, "not asked again within 1.5 s")
+check(#Harness.CallsNamed("slide") == 1, "not asked again within 1.5 s")
 for _ = 1, 21 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
-check(#Harness.CallsNamed("cmd") == 1, "one spot turn per stick direction (his facing reads stale after one)")
+check(#Harness.CallsNamed("slide") == 1, "one spot turn per stick direction (his facing reads stale after one)")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 CoopTrico.turnIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(#Harness.CallsNamed("cmd") == 2, "let go and pushed again: another")
+check(#Harness.CallsNamed("slide") == 2, "let go and pushed again: another")
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, -1)
 CoopTrico.refreshIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(not CoopTrico.turning and near(CoopTrico.goal.Z, -8) and #Harness.CallsNamed("cmd") == 2, "turned: walks along the beam")
+check(not CoopTrico.turning and near(CoopTrico.goal.Z, -8) and #Harness.CallsNamed("slide") == 2, "turned: walks along the beam")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
 Harness.reachable = function(from, to) return true end
--- with the action queue there, the spot turn goes through it (stood up first, watched, resent)
-local requested
-CoopActions = { queueTime = 8, Request = function(name) requested = name end }
+-- the spot turn is his own slide, one per stick way, never a second while one plays
 CoopTrico.turnIn = 0
 Harness.calls = {}
 Harness.reachable = function(from, to) return math.abs(to.X) < 1 end
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(requested == "aboutRight" and #Harness.CallsNamed("cmd") == 0, "the spot turn is a queued move")
--- while the turn plays, no second one (it would turn him back)
-requested = nil
+check(#Harness.CallsNamed("slide") == 1, "the spot turn is his own slide")
 local savedAnim = Ai2.Utils.GetCurAnimState
-Ai2.Utils.GetCurAnimState = function() return "c_turn_180_right" end
+Ai2.Utils.GetCurAnimState = function() return "c_slide_rot_right" end
 for _ = 1, 30 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
-check(requested == nil, "no second turn while one plays")
+check(#Harness.CallsNamed("slide") == 1, "no second turn while one plays")
 Ai2.Utils.GetCurAnimState = function() return "c_stand" end
 for _ = 1, 6 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
-check(requested == nil, "after it, the same stick way: no second turn")
+check(#Harness.CallsNamed("slide") == 1, "after it, the same stick way: no second turn")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 CoopTrico.turnIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(requested == "aboutRight", "pushed again: another")
+check(#Harness.CallsNamed("slide") == 2, "pushed again: another")
 Ai2.Utils.GetCurAnimState = savedAnim
 CoopTrico.Update(0.016, { x = 0, y = 0 })
-CoopActions = nil
 Harness.reachable = function(from, to) return true end
 -- during a turn on the spot the AI's position reads 0,0,0: the character's stands in for it
 CharacterMngr = { GetTrico = function() return { worldPosition = Vector(5, 1, 6) } end }
@@ -368,18 +363,19 @@ local wx, wz = math.sin(math.rad(120)), math.cos(math.rad(120))   -- 120 degrees
 Harness.objects._trico_camera = { worldPosition = Vector(0, 3, -8) }   -- forward +Z: stick = way
 CoopTrico.latch = nil
 CoopTrico.Update(0.016, { x = -wx, y = wz })   -- the stick's right is -X
-local turns = Harness.CallsNamed("cmd")
-check(#turns == 1 and turns[1][3] == "ControlCommand_C_turn_90_left", "120 degrees: one quarter turn")
+local turns = Harness.CallsNamed("slide")
+check(#turns == 1 and near(turns[1][3].destinationDir.X, wx) and near(turns[1][3].destinationDir.Z, wz),
+	"120 degrees: one turn, his own slide to face the stick's way")
 -- after it he faces 30 degrees short of the way
 local fx2, fz2 = math.sin(math.rad(90)), math.cos(math.rad(90))
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(fx2, 0, fz2)
 for _ = 1, 40 do CoopTrico.Update(0.1, { x = -wx, y = wz }) end
-check(#Harness.CallsNamed("cmd") == 1 and CoopTrico.goal ~= nil, "no more turns: he walks the rest")
+check(#Harness.CallsNamed("slide") == 1 and CoopTrico.goal ~= nil, "no more turns: he walks the rest")
 -- and an overshoot (60 degrees off on the other side) isn't turned back either
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(math.sin(math.rad(-180)), 0, math.cos(math.rad(-180)))
 CoopTrico.turnIn = 0
 for _ = 1, 40 do CoopTrico.Update(0.1, { x = -wx, y = wz }) end
-check(#Harness.CallsNamed("cmd") == 1, "60 degrees off: walked, not turned")
+check(#Harness.CallsNamed("slide") == 1, "60 degrees off: walked, not turned")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
 -- while focused, Trico's idle and boy-affection behaviours and jump slides are banned; only the
@@ -392,10 +388,21 @@ CoopTrico.idleFor = 99
 CoopTrico.Update(0.016, { x = 0, y = 1 })
 check(bw.IdlingBan and bw.SitIdlingBan and bw.BoyDaisukiProcBan and Harness.tricoProps.moveMngr.prioSelect,
 	"focused: idling, affection and jump slides banned")
+-- an idle action already set out goes the game's own way
+local dropped = {}
+Ai2.CommonScript = { Condor = { DelIdlingIntr = function(props) dropped[#dropped + 1] = props; bw.IdlingIntrPoped = false end } }
+bw.IdlingIntrPoped = true
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(#dropped == 1 and dropped[1] == Harness.tricoProps, "a set-out idle action dropped")
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(#dropped == 1, "only while there is one")
+Ai2.CommonScript = nil
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 for _ = 1, 25 do CoopTrico.Update(0.1, { x = 0, y = 0 }) end
+check(not CoopTrico.focused and bw.IdlingBan, "2 s later: the boy back in mind, idle fidgets still banned")
+for _ = 1, 130 do CoopTrico.Update(0.1, { x = 0, y = 0 }) end
 check(not bw.IdlingBan and bw.SitIdlingBan and not bw.BoyDaisukiProcBan and not Harness.tricoProps.moveMngr.prioSelect,
-	"2 s later: ours lifted, the story's SitIdlingBan kept")
+	"15 s later: ours lifted, the story's SitIdlingBan kept")
 CoopTrico.Update(0.016, { x = 0, y = 1 })
 CoopTrico.Release()
 check(not bw.IdlingBan and not CoopTrico.banned, "released: lifted")
@@ -409,6 +416,20 @@ local ends = Harness.CallsNamed("cmd")
 check(#ends == 1 and ends[1][3] == "ControlCommand_C_sit_end" and CoopTrico.nav == "stand-up", "sitting: stood up first")
 for _ = 1, 4 do CoopTrico.refreshIn = 0 CoopTrico.Update(0.016, { x = 0, y = 1 }) end
 check(#Harness.CallsNamed("cmd") == 1, "not asked again at once")
+-- lying: his stand command
+Ai2.Utils.GetCurAnimState = function() return "ext_c_lie_down_loop" end
+Harness.calls = {}
+CoopTrico.standIn = 0
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(Harness.CallsNamed("cmd")[1] and Harness.CallsNamed("cmd")[1][3] == "ControlCommand_C_stand", "lying: stood up with his stand command")
+-- getting up (an end animation) is left to play
+Ai2.Utils.GetCurAnimState = function() return "ext_c_sit_end" end
+Harness.calls = {}
+CoopTrico.standIn = 0
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(#Harness.CallsNamed("cmd") == 0, "getting up: nothing sent")
 Ai2.Utils.GetCurAnimState = savedAnim2
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 -- which turn: the right of a facing (x, z) is (-z, x)
@@ -454,6 +475,138 @@ CoopTrico.Update(0.016, { x = 0, y = 1 })
 check(CoopTrico.steering, "after 1.5 s the stick wins")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 CoopActions = nil
+
+-- "ctrl": his planning off, a planned move of our own (none at all makes his action layer stop
+-- him every frame), walk commands, and both put back when the stick is let go
+CoopTrico.strategy = "ctrl"
+Harness.tricoProps = Harness.NewTricoProps(0, 0, 0)
+Harness.tricoProps.plannedMove = "MoveStop"
+Harness.calls = {}
+-- (no path functions in the harness yet: the walk commands, which at least start him)
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(Harness.tricoProps.approach.skipCreate == true, "ctrl: his planning skipped")
+check(Harness.tricoProps.plannedMove == "CoopManual", "ctrl: a planned move his actions leave alone")
+local cmds = Harness.CallsNamed("cmd")
+check(#cmds == 1 and cmds[1][3] == "ControlCommand_C_walk_fast" and CoopTrico.nav == "ctrl-cmd",
+	"ctrl without a path: full stick walks fast")
+-- with the free walk's path: the pose 25 m ahead (full stick), his own forward move in manual mode
+local built = {}
+Harness.tricoProps.currentInfo.detailPath = { Navmesh = 1, Interval = 1 }
+Ai2.CondorUtils.GetPath = function() return built end
+Ai2.CondorUtils.Path = { ReqDiscretePathMode = Harness.Record("discrete") }
+Ai2.Actions = { Condor = { Path = { Pack = {} } } }
+Ai2BuildPath = Harness.Record("build")
+Harness.tricoProps.moveMngr.walk = { suspendStopDecision = false }
+Harness.calls = {}
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(Harness.tricoProps.moveMngr.walk.suspendStopDecision == true, "ctrl: his stop decision suspended while held")
+local types = Harness.tricoProps.curMoveTypes
+check(types and types[#types] == "MV_C_WALKFAST", "ctrl: full stick allows the fast walk")
+check(#CoopTrico.CtrlTypes(0.4) == 2 and CoopTrico.CtrlTypes(0.4)[2] == "MV_C_WALKSLOW", "ctrl: a light push walks slowly")
+check(Harness.tricoProps.plannedMove == "ForwardMove" and Harness.tricoProps.moveParam.manualMode
+	and CoopTrico.nav == "ctrl-walk", "ctrl: his forward move, manual")
+check(built.BasePos and near(built.BasePos.Z, 25) and near(built.BaseDir.Z, 1) and #Harness.CallsNamed("build") == 1,
+	"ctrl: the pose 25 m ahead")
+check(#Harness.CallsNamed("cmd") == 0, "ctrl: no walk commands while the path works")
+-- still standing half a second into the walk (after a sit): his own forward request, once a second
+local savedAnimK = Ai2.Utils.GetCurAnimState
+Ai2.Utils.GetCurAnimState = function() return "c_stand" end
+CoopTrico.ctrlStill, CoopTrico.kickIn = 0, 0
+Harness.calls = {}
+for _ = 1, 3 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(#Harness.CallsNamed("forward") == 0, "ctrl: no kick at once")
+for _ = 1, 3 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+local fw = Harness.CallsNamed("forward")
+check(#fw == 1 and fw[1][3] == CoopTrico.manualMove, "ctrl: kicked with his forward request")
+for _ = 1, 5 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(#Harness.CallsNamed("forward") == 1, "ctrl: not again within a second")
+Ai2.Utils.GetCurAnimState = function() return "c_walkC" end
+for _ = 1, 20 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(#Harness.CallsNamed("forward") == 2 - 1, "ctrl: walking: no kicks")
+-- a stale request of his (a slide taken by his sitting shuffle) holding a turn up: dropped after
+-- 1.5 s standing, and the turn asked again
+Ai2.Utils.GetCurAnimState = function() return "c_stand" end
+local stale = { name = "slide" }
+Harness.tricoProps.moveMngr.runningRequest = stale
+Harness.tricoProps.moveMngr.CancelPlannedMove = function(self, props) props.plannedMove = nil props.moveParam = nil end
+CoopTrico.progressFrom, CoopTrico.stuckFor, CoopTrico.unstickIn = nil, 0, 0
+Harness.calls = {}
+for _ = 1, 15 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
+check(Harness.tricoProps.moveMngr.runningRequest == stale, "ctrl: not dropped within 2 s")
+for _ = 1, 7 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
+check(Harness.tricoProps.moveMngr.runningRequest == nil and CoopTrico.unsticks >= 1, "ctrl: stale request dropped")
+check(CoopTrico.waking and CoopTrico.nav == "ctrl-wake" and not Harness.tricoProps.approach.skipCreate,
+	"ctrl: his planning back on for a moment to wake him")
+check(CoopTrico.goal and near(CoopTrico.goal.Z, -CoopTrico.distances.goal), "ctrl: waking goal the stick's way")
+-- once he moves (or after 2 s) direct control again
+Ai2.Utils.GetCurAnimState = function() return "c_slide_rot_left" end
+CoopTrico.Update(0.1, { x = 0, y = -1 })
+check(CoopTrico.waking == nil and Harness.tricoProps.approach.skipCreate == true, "ctrl: moving: planning off again")
+-- walking on the spot (his own walk on a path that no longer moves) counts as stuck too; walking
+-- on does not
+Ai2.Utils.GetCurAnimState = function() return "c_walkC" end
+CoopTrico.progressFrom, CoopTrico.stuckFor, CoopTrico.unstickIn = nil, 0, 0
+local before = CoopTrico.unsticks
+for i = 1, 30 do
+	Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, i * 0.08)
+	CoopTrico.Update(0.1, { x = 0, y = 1 })
+end
+check(CoopTrico.unsticks == before, "ctrl: walking on: no unstick")
+for _ = 1, 22 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(CoopTrico.unsticks == before + 1 and not CoopTrico.waking, "ctrl: walking on the spot: unstuck, not woken")
+-- walking: 90 degrees round he keeps walking (curving), right round his stop command first
+Ai2.Utils.GetCurAnimState = function() return "c_walkC" end
+CoopTrico.progressFrom, CoopTrico.stuckFor, CoopTrico.unstickIn, CoopTrico.waking = nil, 0, 99, nil
+Harness.calls = {}
+CoopTrico.turnIn = 0
+CoopTrico.Update(0.016, { x = 1, y = 0 })
+check(CoopTrico.nav == "ctrl-walk" and #Harness.CallsNamed("slide") == 0, "ctrl walking: a quarter round, curved")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+Harness.calls = {}
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+local brake = Harness.CallsNamed("cmd")
+check(CoopTrico.nav == "ctrl-brake" and brake[#brake][3] == "ControlCommand_C_walk_stop" and #Harness.CallsNamed("slide") == 0,
+	"ctrl walking: right round, braked first")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+-- getting up from a sit takes seconds on the spot: not stuck
+Ai2.Utils.GetCurAnimState = function() return "ext_c_sit_end" end
+CoopTrico.progressFrom, CoopTrico.stuckFor, CoopTrico.unstickIn = nil, 0, 0
+local before2 = CoopTrico.unsticks
+for _ = 1, 40 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(CoopTrico.unsticks == before2, "ctrl: getting up is not stuck")
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, 0)
+CoopTrico.waking = nil
+Ai2.Utils.GetCurAnimState = savedAnimK
+-- the stick behind him: a turning slide, his destination moved ahead the stick's way (on it he
+-- counts as arrived and his slide does nothing)
+Harness.tricoProps.isOnGoalInVolume = true
+Harness.calls = {}
+CoopTrico.turnIn = 0
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+local dest = Harness.tricoProps.currentInfo.apDestination
+check(#Harness.CallsNamed("slide") == 1 and dest and near(dest.Z, -20) and not Harness.tricoProps.isOnGoalInVolume,
+	"ctrl: turned, destination ahead the stick's way")
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+Harness.tricoProps.plannedMove = "MoveTurn"
+Harness.tricoProps.moveParam = nil
+Ai2BuildPath = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(Harness.tricoProps.plannedMove == "MoveTurn", "ctrl: a move of his own is not overwritten")
+Ai2BuildPath = Harness.Record("build")
+Harness.tricoProps.plannedMove = "ForwardMove"
+Harness.tricoProps.moveParam = CoopTrico.manualMove
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+check(not Harness.tricoProps.approach.skipCreate, "ctrl: planning back on release")
+check(Harness.tricoProps.plannedMove == nil and Harness.tricoProps.moveParam == nil, "ctrl: our forward move dropped")
+check(Harness.tricoProps.moveMngr.walk.suspendStopDecision == false, "ctrl: his stop decision back on release")
+Ai2BuildPath, Ai2.CondorUtils.GetPath, Ai2.CondorUtils.Path, Ai2.Actions = nil, nil, nil, nil
+Harness.tricoProps.plannedMove = "CoopManual"
+CoopTrico.Unskip(Harness.tricoProps)
+check(Harness.tricoProps.plannedMove == "CoopManual", "ctrl: unskip only once")
+Harness.tricoProps.plannedMove = nil
+CoopTrico.strategy = "goal"
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+CoopTrico.Update(0.016, { x = 0, y = 0 })
 
 -- errors in the game's AI are contained and reported once (with the debug channel on)
 CoopDebug.enabled = true

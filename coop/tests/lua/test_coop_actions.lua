@@ -126,6 +126,88 @@ check(not CoopTrico.steering, "steering waits while the jump target is held")
 CoopActions.Release()
 check(CoopActions.jump == nil, "released")
 
+-- the level's hint first: remembered while Trico has it in mind, taken when it lies the way
+local hintEnt = { worldPosition = Vector(0, 3, 20), GetName = function() return "HintIntr_1" end }
+Harness.tricoProps.currentInfo.interestEntity = hintEnt
+Harness.tricoProps.currentInfo.interestType = "CommonHint"
+CoopActions.Update(0.016, btn())
+Harness.tricoProps.currentInfo.interestEntity, Harness.tricoProps.currentInfo.interestType = nil, nil
+CoopActions.Update(0.016, btn("Cross"))
+check(CoopActions.jump and CoopActions.jump.entity == hintEnt, "the level's hint ahead taken")
+lv = Harness.CallsNamed("level")
+check(lv[#lv][3] == hintEnt and lv[#lv][5] == "addMax", "the hint to the top")
+CoopActions.Release()
+CoopActions.Update(0.016, btn("Cross", 0, -1))
+check(not (CoopActions.jump and CoopActions.jump.entity == hintEnt), "a hint behind the stick's way: not taken")
+CoopActions.Release()
+CoopActions.hint = nil
+
+-- the level's own jump spots first: Instruction interests in auto-Trico's search volume (attached
+-- once the Trico player is there), across a special edge, the one nearest the stick's way
+local function spot(name, x, y, z) return { worldPosition = Vector(x, y, z), GetName = function() return name end } end
+local spots = { spot("Inst_back", 0, 6, -20), spot("Inst_walk", 2, 0, 20), spot("Inst_left", 20, 6, 4),
+	spot("Inst_pillar", -3, 6, 25), spot("Inst_far", 0, 6, 60) }
+local vol = { name = "autoTrico_findSpEdgeVol" }
+Ai2.Utils.GetVolumeByAssetName = function(props, name) return name == vol.name and vol or nil end
+Ai2.Utils.AttachVolume = Harness.Record("attach")
+Ai2.Utils.DetachVolume = Harness.Record("detach")
+Ai2.Utils.IsInVolumeSubType = function(v, types)
+	check(v == vol and types[1] == "Instruction" and types[2] == "Instruction_30s", "searched the volume for Instructions")
+	return true, spots
+end
+Ai2.Utils.Navmesh.CheckSameIsland = function(props, from, to, excludeSpEdge)
+	if to.Y < 3 then return true end   -- the ground Trico walks on
+	return not excludeSpEdge           -- the raised spots: only through a special edge
+end
+CoopActions.Update(0.016, btn())
+check(#Harness.CallsNamed("attach") == 1, "volume attached ahead of the press")
+CoopActions.Update(0.016, btn())
+check(#Harness.CallsNamed("attach") == 1, "attached once")
+local nMoved = #Harness.moved
+CoopActions.Update(0.016, btn("Cross"))
+check(CoopActions.jump and CoopActions.jump.entity == spots[4] and near(CoopActions.jump.target.Z, 25),
+	"the pillar ahead (not the walkable spot, the one behind or the one out of range)")
+lv = Harness.CallsNamed("level")
+check(lv[#lv][3] == spots[4] and lv[#lv][4] == "CoopActions_Jump" and lv[#lv][5] == "addMax", "the spot's own interest to the top")
+check(#Harness.moved == nMoved, "no made-up interest moved there")
+check(CoopActions.gesture and CoopActions.gesture.type == "Gesture_Jump" and CoopActions.gesture.target == "Inst_pillar",
+	"the jump gesture aimed at the spot")
+-- granted once the spot is what he has in mind
+Harness.tricoProps.currentInfo.interestEntity = spots[4]
+CoopActions.Update(0.016, btn())
+check(work.EyeContact_GestureMode == "Gesture_Jump" and work.InterestEntity_ByInstruction == spots[4], "granted at the spot")
+Harness.tricoProps.currentInfo.interestEntity = nil
+-- the stick to the left picks the spot that way
+CoopActions.Update(0.016, btn("Cross", -1, 0))
+check(CoopActions.jump.entity == spots[3], "the spot to the left")
+local resets = Harness.CallsNamed("levelReset")
+local letGo = false
+for _, r in ipairs(resets) do if r[3] == spots[4] then letGo = true end end
+check(letGo, "the earlier spot let go")
+-- held up to 20 s, until he is within 5.5 m of it
+for _ = 1, 150 do CoopActions.Update(0.1, btn()) end
+check(CoopActions.jump ~= nil, "still held after 15 s")
+Harness.tricoProps.currentInfo.aiPos = Vector(16, 0, 4)
+CoopActions.Update(0.016, btn())
+check(CoopActions.jump == nil, "there: dropped")
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, 0)
+CoopActions.Release()
+check(#Harness.CallsNamed("detach") == 1 and CoopActions.edgeVolume == nil, "volume detached on release")
+-- a spot the navmesh checks can't link at all (reached through its own special approach): still
+-- taken; and the stick let go and pushed again lets it go
+Ai2.Utils.Navmesh.CheckSameIsland = function(props, from, to, excludeSpEdge) return to.Y < 3 end
+CoopActions.Update(0.016, btn())
+CoopActions.Update(0.016, btn("Cross"))
+check(CoopActions.jump and CoopActions.jump.entity == spots[4], "an unlinked spot ahead is still taken")
+CoopActions.Update(0.1, btn(nil, 0, 1))
+check(CoopActions.jump ~= nil, "the stick still held from the press: kept")
+CoopActions.Update(0.1, btn())
+CoopActions.Update(0.1, btn(nil, 0, 1))
+check(CoopActions.jump == nil, "the stick pushed again: let go")
+check(CoopActions.gesture == nil, "its gesture let go too")
+CoopActions.Release()
+Ai2.Utils.GetVolumeByAssetName, Ai2.Utils.IsInVolumeSubType = nil, nil
+
 -- nothing while the lightning is aimed (L2 held)
 local aiming = btn("Square")
 aiming.hold.L2 = true
@@ -254,33 +336,37 @@ local function tap(input)
 end
 rest()
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
+local function lastSlide()
+	local c = Harness.CallsNamed("slide")
+	return c[#c] and c[#c][3]
+end
 tap(btn())
-check(string.find(lastCmd(), "turn_180") ~= nil, "centred stick: about-turn: " .. lastCmd())
+check(lastSlide() and math.abs(lastSlide().destinationDir.Z + 1) < 1e-3, "centred stick: his own slide right round")
 rest()
 -- stick held the way Trico already faces: nothing to do
-local before = #Harness.CallsNamed("cmd")
+local before = #Harness.CallsNamed("slide")
 CoopTrico.latch = nil
 Harness.objects._trico_camera = { worldPosition = Vector(1, 3, -10) }   -- camera forward is about +Z
 tap(btn(nil, 0, 1))
-check(#Harness.CallsNamed("cmd") == before, "already facing that way")
+check(#Harness.CallsNamed("slide") == before, "already facing that way")
 rest()
 CoopTrico.latch = nil
 tap(btn(nil, -1, 0))   -- stick left: the left of +Z is +X
-check(lastCmd() == "ControlCommand_C_turn_90_left", "stick left: a quarter turn left: " .. lastCmd())
+check(lastSlide() and lastSlide().destinationDir.X > 0.9, "stick left: his own slide to face +X")
 -- a turn event just after a swap is the swap's own L3: ignored
 rest()
 CoopActions.sent = nil   -- (the turn above is never seen to start here: no resends)
-local nturn = #Harness.CallsNamed("cmd")
+local nturn = #Harness.CallsNamed("slide")
 CoopInput.events = { { kind = "swap", value = "boy" } }
 CoopActions.Update(0.016, btn())
 CoopInput.events = { { kind = "turn" } }
 CoopActions.Update(0.5, btn())
 CoopInput.events = {}
-check(#Harness.CallsNamed("cmd") == nturn, "no turn right after a swap")
+check(#Harness.CallsNamed("slide") == nturn, "no turn right after a swap")
 CoopActions.Update(1.1, btn())
 CoopActions.sent = nil
 tap(btn())
-check(#Harness.CallsNamed("cmd") == nturn + 1, "but a tap later turns")
+check(#Harness.CallsNamed("slide") == nturn + 1, "but a tap later turns")
 CoopActions.sent = nil
 CoopInput = nil
 CoopTrico.latch = nil

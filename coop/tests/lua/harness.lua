@@ -78,6 +78,7 @@ Harness.calls = {}
 local function record(name)
 	return function(...) Harness.calls[#Harness.calls + 1] = { name, ... } end
 end
+Harness.Record = record
 function Harness.NewTricoProps(x, y, z)
 	local mngr = {}
 	mngr.RequestForward = record("forward")

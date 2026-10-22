@@ -252,6 +252,56 @@ Input = nil
 Ai2.Utils.GetCondorAIProps = savedProps
 Ai2 = savedAi2b
 
+-- Trico's position spiking to near the origin (his own turns and slides): the camera holds still
+-- (follow springs at no strength) for 5 s, then aims at the boy, and a jump lasting 10 s is
+-- accepted; never aimed at the spike, and the springs put back
+local spikeAt = Vector(-70, 7, -80)
+local savedAi2c = Ai2
+Ai2 = Ai2 or {}
+Ai2.Utils = Ai2.Utils or {}
+local savedPropsC = Ai2.Utils.GetCondorAIProps
+Ai2.Utils.GetCondorAIProps = function() return { currentInfo = { work = { GetMySelfPos = spikeAt }, aiPos = spikeAt } } end
+CoopCamera.Update(0.016, true)
+local ts = objects[CoopCamera.tricoParam]
+ts.Base_SpringBasePos_Str, ts.Gaze_SpringLookYaw_Str = 10, 2
+for _ = 1, 5 do CoopCamera.Update(0.1, true) end
+check(ts.Target_TargetType ~= "Default" and not CoopCamera.spiking, "steady: aimed at Trico")
+spikeAt = Vector(-0.4, 7, -0.6)
+local targets = {}
+for _ = 1, 20 do CoopCamera.Update(0.1, true) targets[#targets + 1] = ts.Target_TargetType end
+check(CoopCamera.spiking == "hold" and ts.Base_SpringBasePos_Str == 0 and ts.Gaze_SpringLookYaw_Str == 0,
+	"a spike: the camera holds still")
+for _, t in ipairs(targets) do check(t == "Trico", "held, not swung to the boy, for the first seconds") end
+spikeAt = Vector(-70.5, 7, -80.2)
+CoopCamera.Update(0.1, true)
+check(ts.Target_TargetType == "Trico" and not CoopCamera.spiking and ts.Base_SpringBasePos_Str == 10
+	and ts.Gaze_SpringLookYaw_Str == 2, "real again: springs back, on Trico")
+-- one lasting over 5 s: the boy; over 10 s (a scene placing him elsewhere): accepted
+spikeAt = Vector(40, 7, 40)
+for _ = 1, 60 do CoopCamera.Update(0.1, true) end
+check(CoopCamera.spiking == "boy" and ts.Target_TargetType == "Default" and ts.Base_SpringBasePos_Str == 10,
+	"lasting: aimed at the boy, springs back")
+for _ = 1, 45 do CoopCamera.Update(0.1, true) end
+check(ts.Target_TargetType == "Trico" and not CoopCamera.spiking, "a lasting move: back on Trico at the new place")
+-- released mid-hold: the springs are put back
+spikeAt = Vector(-0.4, 7, -0.6)
+for _ = 1, 3 do CoopCamera.Update(0.1, true) end
+check(CoopCamera.spiking == "hold" and ts.Base_SpringBasePos_Str == 0, "held again")
+CoopCamera.Update(0.016, false)
+check(ts.Base_SpringBasePos_Str == 10 and not CoopCamera.held, "released: springs put back")
+-- the debug fake spike holds the camera at the time asked
+spikeAt = Vector(-70, 7, -80)
+CoopCamera.testSpike, CoopCamera.testClock = { at = 1, length = 2 }, 0
+CoopCamera.Update(0.016, true)
+for _ = 1, 15 do CoopCamera.Update(0.1, true) end
+check(CoopCamera.spiking == "hold", "test spike: held")
+for _ = 1, 15 do CoopCamera.Update(0.1, true) end
+check(not CoopCamera.spiking, "test spike over")
+CoopCamera.testSpike = nil
+CoopCamera.Update(0.016, false)
+Ai2.Utils.GetCondorAIProps = savedPropsC
+Ai2 = savedAi2c
+
 -- the debug dump: the set's table, once the game camera is up
 GameCamera.game_param_tbl = { Stand = { Base = { Distance = 4.5, Offset = { X = 0, Y = 1.5 } }, _cond = {} } }
 GameCam_Command = function(cmd, name) return { GetName = function() return name end } end
