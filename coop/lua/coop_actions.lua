@@ -61,7 +61,7 @@ local EAT_TIME = 15.0                         -- seconds the barrel keeps the to
 local QUEUE_TIME = 8.0                        -- seconds a move waits for Trico to stand still (getting
                                               -- up from sitting or stopping a walk takes 3-8 s)
 local QUEUE_MAX = 2                           -- moves waiting at once
-local SEND_GAP = 1.0                          -- seconds after a move before the next one goes, so
+local SEND_GAP = 0.4                          -- seconds after a move before the next one goes, so
                                               -- Trico has started the first
 local RETRY_AFTER = 0.5                       -- seconds without the animation changing before a sent
 local TRIES = 3                               -- move is sent again (at most TRIES sends in all)
@@ -86,8 +86,8 @@ CoopActions.commands = {
 	stomp = "ControlCommand_C_attack_below",
 	turn90Left = "ControlCommand_C_turn_90_left",
 	turn90Right = "ControlCommand_C_turn_90_right",
-	aboutLeft = "ControlCommand_C_turn_narrow_left",
-	aboutRight = "ControlCommand_C_turn_narrow_right",
+	aboutLeft = "ControlCommand_C_turn_180_left",
+	aboutRight = "ControlCommand_C_turn_180_right",
 	sitEnd = "ControlCommand_C_sit_end",     -- up from sitting (as the game's own scripts do)
 }
 local STAND_AGAIN = 2.0                       -- seconds between stand-up requests while a move waits
@@ -273,18 +273,22 @@ local function Idle(anim)
 end
 
 -- Put a move at the back of the queue. Returns false when the queue is full.
-local function Queue(name, seatedToo)
+local function Queue(name, seatedToo, pressedAt)
 	local q = CoopActions.queue
 	if #q >= QUEUE_MAX then return false end
-	q[#q + 1] = { name = name, timer = QUEUE_TIME, seated = seatedToo }
+	local now = CoopActions.clock or 0
+	pressedAt = pressedAt or now
+	-- the QUEUE_TIME counts from the press, also for a move refused and queued later
+	q[#q + 1] = { name = name, timer = QUEUE_TIME - (now - pressedAt), seated = seatedToo, pressedAt = pressedAt }
 	CoopActions.pending = q[1]
 	return true
 end
 
 -- Send a single move and watch for Trico to start it (see Watch).
-local function Send(props, name, anim)
+local function Send(props, name, anim, pressedAt, seatedToo)
 	CoopActions.gap = SEND_GAP
-	CoopActions.sent = { name = name, t = 0, tries = 1, anim = anim }
+	CoopActions.sent = { name = name, t = 0, tries = 1, anim = anim, eager = not Idle(anim),
+		pressedAt = pressedAt or CoopActions.clock, seated = seatedToo }
 	return Command(props, name)
 end
 
@@ -297,12 +301,19 @@ local function Watch(dt, props, anim)
 	if anim ~= w.anim then
 		CoopActions.sent = nil
 		CoopActions.started = (CoopActions.started or 0) + 1
-		Say("AC %s started anim=%s after %.1f s, %d send(s)", w.name, anim, w.t + (w.tries - 1) * RETRY_AFTER, w.tries)
+		Say("AC %s started anim=%s %.2f s after the press, %d send(s)", w.name, anim,
+			(CoopActions.clock or 0) - (w.pressedAt or 0), w.tries)
 	elseif w.t >= RETRY_AFTER then
 		if w.tries >= TRIES then
 			CoopActions.sent = nil
-			CoopActions.missed = (CoopActions.missed or 0) + 1
-			Say("AC %s not started anim=%s", w.name, anim)
+			if w.eager and not w.requeued then
+				-- sent while Trico was busy and refused: wait for him after all
+				Queue(w.name, w.seated, w.pressedAt)
+				Say("AC %s refused by %s: waits for Trico", w.name, anim)
+			else
+				CoopActions.missed = (CoopActions.missed or 0) + 1
+				Say("AC %s not started anim=%s", w.name, anim)
+			end
 		else
 			w.tries, w.t = w.tries + 1, 0
 			Command(props, w.name)
@@ -313,10 +324,12 @@ end
 -- A single move: at once from a standing or waiting (or, for the posture moves, seated) Trico
 -- with nothing queued; otherwise queued until Trico stands (asked to, when it sits or lies).
 -- Returns the report detail.
+-- Sent at once whatever Trico is doing (most of his own actions take a command and give way),
+-- unless he sits and the move needs him standing; refused ones then wait (see Watch).
 local function Move(props, name, anim, seatedToo)
 	local free = #CoopActions.queue == 0 and CoopActions.gap <= 0
-	if free and (Idle(anim) or (seatedToo and StartsWith(anim, SEATED))) then
-		return Send(props, name, anim)
+	if free and (seatedToo or not StartsWith(anim, SEATED)) then
+		return Send(props, name, anim, nil, seatedToo)
 	end
 	if not Queue(name, seatedToo) then return name .. " dropped, " .. QUEUE_MAX .. " waiting" end
 	local place = #CoopActions.queue > 1 and (" behind " .. CoopActions.queue[1].name) or ""
@@ -346,7 +359,8 @@ local function TickQueue(dt, props, anim)
 	end
 	if first and CoopActions.gap <= 0 and (Idle(anim) or (first.seated and StartsWith(anim, SEATED))) then
 		table.remove(q, 1)
-		Say("AC %s sent %s anim=%s", first.name, Send(props, first.name, anim), anim)
+		Say("AC %s sent %s anim=%s", first.name, Send(props, first.name, anim, first.pressedAt, first.seated), anim)
+		if CoopActions.sent then CoopActions.sent.requeued = true end
 		CoopActions.lastAction, CoopActions.watch, CoopActions.lastAnim = first.name, WATCH, nil
 	end
 	CoopActions.pending = q[1]
@@ -602,6 +616,7 @@ end
 -- Call once per frame with the Trico player's input (nil when nobody plays Trico).
 function CoopActions.Update(dt, input)
 	dt = dt or 0
+	CoopActions.clock = (CoopActions.clock or 0) + dt
 	local props = Props()
 	if not props or not props.currentInfo or not props.currentInfo.aiPos then return end
 	local anim = AnimState(props)
