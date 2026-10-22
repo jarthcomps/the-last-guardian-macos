@@ -836,7 +836,7 @@ func selfTest() -> Int32 {
                     "SHADPS4_DYNAMIC_STATE_REUSE", "SHADPS4_RANGE_PROTECTION",
                     "KK_UPLOAD_CACHE_EXPANDED"]
                     + PerformanceEnvironment.experimentalSwitches.keys.sorted()
-                    + ["KK_SHADPS4_MSL_RECIPES", "KK_SHADPS4_MSL_OVERRIDE_DIR"] {
+                    + ["KK_SHADPS4_MSL_RECIPES", "KK_SHADPS4_MSL_OVERRIDE_DIR", CoopMod.environmentKey] {
             print("\(key)=\(env[key] ?? "")")
         }
         print("working directory: \(launcher.dataDir.path)")
