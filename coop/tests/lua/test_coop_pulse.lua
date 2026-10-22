@@ -214,7 +214,8 @@ CoopPulse.Release()
 GameFlag.HaveTrigger = 0
 CoopPulse.Update(0.1, pad())
 
--- aimhold: L2 held aims with the emblem as the cursor (7 m ahead), the beam is hidden, R2 shoots
+-- aimhold: L2 held aims with the emblem 15 m along a direction from Trico's head (starting the
+-- way Trico faces, level); the right stick turns and tilts it; the beam is hidden, R2 shoots
 CoopPulse.method = "aimhold"
 GameFlag.HaveTrigger = 1
 local ray = { entityFlags = "TransformInWorld" }
@@ -230,11 +231,25 @@ CoopPulse.Update(0.1, pad(0, 0, true))
 check(not CoopPulse.active and #Harness.CallsNamed("cmd") == na, "aimhold: R2 without L2 does nothing")
 Harness.tricoProps.currentInfo.ai2Ext.tailPulse.state = "Idle"
 CoopPulse.Update(0.1, l2())
-check(CoopPulse.active and inst.triggerObj ~= nil and near(CoopPulse.cursor.Z, 7), "aimhold: emblem 7 m ahead")
+local tp = Harness.tricoProps.currentInfo.aiPos
+check(CoopPulse.active and inst.triggerObj ~= nil and near(CoopPulse.cursor.Z, tp.Z + 15)
+	and near(CoopPulse.cursor.X, tp.X) and near(CoopPulse.cursor.Y, tp.Y + 3), "aimhold: emblem 15 m ahead, level with the head")
 check(#Harness.CallsNamed("free") == nf + 1 and #Harness.CallsNamed("cmd") == na, "aimhold: free mode, no commands")
 check(ray.entityFlags == "|Hide", "aimhold: beam hidden")
 CoopPulse.Update(0.25, l2(0, 1))
-check(near(inst.triggerAimPos.Z, 9), "aimhold: the right stick moves the emblem")
+check(near(CoopPulse.aimPitch, 11.25) and inst.triggerAimPos.Y > tp.Y + 3 + 2.9
+	and near(inst.triggerAimPos.Z, tp.Z + 15 * math.cos(math.rad(11.25))), "aimhold: stick up tilts the aim up")
+CoopPulse.Update(0.5, l2(1, 0))
+check(near(CoopPulse.aimYaw, 315) and inst.triggerAimPos.X < tp.X - 10, "aimhold: stick right turns it right (-X of +Z)")
+CoopPulse.Update(0.5, l2(-1, 0))
+for _ = 1, 20 do CoopPulse.Update(0.1, l2(0, 1)) end
+check(near(CoopPulse.aimPitch, 50), "aimhold: tilt stops at 50 degrees up")
+for _ = 1, 40 do CoopPulse.Update(0.1, l2(0, -1)) end
+check(near(CoopPulse.aimPitch, -35), "aimhold: and 35 down")
+CoopPulse.Update(0.1, l2(0.1, 0.1))
+check(near(CoopPulse.aimPitch, -35) and near(CoopPulse.aimYaw, 0), "aimhold: the dead zone")
+local far = math.sqrt((inst.triggerAimPos.X - tp.X) ^ 2 + (inst.triggerAimPos.Z - tp.Z) ^ 2)
+check(far > 12, "aimhold: not pulled back to the ground near Trico")
 for _ = 1, 150 do CoopPulse.Update(0.1, l2()) end
 check(inst.triggerObj ~= nil and CoopPulse.active, "aimhold: held 15 s, still aiming")
 CoopPulse.Update(0.1, l2(0, 0, true))

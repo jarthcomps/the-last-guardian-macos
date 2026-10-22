@@ -82,6 +82,32 @@ CoopInput.Update(0.016)
 CoopInput.Update(0.016)
 check(#CoopInput.events == 0, "quiet frame")
 
+-- protocol 4: the Trico player's lone L3 taps, a 2-bit count in flags bits 6-7
+local V4 = 4 * 4096
+check(CoopInput.Decode(V4 + 1 + 3 * 64).turns == 3 and CoopInput.Decode(V4 + 1).turns == 0, "turn count")
+setFlags(V4 + 1 + 4 + 0 * 64, 0, 0)
+CoopInput.Update(0.016)
+local function turned()
+	for _, e in ipairs(CoopInput.events) do if e.kind == "turn" then return true end end
+	return false
+end
+check(not turned(), "the first count seen is not a tap")
+setFlags(V4 + 1 + 4 + 1 * 64, 0, 0)
+CoopInput.Update(0.016)
+check(turned(), "a tap")
+CoopInput.Update(0.016)
+check(not turned(), "once")
+setFlags(V4 + 1 + 4 + 0 * 64, 0, 0)   -- wrapped round (3 more taps between frames count as one)
+CoopInput.Update(0.016)
+check(turned(), "after wrapping")
+-- protocol 3 has no turn bits: never a turn
+setFlags(V3 + 1 + 4 + 64, 0, 0)
+CoopInput.Update(0.016)
+check(not turned(), "protocol 3")
+setFlags(V3 + 1 + 2 + 8 + 16, 0, 0)
+CoopInput.Update(0.016)
+CoopInput.Update(0.016)
+
 -- the emulator stops answering (another game state, co-op off)
 Input.touch2.data[2] = { x = 0, y = 0, id = -1 }
 CoopInput.Update(0.016)

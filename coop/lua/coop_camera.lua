@@ -63,8 +63,14 @@ CoopCamera.framing = CoopCamera.framing or {
 	maxGrow = 12,
 	lift = 3,             -- degrees more downward per check while someone is out of the shot
 	maxLift = 25,
-	relax = 0.5,          -- metres (and degrees x2) given back per check once both are seen
-	settle = 2.0,         -- seconds both must be seen before easing back
+	relax = 0.25,         -- metres (and degrees x2) given back per check once both are seen
+	settle = 3.0,         -- seconds both must be well in the shot before easing back
+	comfort = 0.65,       -- "well in the shot": this far from the centre at most (hysteresis
+	                      -- against edge, so a character near the edge doesn't flip it)
+	outDelay = 1.0,       -- seconds someone must be out before the camera backs out
+	floorMove = 6.0,      -- after easing back lost someone, the setting that kept both in shot
+	                      -- stays the least the camera eases back to until Trico has moved this
+	                      -- many metres from there (standing still, the need hasn't changed)
 }
 CoopCamera.orbit = CoopCamera.orbit or {
 	enabled = true,
@@ -73,6 +79,7 @@ CoopCamera.orbit = CoopCamera.orbit or {
 	pitchMin = -20,       -- degrees added to the rod's pitch (+ lower, looking up; - higher)
 	pitchMax = 20,
 	deadzone = 0.25,
+	boyDeadzone = 0.4,    -- how far the boy's stick must go to take the camera back
 	idle = 3.0,           -- seconds without input before easing back behind Trico
 	back = 90,            -- degrees per second while easing back
 	near = 4.0,           -- metres: a turn that brings the camera this close to Trico (a wall
@@ -166,6 +173,16 @@ local function Seen(entity, bone, id)
 	return r < f.edge and z > 0
 end
 
+local function TricoPos()
+	local ok, p = pcall(function()
+		local props = Ai2.Utils.GetCondorAIProps()
+		if CoopTrico and CoopTrico.Position then return CoopTrico.Position(props) end
+		return props.currentInfo.aiPos
+	end)
+	if ok and p then return p end
+	return nil
+end
+
 -- Trico's entity name as the camera manager knows it: the one his AI reports (as the game's
 -- in-frame checks use, condorcommonaxis.lua), else his character's, else "Condor".
 local function TricoName()
@@ -193,6 +210,7 @@ local function BoyInShot()
 	local depth = vx * fwd.X + vy * fwd.Y + vz * fwd.Z
 	if depth < 0.5 then
 		CoopCamera.boyScreen = { 9, 9, depth }
+		CoopCamera.boyComfort = false
 		return false
 	end
 	local fov = tonumber(CoopCamera.tunedParam and CoopCamera.tunedParam.Base_FovDeg) or 70
@@ -200,7 +218,9 @@ local function BoyInShot()
 	local sx = (vx * right.X + vy * right.Y + vz * right.Z) / depth / (tanV * f.aspect)
 	local sy = (vx * up.X + vy * up.Y + vz * up.Z) / depth / tanV
 	CoopCamera.boyScreen = { sx, sy, depth }
-	return math.max(math.abs(sx), math.abs(sy)) < f.edge
+	local off = math.max(math.abs(sx), math.abs(sy))
+	CoopCamera.boyComfort = off < f.comfort
+	return off < f.edge
 end
 
 -- Every frame while the Trico framing is ours: ask who is on screen.
@@ -211,6 +231,9 @@ local function Watch()
 		return
 	end
 	CoopCamera.tricoSeen = Seen(TricoName(), f.tricoBone, "CoopCamTrico")
+	local t = CoopCamera.seenInfo and CoopCamera.seenInfo.CoopCamTrico
+	local r = t and tonumber(t.ratio_xy)
+	CoopCamera.tricoComfort = CoopCamera.tricoSeen and (r == nil or r < f.comfort)
 	local okBoy, boy = pcall(BoyInShot)
 	if okBoy then CoopCamera.boySeen = boy else CoopCamera.boySeen = nil end   -- (keeps false)
 end
@@ -223,19 +246,39 @@ local function Frame(dt)
 	if type(f) ~= "table" or not f.enabled or not param or type(tune) ~= "table" then return end
 	local trico, boy = CoopCamera.tricoSeen, CoopCamera.boySeen
 	if trico == nil and boy == nil then return end
-	local fr = CoopCamera.frame or { grow = 0, lift = 0, both = 0 }
+	local fr = CoopCamera.frame or { grow = 0, lift = 0, both = 0, out = 0, floor = nil }
 	CoopCamera.frame = fr
+	local here = TricoPos()
+	if fr.floor and here and fr.floor.at and
+		math.sqrt((here.X - fr.floor.at.X) ^ 2 + (here.Z - fr.floor.at.Z) ^ 2) > f.floorMove then
+		fr.floor = nil
+	end
+	local comfy = (trico ~= false and CoopCamera.tricoComfort ~= false)
+		and (boy ~= false and CoopCamera.boyComfort ~= false)
 	if trico == false or boy == false then
-		-- someone is out of the shot: back out and look down more (the game's own collision
-		-- shortens the rod where a wall is behind, so in tight spots this mostly raises it)
-		fr.grow = math.min(fr.grow + f.grow, f.maxGrow)
-		fr.lift = math.min(fr.lift + f.lift, f.maxLift)
 		fr.both = 0
+		fr.out = fr.out + dt
+		if fr.out >= f.outDelay then
+			-- out for a while: back out and look down more (the game's own collision shortens
+			-- the rod where a wall is behind, so in tight spots this mostly raises it)
+			if fr.easing then
+				-- easing back lost someone: what we had before is the least for a while
+				fr.floor = { grow = math.min(f.maxGrow, fr.grow + f.grow), lift = math.min(f.maxLift, fr.lift + f.lift),
+					at = here }
+			end
+			fr.easing = false
+			fr.grow = math.min(fr.grow + f.grow, f.maxGrow)
+			fr.lift = math.min(fr.lift + f.lift, f.maxLift)
+		end
 	else
-		fr.both = fr.both + dt
+		fr.out = 0
+		fr.both = comfy and fr.both + dt or 0
 		if fr.both >= f.settle then
-			fr.grow = math.max(0, fr.grow - f.relax)
-			fr.lift = math.max(0, fr.lift - 2 * f.relax)
+			local low = fr.floor or { grow = 0, lift = 0 }
+			local grow = math.max(low.grow, fr.grow - f.relax)
+			local lift = math.max(low.lift, fr.lift - 2 * f.relax)
+			fr.easing = grow < fr.grow or lift < fr.lift
+			fr.grow, fr.lift = grow, lift
 		end
 	end
 	fr.boy, fr.trico = boy, trico
@@ -369,7 +412,7 @@ end
 local function BoyTurning()
 	local pad = Input and Input.pad1
 	local mag = pad and tonumber(pad.RMag)
-	return mag ~= nil and mag > CoopCamera.orbit.deadzone
+	return mag ~= nil and mag > CoopCamera.orbit.boyDeadzone   -- firmer than the dead zone: drift must not grab it
 end
 
 -- Every frame in the Trico framing: the Trico player's right stick turns the camera.
@@ -390,7 +433,11 @@ local function Orbit(dt, input)
 		return
 	end
 	if turning then
-		st = st or { yaw = 0, pitch = 0, idle = 0, good = 0 }
+		if not st then
+			-- "behind Trico" is taken once per turn, so the camera doesn't chase him as he moves
+			local bx, bz = TricoDir()
+			st = { yaw = 0, pitch = 0, idle = 0, good = 0, dirX = bx, dirZ = bz }
+		end
 		CoopCamera.orbitState = st
 		local t = CoopCamera.seenInfo and CoopCamera.seenInfo.CoopCamTrico
 		local z = t and tonumber(t.distance_z)
@@ -417,7 +464,11 @@ local function Orbit(dt, input)
 		end
 	end
 	if not st then return end
-	local dx, dz = TricoDir()
+	local dx, dz = st.dirX, st.dirZ
+	if not dx then
+		dx, dz = TricoDir()
+		st.dirX, st.dirZ = dx, dz
+	end
 	if not dx then return end
 	param.Rod_YawBasisType = "Global"
 	param.Rod_YawBaseDeg = CoopCamera.OrbitYaw(dx, dz, st.yaw)
@@ -462,6 +513,27 @@ local function YawProbe(dt)
 	end
 end
 
+-- Debug (CoopCamera.trace = seconds between lines): the Trico framing's state, often, to catch
+-- the camera hunting back and forth.
+local function Trace(dt)
+	CoopCamera.traceIn = (CoopCamera.traceIn or 0) - dt
+	if CoopCamera.traceIn > 0 then return end
+	CoopCamera.traceIn = CoopCamera.trace
+	local cam = FindObject and FindObject(CAMERA_NAME)
+	local okF, fwd = pcall(function() return Vector(0, 0, -1):Rotate(cam.worldRotation) end)
+	local okP, p = pcall(function() return cam.worldPosition end)
+	local fr, o = CoopCamera.frame, CoopCamera.orbitState
+	local t = CoopCamera.seenInfo and CoopCamera.seenInfo.CoopCamTrico
+	local b = CoopCamera.boyScreen
+	CoopDebug.Print("CT %.1f,%.1f,%.1f f%.2f,%.2f,%.2f l%.1f p%.0f b%s%s t%s%.2f/%.1f o%s",
+		okP and p and p.X or 0, okP and p and p.Y or 0, okP and p and p.Z or 0,
+		okF and fwd.X or 0, okF and fwd.Y or 0, okF and fwd.Z or 0,
+		fr and fr.length or 0, fr and fr.pitch or 0,
+		tostring(CoopCamera.boySeen):sub(1, 1), b and string.format("%.2f,%.2f", b[1], b[2]) or "-",
+		tostring(CoopCamera.tricoSeen):sub(1, 1), t and tonumber(t.ratio_xy) or -1, t and tonumber(t.distance_z) or -1,
+		o and string.format("%.0f/%.0f", o.yaw, o.pitch) or "-")
+end
+
 -- Call once per frame with whether the Trico framing is asked for (CoopInput.tricoCamera) and
 -- the Trico player's input (CoopInput.TricoPad(), nil when nobody plays Trico).
 function CoopCamera.Update(dt, tricoFraming, tricoInput)
@@ -481,7 +553,10 @@ function CoopCamera.Update(dt, tricoFraming, tricoInput)
 			CoopCamera.lastError = errO
 			if CoopDebug then CoopDebug.Print("CA error %s", tostring(errO)) end
 		end
-		if CoopDebug and CoopDebug.enabled then pcall(YawProbe, dt) end
+		if CoopDebug and CoopDebug.enabled then
+			pcall(YawProbe, dt)
+			if CoopCamera.trace then pcall(Trace, dt) end
+		end
 	end
 	CoopCamera.checkIn = CoopCamera.checkIn - dt
 	if changed or CoopCamera.checkIn <= 0 then

@@ -5,7 +5,9 @@
 -- it for the boy too); the Trico player's input comes in its touch points instead:
 --   touch 1: id 193, x = left stick x + 256 * left stick y, y = the right stick the same way
 --            (0-255 per axis, 128 = centre, 0 = left / up);
---   touch 2: id 192, x = flags, y = swap count (low 4 bits) + 16 * buttons (protocol 3).
+--   touch 2: id 192, x = flags (bits 6-7: the Trico player's lone L3 taps, counted mod 4),
+--            y = swap count (low 4 bits) + 16 * buttons (protocol 4; a short tap stays set
+--            for at least one read, so every press reaches the scripts).
 -- It only starts routing once it has seen the scripts' hello, the light bar colour c00fee on
 -- the second pad.
 
@@ -63,6 +65,7 @@ function CoopInput.Reset()
 	CoopInput.tricoCamera = false
 	CoopInput.tricoStartedSwap = false
 	CoopInput.sequence = nil
+	CoopInput.turns = nil
 	CoopInput.helloIn = 0
 	CoopInput.events = {}
 	CoopInput.trico = nil          -- the Trico player's input (DecodeTrico), when someone plays Trico
@@ -77,6 +80,7 @@ function CoopInput.Decode(flags)
 		tricoCamera = bit(flags, FLAG_TRICO_CAMERA),
 		tricoStartedSwap = bit(flags, FLAG_TRICO_STARTED_SWAP),
 		twoPlayers = bit(flags, FLAG_TWO_PLAYERS),
+		turns = math.floor(flags / 64) % 4,
 		version = math.floor(flags / 4096) % 16,
 	}
 end
@@ -86,7 +90,7 @@ local function push(kind, a)
 	e[#e + 1] = { kind = kind, value = a }
 end
 
--- Call once per frame. Fills CoopInput.events with "swap", "camera", "roles" events.
+-- Call once per frame. Fills CoopInput.events with "swap", "camera", "roles" and "turn" events.
 function CoopInput.Update(dt)
 	CoopInput.events = {}
 	CoopInput.helloIn = CoopInput.helloIn - (dt or 0)
@@ -130,6 +134,10 @@ function CoopInput.Update(dt)
 		push("swap", f.tricoStartedSwap and "trico" or "boy")
 	end
 	CoopInput.sequence = seq
+	if f.version >= 4 then
+		if CoopInput.turns ~= nil and f.turns ~= CoopInput.turns then push("turn") end
+		CoopInput.turns = f.turns
+	end
 	if rolesChanged then push("roles") end
 	if cameraChanged then push("camera", f.tricoCamera) end
 end

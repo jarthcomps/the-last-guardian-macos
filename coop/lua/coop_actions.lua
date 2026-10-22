@@ -29,6 +29,8 @@
 --   Triangle stomp; R1 roar; L1 threat posture (held, ended on release); Down sit, then lie down,
 --   then stand up; Left stretch (front, up, back in turn); Right hind-leg kick (left and right in
 --   turn).
+--   L3 tapped alone (the emulator counts the taps): turn on the spot to face the stick's way
+--   (camera-relative, as steering), or right round with the stick centred; queued like a move.
 -- Context moves (eating, climbing, swimming...) stay with Trico's AI: buttons only add requests.
 -- Nothing here runs while the Trico player aims the lightning (L2); Circle stays the boy's shield.
 
@@ -61,6 +63,8 @@ local QUEUE_TIME = 8.0                        -- seconds a move waits for Trico 
 local QUEUE_MAX = 2                           -- moves waiting at once
 local SEND_GAP = 1.0                          -- seconds after a move before the next one goes, so
                                               -- Trico has started the first
+local RETRY_AFTER = 0.5                       -- seconds without the animation changing before a sent
+local TRIES = 3                               -- move is sent again (at most TRIES sends in all)
 local PULL_STICK = 0.5                        -- stick x beyond which Circle pulls with that paw
 local WATCH = 3.0                             -- seconds of animation reports after an action
 local DEADZONE = 0.3
@@ -80,11 +84,22 @@ CoopActions.commands = {
 	kickLeft = "ControlCommand_C_attack_hind_left",
 	kickRight = "ControlCommand_C_attack_hind_right",
 	stomp = "ControlCommand_C_attack_below",
+	turn90Left = "ControlCommand_C_turn_90_left",
+	turn90Right = "ControlCommand_C_turn_90_right",
+	aboutLeft = "ControlCommand_C_turn_narrow_left",
+	aboutRight = "ControlCommand_C_turn_narrow_right",
+	sitEnd = "ControlCommand_C_sit_end",     -- up from sitting (as the game's own scripts do)
 }
+local STAND_AGAIN = 2.0                       -- seconds between stand-up requests while a move waits
+CoopActions.queueTime = QUEUE_TIME
+local FACING = 0.7                            -- cosine: a turn already this close is not needed
+local SWAP_QUIET = 1.5                        -- seconds after a swap in which L3 taps are ignored
 local STRETCHES = { "stretchFront", "stretchUp", "stretchBack" }
 -- animation states a single move may start from (not the walk starts: c_stand_walk_fastC...)
 local IDLE = { "c_stand", "c_wait", "c_idle" }
-local MOVING = { "walk", "run", "gallop", "turn", "slide", "jump" }
+local MOVING = { "walk", "run", "gallop", "turn", "slide", "jump",
+	-- and Trico's own fidgets from standing (c_stand_shake_high...), which take no commands
+	"shake", "stretch", "yawn", "excite", "roar", "attack", "look", "scratch", "sniff" }
 local SEATED = { "c_sit", "ext_c_sit", "c_lie", "ext_c_lie", "c_liedown", "ext_c_liedown" }
 
 function CoopActions.Reset()
@@ -99,6 +114,12 @@ function CoopActions.Reset()
 	CoopActions.lastAction = nil
 	CoopActions.lastAnim = nil
 	CoopActions.lastError = nil
+end
+
+-- Trico's position, as steering reads it (coop_trico.lua: aiPos can read zero).
+local function TricoAt(props)
+	if CoopTrico and CoopTrico.Position then return CoopTrico.Position(props) or props.currentInfo.aiPos end
+	return props.currentInfo.aiPos
 end
 
 local function Props()
@@ -120,7 +141,7 @@ end
 
 -- The way an action goes: the stick's camera-relative way, else Trico's facing.
 function CoopActions.Way(props, input)
-	local pos = props.currentInfo.aiPos
+	local pos = TricoAt(props)
 	local d = props.currentInfo.ai2Ext and props.currentInfo.ai2Ext.dirXZ
 	local faceX, faceZ = d and d.X or 0, d and d.Z or 1
 	local sx, sy = nil, nil
@@ -140,7 +161,7 @@ end
 
 -- A point a special edge leads to (another navmesh island, reachable only through the edge).
 function CoopActions.FindJumpTarget(props, wayX, wayZ)
-	local pos = props.currentInfo.aiPos
+	local pos = TricoAt(props)
 	local check = Ai2.Utils.Navmesh.CheckSameIsland
 	for _, dist in ipairs(JUMP_DISTANCES) do
 		for _, deg in ipairs(JUMP_ANGLES) do
@@ -214,7 +235,7 @@ end
 local function Gesture(props, gType, wayX, wayZ, side)
 	DropGesture(props, "replaced")
 	local info = props.currentInfo
-	local pos = info.aiPos
+	local pos = TricoAt(props)
 	side = side or 0
 	local gx = pos.X + wayX * GESTURE_DISTANCE - wayZ * side
 	local gz = pos.Z + wayZ * GESTURE_DISTANCE + wayX * side
@@ -237,6 +258,12 @@ end
 
 local function Lying(anim) return string.find(anim, "lie") ~= nil end
 
+-- Ask a seated Trico to stand: the end of sitting from a sit, the stand command from lying.
+local function StandUp(props, anim)
+	CoopActions.standIn = STAND_AGAIN
+	return Command(props, (string.find(anim, "sit") and not Lying(anim)) and "sitEnd" or "stand")
+end
+
 local function Idle(anim)
 	if not StartsWith(anim, IDLE) then return false end
 	for _, word in ipairs(MOVING) do
@@ -254,9 +281,33 @@ local function Queue(name, seatedToo)
 	return true
 end
 
-local function Send(props, name)
+-- Send a single move and watch for Trico to start it (see Watch).
+local function Send(props, name, anim)
 	CoopActions.gap = SEND_GAP
+	CoopActions.sent = { name = name, t = 0, tries = 1, anim = anim }
 	return Command(props, name)
+end
+
+-- A sent move counts as started once Trico's animation changes; until then it is sent again
+-- every RETRY_AFTER seconds, TRIES times in all, then given up (both logged).
+local function Watch(dt, props, anim)
+	local w = CoopActions.sent
+	if not w then return end
+	w.t = w.t + dt
+	if anim ~= w.anim then
+		CoopActions.sent = nil
+		CoopActions.started = (CoopActions.started or 0) + 1
+		Say("AC %s started anim=%s after %.1f s, %d send(s)", w.name, anim, w.t + (w.tries - 1) * RETRY_AFTER, w.tries)
+	elseif w.t >= RETRY_AFTER then
+		if w.tries >= TRIES then
+			CoopActions.sent = nil
+			CoopActions.missed = (CoopActions.missed or 0) + 1
+			Say("AC %s not started anim=%s", w.name, anim)
+		else
+			w.tries, w.t = w.tries + 1, 0
+			Command(props, w.name)
+		end
+	end
 end
 
 -- A single move: at once from a standing or waiting (or, for the posture moves, seated) Trico
@@ -265,12 +316,12 @@ end
 local function Move(props, name, anim, seatedToo)
 	local free = #CoopActions.queue == 0 and CoopActions.gap <= 0
 	if free and (Idle(anim) or (seatedToo and StartsWith(anim, SEATED))) then
-		return Send(props, name)
+		return Send(props, name, anim)
 	end
 	if not Queue(name, seatedToo) then return name .. " dropped, " .. QUEUE_MAX .. " waiting" end
 	local place = #CoopActions.queue > 1 and (" behind " .. CoopActions.queue[1].name) or ""
 	if StartsWith(anim, SEATED) and not seatedToo then
-		Command(props, "stand")
+		StandUp(props, anim)
 		return name .. " waiting" .. place .. ", standing up from " .. anim
 	end
 	return name .. " waiting" .. place .. " " .. anim
@@ -288,9 +339,14 @@ local function TickQueue(dt, props, anim)
 		end
 	end
 	local first = q[1]
+	-- still seated with a standing move waiting: ask again now and then
+	CoopActions.standIn = (CoopActions.standIn or 0) - dt
+	if first and not first.seated and StartsWith(anim, SEATED) and CoopActions.standIn <= 0 then
+		StandUp(props, anim)
+	end
 	if first and CoopActions.gap <= 0 and (Idle(anim) or (first.seated and StartsWith(anim, SEATED))) then
 		table.remove(q, 1)
-		Say("AC %s sent %s anim=%s", first.name, Send(props, first.name), anim)
+		Say("AC %s sent %s anim=%s", first.name, Send(props, first.name, anim), anim)
 		CoopActions.lastAction, CoopActions.watch, CoopActions.lastAnim = first.name, WATCH, nil
 	end
 	CoopActions.pending = q[1]
@@ -301,7 +357,7 @@ function CoopActions.EdibleBarrel(props)
 	local info = props.currentInfo
 	local ok, list = pcall(Ai2.Utils.FindInterestByType, info.ai2Ext, "Barrel", true)
 	if not ok or type(list) ~= "table" then return nil end
-	local pos = info.aiPos
+	local pos = TricoAt(props)
 	local best, bestDist = nil, nil
 	for _, intr in ipairs(list) do
 		local ent = intr.sensorEntity
@@ -416,6 +472,26 @@ local function Attack(props, input)
 	return side .. " " .. Gesture(props, "Gesture_Attack", faceX, faceZ, shift)
 end
 
+-- L3: the turn that faces Trico the stick's way, or right round. Returns the report detail.
+local function Turn(props, input, anim)
+	local info = props.currentInfo
+	local face = info.ai2Ext and info.ai2Ext.dirXZ
+	if not face then return "no facing" end
+	local wayX, wayZ = -face.X, -face.Z
+	local sx, sy
+	if CoopTrico then sx, sy = CoopTrico.Stick(input) end   -- (an `and` would keep only sx)
+	if sx then
+		local fx, fz = CoopTrico.Frame(sx, sy, TricoAt(props), face)
+		fx, fz = fx or face.X, fz or face.Z
+		local x, z = fx * sy - fz * sx, fz * sy + fx * sx   -- the right of (x, z) is (-z, x)
+		local len = math.sqrt(x * x + z * z)
+		if len < 0.001 then return "no way" end
+		wayX, wayZ = x / len, z / len
+		if wayX * face.X + wayZ * face.Z > FACING then return "already facing" end
+	end
+	return Move(props, CoopTrico.TurnCommand(face.X, face.Z, wayX, wayZ), anim)
+end
+
 local function AnimState(props)
 	local ok, st = pcall(Ai2.Utils.GetCurAnimState, props.currentInfo.ai2Ext)
 	return ok and tostring(st) or "?"
@@ -423,11 +499,12 @@ end
 
 local function Step(dt, input, props, anim)
 	TickGesture(dt, props, anim)
+	Watch(dt, props, anim)
 	-- a held jump target: until Trico is there (or on its island), or the time is up
 	local j = CoopActions.jump
 	if j then
 		j.timer = j.timer - dt
-		local pos = props.currentInfo.aiPos
+		local pos = TricoAt(props)
 		local dx, dz = pos.X - j.target.X, pos.Z - j.target.Z
 		local okSame, same = pcall(Ai2.Utils.Navmesh.CheckSameIsland, props, pos, j.target, true)
 		if math.sqrt(dx * dx + dz * dz) < JUMP_ARRIVED or (okSame and same) then
@@ -445,7 +522,15 @@ local function Step(dt, input, props, anim)
 	TickQueue(dt, props, anim)
 
 	local did, detail = nil, nil
-	if down.Cross then did, detail = "jump", Jump(props, input)
+	-- (a turn right after a swap is the swap's own L3, not a tap)
+	local turn = false
+	CoopActions.sinceSwap = (CoopActions.sinceSwap or 99) + dt
+	for _, e in ipairs((CoopInput and CoopInput.events) or {}) do
+		if e.kind == "swap" then CoopActions.sinceSwap = 0 end
+		if e.kind == "turn" and CoopActions.sinceSwap > SWAP_QUIET then turn = true end
+	end
+	if turn then did, detail = "turn", Turn(props, input, anim)
+	elseif down.Cross then did, detail = "jump", Jump(props, input)
 	elseif down.Square then did, detail = "attack", Attack(props, input)
 	elseif down.Up then
 		Command(props, "rise")
@@ -500,6 +585,20 @@ local function Step(dt, input, props, anim)
 	end
 end
 
+-- A single move asked for from elsewhere (steering's turns on the spot): queued like a press,
+-- unless one of those moves already waits or is being started. Returns the report detail.
+function CoopActions.Request(name)
+	local props = Props()
+	if not props or not props.currentInfo then return "no Trico" end
+	for _, q in ipairs(CoopActions.queue) do
+		if q.name == name then return name .. " already waiting" end
+	end
+	if CoopActions.sent and CoopActions.sent.name == name then return name .. " already sent" end
+	local detail = Move(props, name, AnimState(props))
+	Say("AC %s requested: %s", name, tostring(detail))
+	return detail
+end
+
 -- Call once per frame with the Trico player's input (nil when nobody plays Trico).
 function CoopActions.Update(dt, input)
 	dt = dt or 0
@@ -527,6 +626,7 @@ function CoopActions.Release()
 	local props = Props()
 	CoopActions.queue = {}
 	CoopActions.pending = nil
+	CoopActions.sent = nil
 	pcall(DropJump, props, "released")
 	pcall(DropGesture, props, "released")
 	CoopActions.riseIn = nil
