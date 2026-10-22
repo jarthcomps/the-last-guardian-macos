@@ -672,6 +672,15 @@ local function TestEdges(dt)
 		local ok, err = pcall(MS.SetEnableSpPathEdge, name)
 		Say("AC test edge %s %s", name, ok and "on" or tostring(err))
 	end
+	-- (te.interest: what the canyon script does once the boy rides Trico at the pillar: his
+	-- waiting pose let go and the level's guidance interest woken at the top level)
+	if te.interest then
+		local okA = pcall(MS.SetGameObjectFlagsByTypeAndSubType, te.interest, "Interest", "Guidance", "~Disable")
+		local okB = pcall(MS.CondorStartInterest, te.interest)
+		local okC = pcall(MS.CondorAddInterestLevel, te.interest, "CoopTest", "addMax")
+		local okD = pcall(Ai2.CondorUtils.ResetOverwriteStay, Ai2.Utils.GetAIProps("Condor"))
+		Say("AC test interest %s %s %s %s %s", te.interest, tostring(okA), tostring(okB), tostring(okC), tostring(okD))
+	end
 end
 
 local function Step(dt, input, props, anim)
