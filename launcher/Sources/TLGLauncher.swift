@@ -71,6 +71,9 @@ struct LauncherSettings: Codable {
     var fastShaderMath = true
     var experimentalSpeedups = true
     var copyShaderShortcut = false
+    /// Two-player co-op (experimental): installs the co-op scripts into the game's mods overlay
+    /// and starts the engine with SHADPS4_TLG_COOP=1. Needs an engine built from tlg-coop.
+    var coop = false
     /// 2 (launcher 1.1.7): the speedups became the default, so settings saved before turn them on
     /// once; a choice made after that is kept.
     var settingsVersion = 2
@@ -94,6 +97,7 @@ struct LauncherSettings: Codable {
             ?? defaults.experimentalSpeedups
         copyShaderShortcut = try c.decodeIfPresent(Bool.self, forKey: .copyShaderShortcut)
             ?? defaults.copyShaderShortcut
+        coop = try c.decodeIfPresent(Bool.self, forKey: .coop) ?? defaults.coop
         let version = try c.decodeIfPresent(Int.self, forKey: .settingsVersion) ?? 1
         if version < 2 {
             experimentalSpeedups = true
@@ -108,6 +112,7 @@ final class Launcher: ObservableObject {
         didSet {
             save()
             message = ""
+            if oldValue.coop && !settings.coop { removeCoop() }
         }
     }
     @Published var message = ""
@@ -132,6 +137,13 @@ final class Launcher: ObservableObject {
         return FileManager.default.fileExists(atPath: dir.path) ? dir.path : nil
     }
     var pkgTool: URL { Bundle.main.resourceURL!.appendingPathComponent("tools/ps4-pkg-tool") }
+    /// The co-op scripts bundled with the launcher (TLG_COOP_SCRIPTS overrides, for tests).
+    var coopScripts: URL {
+        if let custom = ProcessInfo.processInfo.environment["TLG_COOP_SCRIPTS"] {
+            return URL(fileURLWithPath: custom)
+        }
+        return Bundle.main.resourceURL!.appendingPathComponent("coop")
+    }
     var defaultsDir: URL { Bundle.main.resourceURL!.appendingPathComponent("defaults") }
     private var process: Process?
 
@@ -459,6 +471,7 @@ final class Launcher: ObservableObject {
         // shadPS4 also points the Vulkan loader at the manifest next to its executable.
         env["VK_DRIVER_FILES"] = engineDir.appendingPathComponent("kosmickrisp_mesa_icd.json").path
         env["DYLD_LIBRARY_PATH"] = engineDir.path
+        if settings.coop { env[CoopMod.environmentKey] = "1" }
         return PerformanceEnvironment.apply(to: env, metalTweaks: settings.metalTweaks,
                                             fastShaderMath: settings.fastShaderMath,
                                             experimental: settings.experimentalSpeedups,
@@ -501,13 +514,57 @@ final class Launcher: ObservableObject {
         let gameLink = try linkGame(titleID: game.titleID)
         var args = ["--fullscreen", settings.fullscreen ? "true" : "false"]
         if settings.showFPS { args.append("--show-fps") }
-        if settings.resolution != "native" {
-            args += ["--patch",
-                     userDir.appendingPathComponent("patches/Guardian-\(settings.resolution).xml").path]
+        if settings.coop {
+            try setUpCoop(gameLink: gameLink)
+            args += ["--patch", try coopPatch().path]
+        } else {
+            removeCoop()
+            if settings.resolution != "native" {
+                args += ["--patch",
+                         userDir.appendingPathComponent("patches/Guardian-\(settings.resolution).xml").path]
+            }
         }
         if settings.updatePath == nil { args.append("--ignore-game-patch") }
         args.append(gameLink.appendingPathComponent("eboot.bin").path)
         return args
+    }
+
+    // MARK: Co-op
+
+    /// Installs the co-op scripts into the library's `<game>-mods` overlay, unless the installed
+    /// copy already matches the bundled scripts and the update archive.
+    func setUpCoop(gameLink: URL) throws {
+        guard settings.updatePath != nil else {
+            throw CoopMod.Failure(message: "Two-player co-op needs update 1.03.")
+        }
+        if !CoopMod.isCurrent(game: gameLink, scriptFolder: coopScripts) {
+            if CoopMod.isInstalled(game: gameLink) { try CoopMod.uninstall(game: gameLink) }
+            try CoopMod.install(game: gameLink, scriptFolder: coopScripts)
+        }
+    }
+
+    /// The resolution patch plus the line that lets the game open the second controller.
+    func coopPatch() throws -> URL {
+        let resolution: String
+        if settings.resolution == "native" {
+            resolution = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Patch>\n<TitleID><ID>CUSA03745</ID></TitleID>\n</Patch>\n"
+        } else {
+            resolution = try String(contentsOf: userDir.appendingPathComponent(
+                "patches/Guardian-\(settings.resolution).xml"), encoding: .utf8)
+        }
+        let target = userDir.appendingPathComponent("patches/Guardian-\(settings.resolution)-coop.xml")
+        try CoopMod.combinePatch(resolution).write(to: target, atomically: true, encoding: .utf8)
+        return target
+    }
+
+    /// Takes the co-op scripts out of the mods overlay (a different mod's archive is left alone).
+    func removeCoop() {
+        guard let game else { return }
+        do {
+            try CoopMod.uninstall(game: libraryDir.appendingPathComponent(game.titleID))
+        } catch {
+            message = error.localizedDescription
+        }
     }
 
     func play() {
@@ -704,6 +761,15 @@ struct ContentView: View {
                         .disabled(!launcher.settings.metalTweaks)
                         .help("Replaces one of the game's copy shaders with a plain GPU copy. "
                               + "Turn off if anything looks wrong.")
+                    Toggle("Two-player co-op (experimental)", isOn: $launcher.settings.coop)
+                        .accessibilityIdentifier("coop-toggle")
+                        .help("A second player controls Trico (L3 + R3 swaps roles). Adds the co-op "
+                              + "scripts to the game when you press Play; turning it off removes them.")
+                    if launcher.settings.coop {
+                        Text("Co-op: plug in a second controller, or swap roles with L3 + R3.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("coop-note")
+                    }
                 }.padding(6)
             }
             if !launcher.rosettaInstalled {

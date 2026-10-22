@@ -32,6 +32,16 @@ if [[ -f "$HERE/Resources/shader-recipes.txt" ]]; then
   cp "$HERE/Resources/shader-recipes.txt" "$APP/Contents/Resources/shader-recipes.txt"
 fi
 
+# Two-player co-op scripts (the launcher installs them into the game's mods overlay when the
+# option is on). COOP_LUA defaults to coop/lua next to the launcher.
+COOP_LUA=${COOP_LUA:-$ROOT/coop/lua}
+if [[ -d $COOP_LUA ]]; then
+  mkdir -p "$APP/Contents/Resources/coop"
+  cp "$COOP_LUA"/*.lua "$APP/Contents/Resources/coop/"
+else
+  echo "note: no co-op scripts at $COOP_LUA; the co-op option will report them missing" >&2
+fi
+
 # The engine is a plain folder: shadPS4 loads the Vulkan driver manifest that sits next to its
 # executable, which a nested app bundle's signature would not allow.
 ENGINE="$APP/Contents/Resources/engine"
