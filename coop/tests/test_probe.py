@@ -58,6 +58,10 @@ class ProbeTest(unittest.TestCase):
                       / "coop_config.lua").read_text()
         self.assertIn('CoopCamera.tricoParam = "TricoAutoRunTest_near"', config)
         self.assertIn('CoopCamera.cycle = { "A", "B" }', probe.probe_config("steer", camera="A, B"))
+        self.assertIn('CoopCamera.dumpSets = { "Stand", "X" }',
+                      probe.probe_config("steer", camera_dump="Stand,X"))
+        self.assertTrue(probe.probe_config("steer", settings=["CoopSwapFx.arcTime = 3"])
+                        .endswith("CoopSwapFx.arcTime = 3\n"))
 
     def test_summary_prefers_log_with_messages(self):
         with tempfile.TemporaryDirectory() as tmp:

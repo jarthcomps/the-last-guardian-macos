@@ -12,8 +12,19 @@
 --             pounces, as the boy's gesture does without a target).
 --   Square:   the attack gesture (a side swipe, the side the game picks from the target's angle,
 --             so the target goes on the stick's side).
---   Triangle: rear up on the hind legs (C_rise, which Trico takes from idle too), held while the
+--   Circle:   the boy's "Action" gesture, on whatever Trico is interested in (on a barrel box
+--             Trico breaks it; edible barrels ignore gestures, Trico just eats them); with nothing
+--             but the boy or a hint in its interest, on the dummy ahead (Trico tilts its head).
+--             With the stick held left or right: a pull with that paw (C_touch_left/right_pull),
+--             sent once Trico stands still (steering waits for it, at most PENDING_TIME).
+--   Up:       rear up on the hind legs (C_rise, which Trico takes from idle too), held while the
 --             button is.
+-- Single moves (one control command each, sent only while Trico stands, waits or sits; refused
+-- and logged otherwise):
+--   Triangle stomp; R1 roar; L1 threat posture (held, ended on release); Down sit, then lie down,
+--   then stand up; Left stretch (front, up, back in turn); Right hind-leg kick (left and right in
+--   turn).
+-- Context moves (eating, climbing, swimming...) stay with Trico's AI: buttons only add requests.
 -- Nothing here runs while the Trico player aims the lightning (L2); Circle stays the boy's shield.
 
 CoopActions = CoopActions or {}
@@ -37,16 +48,36 @@ local GESTURE_STARTS = {                      -- the animation states the gestur
 	Gesture_Jump = { "ext_c_Gesture_attack_below" },
 }
 local RISE_REPEAT = 0.5
+local PENDING_TIME = 2.0                      -- seconds a paw pull waits for Trico to stand still
+local PULL_STICK = 0.5                        -- stick x beyond which Circle pulls with that paw
 local WATCH = 3.0                             -- seconds of animation reports after an action
 local DEADZONE = 0.3
 
 CoopActions.commands = {
 	rise = "ControlCommand_C_rise",
+	roar = "ControlCommand_C_roar",
+	threat = "ControlCommand_C_threat_posture",
+	threatEnd = "ControlCommand_C_threat_posture_end",
+	stretchFront = "ControlCommand_C_stretch_front",
+	stretchUp = "ControlCommand_C_stretch_up",
+	stretchBack = "ControlCommand_C_stretch_back",
+	sit = "ControlCommand_C_sit",
+	lieDown = "ControlCommand_C_lie_down",
+	pullLeft = "ControlCommand_C_touch_left_pull",
+	pullRight = "ControlCommand_C_touch_right_pull",
+	kickLeft = "ControlCommand_C_attack_hind_left",
+	kickRight = "ControlCommand_C_attack_hind_right",
+	stomp = "ControlCommand_C_attack_below",
 }
+local STRETCHES = { "stretchFront", "stretchUp", "stretchBack" }
+-- animation states a single move may start from
+local IDLE = { "c_stand", "c_wait", "c_idle" }
+local SEATED = { "c_sit", "ext_c_sit", "c_lie", "ext_c_lie", "c_liedown", "ext_c_liedown" }
 
 function CoopActions.Reset()
 	CoopActions.jump = nil        -- { target, timer } while a jump target is held
 	CoopActions.gesture = nil     -- { type, timer } while a gesture waits for its action
+	CoopActions.pending = nil     -- { name, timer } a single move waiting for Trico to stand still
 	CoopActions.riseIn = nil
 	CoopActions.lastSwipe = "right"
 	CoopActions.watch = 0
@@ -66,7 +97,10 @@ local function Say(fmt, ...)
 end
 
 local function Command(props, name)
-	Ai2.Utils.ReqCtrlCmd(props.currentInfo.ai2Ext, CoopActions.commands[name])
+	local cmd = CoopActions.commands[name]
+	if name == "stand" then cmd = props.standCommand or "ControlCommand_C_stand" end
+	Ai2.Utils.ReqCtrlCmd(props.currentInfo.ai2Ext, cmd)
+	return cmd
 end
 
 -- The way an action goes: the stick's camera-relative way, else Trico's facing.
@@ -179,6 +213,41 @@ local function Gesture(props, gType, wayX, wayZ, side)
 	return string.format("target %.1f,%.1f", gx, gz)
 end
 
+local function StartsWith(anim, prefixes)
+	for _, prefix in ipairs(prefixes) do
+		if string.sub(anim, 1, string.len(prefix)) == prefix then return true end
+	end
+	return false
+end
+
+local function Lying(anim) return string.find(anim, "lie") ~= nil end
+
+-- A single move: one command, only from a standing, waiting (or, for the posture moves, seated)
+-- Trico. Returns the detail for the report.
+local function Move(props, name, anim, seatedToo)
+	if not (StartsWith(anim, IDLE) or (seatedToo and StartsWith(anim, SEATED))) then
+		return "refused " .. anim
+	end
+	return Command(props, name)
+end
+
+-- Circle: the Action gesture on Trico's current interest, else on the dummy ahead.
+local function Action(props, input)
+	local info = props.currentInfo
+	local intr = info.interestEntity
+	local okName, name = pcall(function() return intr and intr:GetName() end)
+	local plain = not okName or not name or name == "Player" or string.find(name, "^Hint")
+		or string.find(name, "^Coop")
+	if plain then
+		local wayX, wayZ = CoopActions.Way(props, input)
+		return "dummy " .. Gesture(props, "Gesture_Action", wayX, wayZ)
+	end
+	DropGesture(props, "replaced")
+	CoopActions.gesture = { type = "Gesture_Action", timer = GESTURE_TIMEOUT, target = name }
+	if info.work then GrantGesture(info.work, "Gesture_Action", intr, info) end
+	return "on " .. name
+end
+
 local function Started(anim, gType)
 	for _, prefix in ipairs(GESTURE_STARTS[gType] or {}) do
 		if string.sub(anim, 1, string.len(prefix)) == prefix then return true end
@@ -203,7 +272,7 @@ local function TickGesture(dt, props, anim)
 	local info = props.currentInfo
 	local intr = info.interestEntity
 	local okName, name = pcall(function() return intr and intr:GetName() end)
-	if okName and name == GESTURE_NAME and info.work then
+	if okName and name == (g.target or GESTURE_NAME) and info.work then
 		GrantGesture(info.work, g.type, intr, info)
 		g.granted = true
 	end
@@ -277,22 +346,59 @@ local function Step(dt, input, props, anim)
 	end
 	local down, hold = input.down or {}, input.hold or {}
 	if hold.L2 then CoopActions.riseIn = nil return end   -- aiming the lightning
+	local pend = CoopActions.pending
+	if pend then
+		pend.timer = pend.timer - dt
+		if StartsWith(anim, IDLE) then
+			CoopActions.pending = nil
+			Say("AC pull %s anim=%s", Command(props, pend.name), anim)
+			CoopActions.lastAction, CoopActions.watch, CoopActions.lastAnim = "pull", WATCH, nil
+		elseif pend.timer <= 0 then
+			CoopActions.pending = nil
+			Say("AC pull refused %s", anim)
+		end
+	end
 
 	local did, detail = nil, nil
 	if down.Cross then did, detail = "jump", Jump(props, input)
 	elseif down.Square then did, detail = "attack", Attack(props, input)
-	elseif down.Triangle then
+	elseif down.Up then
 		Command(props, "rise")
 		CoopActions.riseIn = RISE_REPEAT
 		did, detail = "rise", "start"
+	elseif down.Triangle then did, detail = "stomp", Move(props, "stomp", anim)
+	elseif down.Circle and math.abs(input.x or 0) > PULL_STICK and math.abs(input.x) > math.abs(input.y or 0) then
+		local name = input.x > 0 and "pullRight" or "pullLeft"
+		CoopActions.pending = { name = name, timer = PENDING_TIME }
+		did, detail = "pull", name .. " waiting"
+	elseif down.Circle then did, detail = "action", Action(props, input)
+	elseif down.R1 then did, detail = "roar", Move(props, "roar", anim)
+	elseif down.L1 then
+		did, detail = "threat", Move(props, "threat", anim)
+		CoopActions.threat = string.sub(detail, 1, 7) ~= "refused"
+	elseif down.Down then
+		if Lying(anim) then did, detail = "stand", Move(props, "stand", anim, true)
+		elseif StartsWith(anim, SEATED) then did, detail = "lie down", Move(props, "lieDown", anim, true)
+		else did, detail = "sit", Move(props, "sit", anim) end
+	elseif down.Left then
+		CoopActions.stretch = (CoopActions.stretch or 0) % #STRETCHES + 1
+		did, detail = "stretch", Move(props, STRETCHES[CoopActions.stretch], anim)
+	elseif down.Right then
+		CoopActions.kick = CoopActions.kick == "kickLeft" and "kickRight" or "kickLeft"
+		did, detail = "kick", Move(props, CoopActions.kick, anim)
 	end
-	if hold.Triangle and CoopActions.riseIn and not did then
+	if CoopActions.threat and not hold.L1 then
+		CoopActions.threat = false
+		Command(props, "threatEnd")
+		did, detail = did or "threat", detail or "end"
+	end
+	if hold.Up and CoopActions.riseIn and not did then
 		CoopActions.riseIn = CoopActions.riseIn - dt
 		if CoopActions.riseIn <= 0 then
 			Command(props, "rise")
 			CoopActions.riseIn = RISE_REPEAT
 		end
-	elseif not hold.Triangle then
+	elseif not hold.Up then
 		CoopActions.riseIn = nil
 	end
 	if did then
@@ -328,6 +434,7 @@ end
 -- Give Trico back (when the player leaves the Trico role).
 function CoopActions.Release()
 	local props = Props()
+	CoopActions.pending = nil
 	pcall(DropJump, props, "released")
 	pcall(DropGesture, props, "released")
 	CoopActions.riseIn = nil

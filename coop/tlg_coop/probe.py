@@ -49,25 +49,35 @@ def engine_sha256(engine: Path) -> str:
     return install.sha256_file(engine)
 
 
-def probe_config(strategy: str, pulse: str = "aimhold", camera: str | None = None) -> str:
+def lua_list(names: str) -> str:
+    return "{ " + ", ".join(f'"{n.strip()}"' for n in names.split(",") if n.strip()) + " }"
+
+
+def probe_config(strategy: str, pulse: str = "aimhold", camera: str | None = None,
+                 camera_dump: str | None = None, settings: list[str] | None = None) -> str:
     text = ("-- tlg-coop settings written by tlg_coop.probe\n"
             "CoopDebug.enabled = true\n"
             f"CoopTrico.strategy = \"{strategy}\"\n"
             f"CoopPulse.method = \"{pulse}\"\n")
     if camera and "," in camera:
-        sets = ", ".join(f'"{name.strip()}"' for name in camera.split(",") if name.strip())
-        text += f"CoopCamera.cycle = {{ {sets} }}\n"
+        text += f"CoopCamera.cycle = {lua_list(camera)}\n"
     elif camera:
         text += f"CoopCamera.tricoParam = \"{camera}\"\n"
+    if camera_dump:
+        text += f"CoopCamera.dumpSets = {lua_list(camera_dump)}\n"
+    for line in settings or []:
+        text += line + "\n"
     return text
 
 
 def probe_lua_dir(dest: Path, strategy: str, lua_dir: Path = install.LUA_DIR,
-                  pulse: str = "aimhold", camera: str | None = None) -> Path:
+                  pulse: str = "aimhold", camera: str | None = None,
+                  camera_dump: str | None = None, settings: list[str] | None = None) -> Path:
     """A copy of the scripts with the probe's coop_config.lua."""
     for script in lua_dir.glob("*.lua"):
         shutil.copy2(script, dest / script.name)
-    (dest / "coop_config.lua").write_text(probe_config(strategy, pulse, camera))
+    (dest / "coop_config.lua").write_text(probe_config(strategy, pulse, camera, camera_dump,
+                                                       settings))
     return dest
 
 
@@ -168,6 +178,10 @@ def main(argv=None) -> int:
     p.add_argument("--camera", metavar="SET",
                    help="game camera parameter set for the Trico framing (e.g. TricoAutoRunTest_near); "
                         "a comma-separated list cycles through them on each Select")
+    p.add_argument("--camera-dump", metavar="SETS",
+                   help="comma-separated camera parameter sets to print once the game camera is up")
+    p.add_argument("--set", action="append", default=[], metavar="LUA",
+                   help='an extra line for the probe\'s coop_config.lua, e.g. "CoopSwapFx.arcTime = 3"')
     p.add_argument("--save", type=Path, help="play this save (copied in, originals put back)")
     args = p.parse_args(argv)
 
@@ -184,7 +198,8 @@ def main(argv=None) -> int:
     game = runtime / "CUSA03745"
     engine = args.engine if args.engine is None or args.engine.is_absolute() else root / args.engine
     with tempfile.TemporaryDirectory() as tmp:
-        lua_dir = probe_lua_dir(Path(tmp), args.strategy, pulse=args.pulse, camera=args.camera)
+        lua_dir = probe_lua_dir(Path(tmp), args.strategy, pulse=args.pulse, camera=args.camera,
+                                camera_dump=args.camera_dump, settings=args.set)
         print(json.dumps({"install": install.install(game, lua_dir)}), flush=True)
     save = None
     if args.save:

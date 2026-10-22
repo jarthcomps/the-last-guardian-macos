@@ -2,7 +2,8 @@
 --
 -- Every frame: read what the emulator says about the players (coop_input), let the Trico player
 -- steer Trico (coop_trico), use its gesture actions (coop_actions), aim and fire its lightning
--- (coop_pulse) and frame the shared camera (coop_camera, switched with Select). coop_config.lua, when present, overrides settings (the test runs
+-- (coop_pulse), frame the shared camera (coop_camera, switched with Select) and show a lightning
+-- arc along Trico on each swap (coop_swap_fx). coop_config.lua, when present, overrides settings (the test runs
 -- use it to turn on the debug channel and pick the steering strategy).
 
 Load("game/scripts/coop/coop_debug")
@@ -11,6 +12,7 @@ Load("game/scripts/coop/coop_trico")
 Load("game/scripts/coop/coop_actions")
 Load("game/scripts/coop/coop_pulse")
 Load("game/scripts/coop/coop_camera")
+Load("game/scripts/coop/coop_swap_fx")
 pcall(Load, "game/scripts/coop/coop_config")
 
 Coop = Coop or {}
@@ -58,6 +60,7 @@ local function tick(dt)
 	CoopActions.Update(dt, CoopInput.TricoPad())
 	CoopPulse.Update(dt, CoopInput.TricoPad())
 	CoopCamera.Update(dt, CoopInput.active and CoopInput.tricoCamera)
+	CoopSwapFx.Update(dt, CoopInput.events)
 	if CoopDebug.enabled and Coop.clock >= Coop.nextReport then
 		Coop.nextReport = Coop.clock + 1
 		report()

@@ -285,7 +285,7 @@ function CoopTrico.Update(dt, input)
 	local sx, sy, len = CoopTrico.Stick(input)
 	-- a jump or a gesture (coop_actions.lua) has its own target: steering waits for it (the stick
 	-- then only picks the side or the way)
-	if CoopActions and (CoopActions.jump or CoopActions.gesture) then sx = nil end
+	if CoopActions and (CoopActions.jump or CoopActions.gesture or CoopActions.pending) then sx = nil end
 	if not sx then
 		if CoopTrico.steering then Release(props) end
 		return

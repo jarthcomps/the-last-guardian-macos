@@ -5,7 +5,7 @@
 -- it for the boy too); the Trico player's input comes in its touch points instead:
 --   touch 1: id 193, x = left stick x + 256 * left stick y, y = the right stick the same way
 --            (0-255 per axis, 128 = centre, 0 = left / up);
---   touch 2: id 192, x = flags, y = swap count (low byte) + 256 * buttons.
+--   touch 2: id 192, x = flags, y = swap count (low 4 bits) + 16 * buttons (protocol 3).
 -- It only starts routing once it has seen the scripts' hello, the light bar colour c00fee on
 -- the second pad.
 
@@ -28,7 +28,8 @@ local function bit(value, n)
 end
 
 -- The Trico player's buttons, in the emulator's bit order.
-CoopInput.BUTTONS = { "Cross", "Circle", "Square", "Triangle", "L1", "R1", "L2", "R2" }
+CoopInput.BUTTONS = { "Cross", "Circle", "Square", "Triangle", "L1", "R1", "L2", "R2",
+	"Up", "Down", "Left", "Right" }
 
 local function axis(raw)
 	local v = (raw - 128) / 127
@@ -117,11 +118,11 @@ function CoopInput.Update(dt)
 	CoopInput.twoPlayers = f.twoPlayers
 	CoopInput.tricoCamera = f.tricoCamera
 	CoopInput.tricoStartedSwap = f.tricoStartedSwap
-	local seq = (point.y or 0) % 256
+	local seq = (point.y or 0) % 16
 	local sticks = touch.data[1]
 	if f.tricoHuman and sticks and sticks.id == STICK_ID then
 		CoopInput.trico = CoopInput.DecodeTrico(sticks.x or 32896, sticks.y or 32896,
-			math.floor((point.y or 0) / 256), CoopInput.trico)
+			math.floor((point.y or 0) / 16), CoopInput.trico)
 	else
 		CoopInput.trico = nil
 	end

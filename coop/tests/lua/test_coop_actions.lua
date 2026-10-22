@@ -66,11 +66,11 @@ n = #Harness.CallsNamed("level")
 CoopActions.Update(0.016, btn("Square", 0, 0, true))
 check(#Harness.CallsNamed("level") == n, "held, not pressed again: nothing")
 
--- Triangle: rear up, re-sent every 0.5 s while held, stops with the button
-CoopActions.Update(0.016, btn("Triangle"))
+-- D-pad up: rear up, re-sent every 0.5 s while held, stops with the button
+CoopActions.Update(0.016, btn("Up"))
 check(lastCmd() == "ControlCommand_C_rise", "rise")
 n = #Harness.CallsNamed("cmd")
-for _ = 1, 6 do CoopActions.Update(0.1, btn("Triangle", 0, 0, true)) end
+for _ = 1, 6 do CoopActions.Update(0.1, btn("Up", 0, 0, true)) end
 check(#Harness.CallsNamed("cmd") == n + 1, "rise held: sent again after 0.5 s")
 CoopActions.Update(0.1, btn())
 for _ = 1, 10 do CoopActions.Update(0.1, btn()) end
@@ -131,18 +131,99 @@ aiming.hold.L2 = true
 CoopActions.Update(0.016, aiming)
 check(CoopActions.gesture == nil, "no actions while aiming")
 
+-- single moves: sent from an idle Trico, refused (and reported) otherwise
+anim = "c_stand"
+CoopActions.Update(0.016, btn("R1"))
+check(lastCmd() == "ControlCommand_C_roar", "R1 roar")
+CoopActions.Update(0.016, btn("Triangle"))
+check(lastCmd() == "ControlCommand_C_attack_below", "Triangle stomp")
+CoopActions.Update(0.016, btn("Right"))
+check(lastCmd() == "ControlCommand_C_attack_hind_left", "Right kick")
+CoopActions.Update(0.016, btn("Right"))
+check(lastCmd() == "ControlCommand_C_attack_hind_right", "kicks alternate")
+CoopActions.Update(0.016, btn("Left"))
+check(lastCmd() == "ControlCommand_C_stretch_front", "Left stretch")
+CoopActions.Update(0.016, btn("Left"))
+check(lastCmd() == "ControlCommand_C_stretch_up", "stretches in turn")
+-- Down: sit, then lie down, then stand up
+anim = "c_wait"
+CoopActions.Update(0.016, btn("Down"))
+check(lastCmd() == "ControlCommand_C_sit", "Down sits")
+anim = "c_sit_loop"
+CoopActions.Update(0.016, btn("Down"))
+check(lastCmd() == "ControlCommand_C_lie_down", "Down again lies down")
+anim = "c_lie_down_loop"
+Harness.tricoProps.standCommand = "ControlCommand_C_stand_test"
+CoopActions.Update(0.016, btn("Down"))
+check(lastCmd() == "ControlCommand_C_stand_test", "and stands up")
+-- L1: the threat posture while held, ended on release
+anim = "c_stand"
+CoopActions.Update(0.016, btn("L1"))
+check(lastCmd() == "ControlCommand_C_threat_posture", "L1 threat")
+CoopActions.Update(0.1, btn("L1", 0, 0, true))
+check(lastCmd() == "ControlCommand_C_threat_posture", "held")
+CoopActions.Update(0.1, btn())
+check(lastCmd() == "ControlCommand_C_threat_posture_end", "ended on release")
+-- refused while busy (walking): nothing sent
+anim = "c_walkC"
+n = #Harness.CallsNamed("cmd")
+CoopActions.Update(0.016, btn("R1"))
+CoopActions.Update(0.016, btn("Down"))
+CoopActions.Update(0.016, btn("L1"))
+CoopActions.Update(0.1, btn())
+check(#Harness.CallsNamed("cmd") == n and not CoopActions.threat, "refused while walking")
+anim = "c_stand"
+
+-- Circle with the stick left or right: a paw pull, once Trico stands still (steering waits)
+anim = "c_walkC"
+n = #Harness.CallsNamed("cmd")
+CoopActions.Update(0.016, btn("Circle", -0.9, 0))
+check(CoopActions.pending and CoopActions.pending.name == "pullLeft" and #Harness.CallsNamed("cmd") == n,
+	"pull waits while Trico walks")
+CoopTrico.Update(0.016, btn(nil, -0.9, 0))
+check(not CoopTrico.steering, "steering waits for the pull")
+anim = "c_stand"
+CoopActions.Update(0.1, btn(nil, -0.9, 0))
+check(lastCmd() == "ControlCommand_C_touch_left_pull" and CoopActions.pending == nil, "left paw pull once standing")
+CoopActions.Update(0.016, btn("Circle", 0.9, 0))
+CoopActions.Update(0.1, btn())
+check(lastCmd() == "ControlCommand_C_touch_right_pull", "right paw pull")
+anim = "c_walkC"
+n = #Harness.CallsNamed("cmd")
+CoopActions.Update(0.016, btn("Circle", 0.9, 0))
+for _ = 1, 21 do CoopActions.Update(0.1, btn()) end
+check(CoopActions.pending == nil and #Harness.CallsNamed("cmd") == n, "never still: refused after 2 s")
+anim = "c_stand"
+
+-- Circle: the Action gesture on Trico's interest, else on the dummy ahead
+work = {}
+Harness.tricoProps.currentInfo.work = work
+local barrel = { GetName = function() return "Barrel_01" end }
+Harness.tricoProps.currentInfo.interestEntity = barrel
+CoopActions.Update(0.016, btn("Circle"))
+check(work.EyeContact_GesturePermitAction and work.EyeContact_GesturePermitActionTarget == barrel
+	and work.GestureType_ByInstruction == "Gesture_Action", "action on the barrel")
+for _ = 1, 51 do CoopActions.Update(0.1, btn()) end
+check(CoopActions.gesture == nil and work.EyeContact_GesturePermitAction == false, "action dropped after 5 s")
+Harness.tricoProps.currentInfo.interestEntity = { GetName = function() return "Player" end }
+CoopActions.Update(0.016, btn("Circle"))
+check(CoopActions.gesture and CoopActions.gesture.type == "Gesture_Action" and CoopActions.gesture.target == nil,
+	"nothing to act on: the dummy ahead")
+CoopActions.Release()
+Harness.tricoProps.currentInfo.interestEntity = nil
+
 -- reports what was done and the animation after it
 CoopDebug.enabled = true
 Harness.lightbar = {}
 anim = "ext_c_rise_start"
-CoopActions.Update(0.016, btn("Triangle"))
-CoopActions.Update(0.1, btn("Triangle", 0, 0, true))
+CoopActions.Update(0.016, btn("Up"))
+CoopActions.Update(0.1, btn("Up", 0, 0, true))
 CoopDebug.Flush()
 check(#Harness.Find("^AC rise start anim=ext_c_rise_start") == 1, "action report")
 
 -- errors are contained; no Trico: nothing
 Ai2.Utils.ReqCtrlCmd = function() error("boom") end
-CoopActions.Update(0.016, btn("Triangle"))
+CoopActions.Update(0.016, btn("Up"))
 CoopDebug.Flush()
 check(#Harness.Find("^AC error") == 1, "error reported")
 Harness.tricoProps = nil
