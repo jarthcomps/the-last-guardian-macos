@@ -12,9 +12,11 @@
 --             pounces, as the boy's gesture does without a target).
 --   Square:   the attack gesture (a side swipe, the side the game picks from the target's angle,
 --             so the target goes on the stick's side).
---   Circle:   the boy's "Action" gesture, on whatever Trico is interested in (on a barrel box
---             Trico breaks it; edible barrels ignore gestures, Trico just eats them); with nothing
---             but the boy or a hint in its interest, on the dummy ahead (Trico tilts its head).
+--   Circle:   eat: the nearest edible barrel Trico knows (within BARREL_REACH, or in its view
+--             within BARREL_VIEW) gets the top interest level for a while, so Trico walks over and
+--             runs its own eating action. With no such barrel, the boy's "Action" gesture, on
+--             whatever Trico is interested in (on a barrel box Trico breaks it); with nothing but
+--             the boy or a hint in its interest, on the dummy ahead (Trico tilts its head).
 --             With the stick held left or right: a pull with that paw (C_touch_left/right_pull),
 --             sent once Trico stands still (steering waits for it, at most PENDING_TIME).
 --   Up:       rear up on the hind legs (C_rise, which Trico takes from idle too), held while the
@@ -49,6 +51,9 @@ local GESTURE_STARTS = {                      -- the animation states the gestur
 	Gesture_Jump = { "ext_c_Gesture_attack_below" },
 }
 local RISE_REPEAT = 0.5
+local BARREL_REACH = 15.0                     -- metres: an edible barrel this close is eaten on Circle
+local BARREL_VIEW = 30.0                      -- ... or this close while Trico sees it
+local EAT_TIME = 15.0                         -- seconds the barrel keeps the top interest level
 local PENDING_TIME = 6.0                      -- seconds a move waits for Trico to stand still (getting
                                               -- up from sitting or stopping a walk takes 3-5 s)
 local PULL_STICK = 0.5                        -- stick x beyond which Circle pulls with that paw
@@ -247,8 +252,39 @@ local function Move(props, name, anim, seatedToo)
 	return name .. " waiting " .. anim
 end
 
--- Circle: the Action gesture on Trico's current interest, else on the dummy ahead.
+-- The edible barrel to eat: the nearest of Trico's Barrel interests in reach, or in view.
+function CoopActions.EdibleBarrel(props)
+	local info = props.currentInfo
+	local ok, list = pcall(Ai2.Utils.FindInterestByType, info.ai2Ext, "Barrel", true)
+	if not ok or type(list) ~= "table" then return nil end
+	local pos = info.aiPos
+	local best, bestDist = nil, nil
+	for _, intr in ipairs(list) do
+		local ent = intr.sensorEntity
+		local okPos, p = pcall(function() return ent and ent.worldPosition end)
+		if okPos and p then
+			local d = math.sqrt((p.X - pos.X) ^ 2 + (p.Z - pos.Z) ^ 2)
+			local okView, seen = pcall(Ai2IsInterestViewable, intr)
+			local visible = okView and seen == 1
+			if (d <= BARREL_REACH or (visible and d <= BARREL_VIEW)) and (not bestDist or d < bestDist) then
+				best, bestDist = ent, d
+			end
+		end
+	end
+	return best, bestDist
+end
+
+-- Circle: eat a barrel in reach; else the Action gesture on Trico's current interest, else on
+-- the dummy ahead.
 local function Action(props, input)
+	local barrel, dist = CoopActions.EdibleBarrel(props)
+	if barrel then
+		local ai = props.currentInfo.ai2Ext
+		Ai2.Utils.InterestExclusionSwitching(ai, barrel, false)
+		Ai2.Utils.InterestLevelAddition(ai, barrel, "CoopActions_Eat", "addMax", EAT_TIME)
+		local okName, name = pcall(function() return barrel:GetName() end)
+		return string.format("eat %s %.1f m", okName and tostring(name) or "?", dist)
+	end
 	local info = props.currentInfo
 	local intr = info.interestEntity
 	local okName, name = pcall(function() return intr and intr:GetName() end)

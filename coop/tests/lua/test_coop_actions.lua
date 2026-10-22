@@ -214,6 +214,35 @@ for _ = 1, 61 do CoopActions.Update(0.1, btn()) end
 check(CoopActions.pending == nil and #Harness.CallsNamed("cmd") == n, "never still: refused after 6 s")
 anim = "c_stand"
 
+-- Circle near an edible barrel: the nearest one in reach (or in view) gets the top level for 15 s
+local function barrelAt(name, x, z, seen)
+	return { sensorEntity = { GetName = function() return name end, worldPosition = Vector(x, 0, z) },
+		seen = seen }
+end
+local barrels = {}
+Ai2.Utils.FindInterestByType = function(ai, typeName, checkExcl)
+	check(typeName == "Barrel" and checkExcl == true, "asks for non-excluded barrels")
+	return barrels
+end
+function Ai2IsInterestViewable(intr) return intr.seen and 1 or 0 end
+barrels = { barrelAt("far", 0, 40), barrelAt("seen", 20, 0, true), barrelAt("near", 0, 9), barrelAt("nearer", 0, 6) }
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, 0)
+local nl = #Harness.CallsNamed("level")
+CoopActions.Update(0.016, btn("Circle"))
+local lvl = Harness.CallsNamed("level")
+check(#lvl == nl + 1 and lvl[#lvl][3]:GetName() == "nearer" and lvl[#lvl][4] == "CoopActions_Eat"
+	and lvl[#lvl][5] == "addMax" and lvl[#lvl][6] == 15, "eats the nearest barrel in reach")
+check(CoopActions.gesture == nil, "no Action gesture when eating")
+barrels = { barrelAt("far", 0, 40), barrelAt("seen", 20, 0, true) }
+CoopActions.Update(0.016, btn("Circle"))
+lvl = Harness.CallsNamed("level")
+check(lvl[#lvl][3]:GetName() == "seen", "a barrel in view counts further out")
+barrels = { barrelAt("far", 0, 40), barrelAt("unseen", 20, 0, false) }
+CoopActions.Update(0.016, btn("Circle"))
+check(CoopActions.gesture and CoopActions.gesture.type == "Gesture_Action", "none in reach: Action")
+CoopActions.Release()
+barrels = {}
+
 -- Circle: the Action gesture on Trico's interest, else on the dummy ahead
 work = {}
 Harness.tricoProps.currentInfo.work = work

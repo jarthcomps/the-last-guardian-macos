@@ -24,45 +24,63 @@ CoopSwapFx.Update(0.016, { { kind = "swap", value = "boy" } })
 check(CoopSwapFx.arcs == 0, "no Trico, no arc")
 
 CharacterMngr.trico = trico("Trico1")
-local function locs(bone)
+CoopSwapFx.Update(0.016, { { kind = "swap", value = "boy" } })
+check(CoopSwapFx.arcs == 0, "no boy yet, no arc")
+CharacterMngr.player = trico("Boy1")
+local function locs(character, bone)
 	local list = {}
-	for _, c in ipairs(bones[CharacterMngr.trico][bone].children) do list[c.locatorName] = c end
+	for _, c in ipairs(bones[character][bone].children) do list[c.locatorName] = c end
 	return list
 end
 
--- the boy's player starts the swap: tail to head
+-- the boy's player starts the swap: from the boy's head to Trico's tail
 CoopSwapFx.Update(0.016, { { kind = "swap", value = "boy" } })
-local tail, head = locs("jt_Tail_17"), locs("jt_Head")
-check(tail.CoopSwapArc_TH.type == "Source" and head.CoopSwapArc_TH.type == "Destination", "tail-head pair")
-check(head.CoopSwapArc_HT.type == "Source" and tail.CoopSwapArc_HT.type == "Destination", "head-tail pair")
-check(tail.CoopSwapArc_TH.flags == "~Disabled" and head.CoopSwapArc_TH.flags == "~Disabled", "tail-head on")
-check(head.CoopSwapArc_HT.flags == "Disabled", "the other pair stays off")
+local tail, head = locs(CharacterMngr.trico, "jt_Tail_17"), locs(CharacterMngr.player, "jt_Head")
+check(head.CoopSwapArc_BT.type == "Source" and tail.CoopSwapArc_BT.type == "Destination", "boy-tail pair")
+check(tail.CoopSwapArc_TB.type == "Source" and head.CoopSwapArc_TB.type == "Destination", "tail-boy pair")
+check(bones[CharacterMngr.trico].jt_Head == nil, "nothing on Trico's head")
+check(head.CoopSwapArc_BT.flags == "~Disabled" and tail.CoopSwapArc_BT.flags == "~Disabled", "boy-tail on")
+check(tail.CoopSwapArc_TB.flags == "Disabled", "the other pair stays off")
 check(sounds[#sounds] == "CondorStartElectricity", "sound on")
 
 -- 0.6 s later it goes off
 CoopSwapFx.Update(0.3, {})
 check(CoopSwapFx.live == "boy", "still on at 0.3 s")
 CoopSwapFx.Update(0.35, {})
-check(CoopSwapFx.live == nil and tail.CoopSwapArc_TH.flags == "|Disabled"
-	and head.CoopSwapArc_TH.flags == "|Disabled", "off after 0.6 s")
+check(CoopSwapFx.live == nil and head.CoopSwapArc_BT.flags == "|Disabled"
+	and tail.CoopSwapArc_BT.flags == "|Disabled", "off after 0.6 s")
 check(sounds[#sounds] == "CondorStopElectricity", "sound off")
 
--- Trico's player starts the swap: head to tail; the locators are reused
+-- Trico's player starts the swap: from Trico's tail to the boy's head; the locators are reused
 CoopSwapFx.Update(0.016, { { kind = "roles" }, { kind = "swap", value = "trico" } })
-check(head.CoopSwapArc_HT.flags == "~Disabled" and tail.CoopSwapArc_HT.flags == "~Disabled", "head-tail on")
-check(#bones[CharacterMngr.trico].jt_Head.children == 2, "locators made once")
+check(tail.CoopSwapArc_TB.flags == "~Disabled" and head.CoopSwapArc_TB.flags == "~Disabled", "tail-boy on")
+check(#bones[CharacterMngr.player].jt_Head.children == 2 and #bones[CharacterMngr.trico].jt_Tail_17.children == 2,
+	"locators made once")
 -- a second swap during an arc replaces it
 CoopSwapFx.Update(0.1, { { kind = "swap", value = "boy" } })
-check(CoopSwapFx.live == "boy" and head.CoopSwapArc_HT.flags == "|Disabled"
-	and tail.CoopSwapArc_TH.flags == "~Disabled", "replaced")
+check(CoopSwapFx.live == "boy" and tail.CoopSwapArc_TB.flags == "|Disabled"
+	and head.CoopSwapArc_BT.flags == "~Disabled", "replaced")
 CoopSwapFx.Release()
-check(CoopSwapFx.live == nil and tail.CoopSwapArc_TH.flags == "|Disabled", "released")
+check(CoopSwapFx.live == nil and head.CoopSwapArc_BT.flags == "|Disabled", "released")
 
--- a new Trico character (another world): new locators on its bones
+-- a new Trico or boy character (another world): new locators on their bones
 CharacterMngr.trico = trico("Trico2")
 CoopSwapFx.Update(0.016, { { kind = "swap", value = "trico" } })
-check(#bones[CharacterMngr.trico].jt_Head.children == 2 and locs("jt_Head").CoopSwapArc_HT.flags == "~Disabled",
-	"made again for the new Trico")
+check(#bones[CharacterMngr.trico].jt_Tail_17.children == 2
+	and locs(CharacterMngr.trico, "jt_Tail_17").CoopSwapArc_TB.flags == "~Disabled", "made again for the new Trico")
+CoopSwapFx.Release()
+-- the boy's head through his AI when his character has no such bone
+local aiHead = { name = "ai head", children = {} }
+GameCharacter.FindBone = function(character, bone)
+	if character == CharacterMngr.player then return nil end
+	bones[character] = bones[character] or {}
+	bones[character][bone] = bones[character][bone] or { name = bone, children = {} }
+	return bones[character][bone]
+end
+Ai2.Utils.FindBone = function(ai, bone) return bone == "jt_Head" and aiHead or nil end
+CharacterMngr.player = trico("Boy2")
+CoopSwapFx.Update(0.016, { { kind = "swap", value = "boy" } })
+check(#aiHead.children == 2 and aiHead.children[1].locatorName ~= nil, "boy's head through his AI")
 CoopSwapFx.Release()
 
 -- the arc's length is a setting
@@ -78,7 +96,7 @@ CoopSwapFx.arcTime = 0.6
 CoopDebug.enabled = true
 CoopSwapFx.Update(0.016, { { kind = "swap", value = "boy" } })
 CoopDebug.Flush()
-check(#Harness.Find("^FX swap boy arc tail%-head") == 1, "report line")
+check(#Harness.Find("^FX swap boy arc boy%-tail") == 1, "report line")
 CoopSwapFx.Release()
 GameCharacter.FindBone = function() return nil end
 CharacterMngr.trico = trico("Trico3")

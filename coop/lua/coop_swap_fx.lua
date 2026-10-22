@@ -1,25 +1,27 @@
--- tlg-coop: a lightning arc along Trico when the players swap.
+-- tlg-coop: a lightning arc between Trico's tail and the boy's head when the players swap.
 --
 -- The game draws an arc from an ElectricityLocator of type "Source" to the "Destination" locators
 -- with the same locatorName, while their flags are not "Disabled" (the s14 door-blast scene puts
--- such a source on Trico's tail bone jt_Tail_17). Two fixed pairs sit on Trico, one per
--- direction, so no locator changes type after it is attached:
---   the boy's player starts the swap   -> tail to head;
---   Trico's player starts the swap     -> head to tail.
+-- such a source on Trico's tail bone jt_Tail_17; the dark-dome scenes arc to the boy's limbs).
+-- Two fixed pairs, one per direction, so no locator changes type after it is attached. The arc
+-- starts at whoever started the swap:
+--   Trico's player starts the swap   -> Trico's tail to the boy's head;
+--   the boy's player starts the swap -> the boy's head to Trico's tail.
 -- Each arc lasts CoopSwapFx.arcTime seconds, with the game's electricity sound.
 
 CoopSwapFx = CoopSwapFx or {}
 CoopSwapFx.arcTime = CoopSwapFx.arcTime or 0.6
 
-local TAIL_BONE = "jt_Tail_17"
-local HEAD_BONE = "jt_Head"
+local TAIL_BONE = "jt_Tail_17"     -- Trico's
+local HEAD_BONE = "jt_Head"        -- the boy's
 local PAIRS = {
-	boy = { name = "CoopSwapArc_TH", source = TAIL_BONE, destination = HEAD_BONE, label = "tail-head" },
-	trico = { name = "CoopSwapArc_HT", source = HEAD_BONE, destination = TAIL_BONE, label = "head-tail" },
+	trico = { name = "CoopSwapArc_TB", source = "tail", destination = "head", label = "tail-boy" },
+	boy = { name = "CoopSwapArc_BT", source = "head", destination = "tail", label = "boy-tail" },
 }
 
 function CoopSwapFx.Reset()
-	CoopSwapFx.trico = nil        -- the Trico character the locators were made for
+	CoopSwapFx.trico = nil        -- the characters the locators were made for
+	CoopSwapFx.boy = nil
 	CoopSwapFx.locators = nil     -- { boy = { src, dst }, trico = { src, dst } }
 	CoopSwapFx.live = nil         -- the pair now shown
 	CoopSwapFx.timer = 0
@@ -45,15 +47,27 @@ local function Locator(bone, name, kind)
 	return ex
 end
 
--- The two pairs for the Trico character now in the world (made again if it changed).
+-- The boy's head bone: through his character, else through his AI (as condorplayerhandymirror.lua
+-- finds his spine).
+local function BoyHead(boy)
+	local head = GameCharacter.FindBone(boy, HEAD_BONE)
+	if head then return head end
+	local ok, bone = pcall(function() return Ai2.Utils.FindBone(Ai2.Utils.GetPlayerAI(), HEAD_BONE) end)
+	return ok and bone or nil
+end
+
+-- The two pairs for the Trico and boy characters now in the world (made again if one changed).
 local function Locators()
 	local trico = CharacterMngr and CharacterMngr:GetTrico()
-	if not trico then return nil end
-	if CoopSwapFx.locators and CoopSwapFx.trico == trico then return CoopSwapFx.locators end
+	local boy = CharacterMngr and CharacterMngr:GetPlayer()
+	if not trico or not boy then return nil end
+	if CoopSwapFx.locators and CoopSwapFx.trico == trico and CoopSwapFx.boy == boy then
+		return CoopSwapFx.locators
+	end
 	local tail = GameCharacter.FindBone(trico, TAIL_BONE)
-	local head = GameCharacter.FindBone(trico, HEAD_BONE)
-	if not tail or not head then error("no " .. (tail and HEAD_BONE or TAIL_BONE)) end
-	local bones = { [TAIL_BONE] = tail, [HEAD_BONE] = head }
+	local head = BoyHead(boy)
+	if not tail or not head then error("no " .. (tail and "boy " .. HEAD_BONE or TAIL_BONE)) end
+	local bones = { tail = tail, head = head }
 	local made = {}
 	for who, pair in pairs(PAIRS) do
 		made[who] = {
@@ -62,6 +76,7 @@ local function Locators()
 		}
 	end
 	CoopSwapFx.trico = trico
+	CoopSwapFx.boy = boy
 	CoopSwapFx.locators = made
 	return made
 end
