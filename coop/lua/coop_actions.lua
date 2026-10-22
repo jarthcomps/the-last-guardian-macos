@@ -18,12 +18,14 @@
 --             whatever Trico is interested in (on a barrel box Trico breaks it); with nothing but
 --             the boy or a hint in its interest, on the dummy ahead (Trico tilts its head).
 --             With the stick held left or right: a pull with that paw (C_touch_left/right_pull),
---             sent once Trico stands still (steering waits for it, at most PENDING_TIME).
+--             sent once Trico stands still (steering waits for it; queued like the moves below).
 --   Up:       rear up on the hind legs (C_rise, which Trico takes from idle too), held while the
 --             button is.
 -- Single moves (one control command each). Sent at once while Trico stands or waits; while it
 -- sits or lies Trico is first asked to stand, and while it walks steering waits: the move then
--- goes as soon as Trico stands, within PENDING_TIME (refused and logged otherwise):
+-- goes as soon as Trico stands, within QUEUE_TIME of the press (dropped and logged otherwise).
+-- Presses made meanwhile queue up behind it (at most QUEUE_MAX waiting; a press beyond that is
+-- dropped), and each queued move goes once Trico stands again, at least SEND_GAP after the last:
 --   Triangle stomp; R1 roar; L1 threat posture (held, ended on release); Down sit, then lie down,
 --   then stand up; Left stretch (front, up, back in turn); Right hind-leg kick (left and right in
 --   turn).
@@ -54,8 +56,11 @@ local RISE_REPEAT = 0.5
 local BARREL_REACH = 15.0                     -- metres: an edible barrel this close is eaten on Circle
 local BARREL_VIEW = 30.0                      -- ... or this close while Trico sees it
 local EAT_TIME = 15.0                         -- seconds the barrel keeps the top interest level
-local PENDING_TIME = 6.0                      -- seconds a move waits for Trico to stand still (getting
-                                              -- up from sitting or stopping a walk takes 3-5 s)
+local QUEUE_TIME = 8.0                        -- seconds a move waits for Trico to stand still (getting
+                                              -- up from sitting or stopping a walk takes 3-8 s)
+local QUEUE_MAX = 2                           -- moves waiting at once
+local SEND_GAP = 1.0                          -- seconds after a move before the next one goes, so
+                                              -- Trico has started the first
 local PULL_STICK = 0.5                        -- stick x beyond which Circle pulls with that paw
 local WATCH = 3.0                             -- seconds of animation reports after an action
 local DEADZONE = 0.3
@@ -85,7 +90,9 @@ local SEATED = { "c_sit", "ext_c_sit", "c_lie", "ext_c_lie", "c_liedown", "ext_c
 function CoopActions.Reset()
 	CoopActions.jump = nil        -- { target, timer } while a jump target is held
 	CoopActions.gesture = nil     -- { type, timer } while a gesture waits for its action
-	CoopActions.pending = nil     -- { name, timer } a single move waiting for Trico to stand still
+	CoopActions.queue = {}        -- { name, timer } moves waiting for Trico to stand still, in order
+	CoopActions.pending = nil     -- the first of them (steering waits while there is one)
+	CoopActions.gap = 0
 	CoopActions.riseIn = nil
 	CoopActions.lastSwipe = "right"
 	CoopActions.watch = 0
@@ -238,18 +245,55 @@ local function Idle(anim)
 	return true
 end
 
--- A single move: at once from a standing or waiting (or, for the posture moves, seated) Trico;
--- otherwise it waits for Trico to stand (asked to, when it sits or lies). Returns the report detail.
+-- Put a move at the back of the queue. Returns false when the queue is full.
+local function Queue(name, seatedToo)
+	local q = CoopActions.queue
+	if #q >= QUEUE_MAX then return false end
+	q[#q + 1] = { name = name, timer = QUEUE_TIME, seated = seatedToo }
+	CoopActions.pending = q[1]
+	return true
+end
+
+local function Send(props, name)
+	CoopActions.gap = SEND_GAP
+	return Command(props, name)
+end
+
+-- A single move: at once from a standing or waiting (or, for the posture moves, seated) Trico
+-- with nothing queued; otherwise queued until Trico stands (asked to, when it sits or lies).
+-- Returns the report detail.
 local function Move(props, name, anim, seatedToo)
-	if Idle(anim) or (seatedToo and StartsWith(anim, SEATED)) then
-		return Command(props, name)
+	local free = #CoopActions.queue == 0 and CoopActions.gap <= 0
+	if free and (Idle(anim) or (seatedToo and StartsWith(anim, SEATED))) then
+		return Send(props, name)
 	end
-	CoopActions.pending = { name = name, timer = PENDING_TIME }
-	if StartsWith(anim, SEATED) then
+	if not Queue(name, seatedToo) then return name .. " dropped, " .. QUEUE_MAX .. " waiting" end
+	local place = #CoopActions.queue > 1 and (" behind " .. CoopActions.queue[1].name) or ""
+	if StartsWith(anim, SEATED) and not seatedToo then
 		Command(props, "stand")
-		return name .. " waiting, standing up from " .. anim
+		return name .. " waiting" .. place .. ", standing up from " .. anim
 	end
-	return name .. " waiting " .. anim
+	return name .. " waiting" .. place .. " " .. anim
+end
+
+-- The queue, each frame: drop the moves that waited too long, send the first once Trico stands.
+local function TickQueue(dt, props, anim)
+	CoopActions.gap = math.max(0, CoopActions.gap - dt)
+	local q = CoopActions.queue
+	for i = #q, 1, -1 do
+		q[i].timer = q[i].timer - dt
+		if q[i].timer <= 0 then
+			Say("AC %s refused %s", q[i].name, anim)
+			table.remove(q, i)
+		end
+	end
+	local first = q[1]
+	if first and CoopActions.gap <= 0 and (Idle(anim) or (first.seated and StartsWith(anim, SEATED))) then
+		table.remove(q, 1)
+		Say("AC %s sent %s anim=%s", first.name, Send(props, first.name), anim)
+		CoopActions.lastAction, CoopActions.watch, CoopActions.lastAnim = first.name, WATCH, nil
+	end
+	CoopActions.pending = q[1]
 end
 
 -- The edible barrel to eat: the nearest of Trico's Barrel interests in reach, or in view.
@@ -398,18 +442,7 @@ local function Step(dt, input, props, anim)
 	end
 	local down, hold = input.down or {}, input.hold or {}
 	if hold.L2 then CoopActions.riseIn = nil return end   -- aiming the lightning
-	local pend = CoopActions.pending
-	if pend then
-		pend.timer = pend.timer - dt
-		if Idle(anim) then
-			CoopActions.pending = nil
-			Say("AC %s sent %s anim=%s", pend.name, Command(props, pend.name), anim)
-			CoopActions.lastAction, CoopActions.watch, CoopActions.lastAnim = pend.name, WATCH, nil
-		elseif pend.timer <= 0 then
-			CoopActions.pending = nil
-			Say("AC %s refused %s", pend.name, anim)
-		end
-	end
+	TickQueue(dt, props, anim)
 
 	local did, detail = nil, nil
 	if down.Cross then did, detail = "jump", Jump(props, input)
@@ -421,8 +454,7 @@ local function Step(dt, input, props, anim)
 	elseif down.Triangle then did, detail = "stomp", Move(props, "stomp", anim)
 	elseif down.Circle and math.abs(input.x or 0) > PULL_STICK and math.abs(input.x) > math.abs(input.y or 0) then
 		local name = input.x > 0 and "pullRight" or "pullLeft"
-		CoopActions.pending = { name = name, timer = PENDING_TIME }
-		did, detail = "pull", name .. " waiting"
+		did, detail = "pull", Queue(name) and name .. " waiting" or name .. " dropped, " .. QUEUE_MAX .. " waiting"
 	elseif down.Circle then did, detail = "action", Action(props, input)
 	elseif down.R1 then did, detail = "roar", Move(props, "roar", anim)
 	elseif down.L1 then
@@ -487,6 +519,7 @@ end
 -- Give Trico back (when the player leaves the Trico role).
 function CoopActions.Release()
 	local props = Props()
+	CoopActions.queue = {}
 	CoopActions.pending = nil
 	pcall(DropJump, props, "released")
 	pcall(DropGesture, props, "released")

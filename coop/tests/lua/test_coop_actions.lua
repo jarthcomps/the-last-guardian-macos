@@ -131,34 +131,36 @@ aiming.hold.L2 = true
 CoopActions.Update(0.016, aiming)
 check(CoopActions.gesture == nil, "no actions while aiming")
 
--- single moves: sent from an idle Trico, refused (and reported) otherwise
+-- single moves: sent from an idle Trico, refused (and reported) otherwise; rest() lets the gap
+-- after a sent move pass
+local function rest() CoopActions.Update(1.1, btn()) end
 anim = "c_stand"
-CoopActions.Update(0.016, btn("R1"))
+rest() CoopActions.Update(0.016, btn("R1"))
 check(lastCmd() == "ControlCommand_C_roar", "R1 roar")
-CoopActions.Update(0.016, btn("Triangle"))
+rest() CoopActions.Update(0.016, btn("Triangle"))
 check(lastCmd() == "ControlCommand_C_attack_below", "Triangle stomp")
-CoopActions.Update(0.016, btn("Right"))
+rest() CoopActions.Update(0.016, btn("Right"))
 check(lastCmd() == "ControlCommand_C_attack_hind_left", "Right kick")
-CoopActions.Update(0.016, btn("Right"))
+rest() CoopActions.Update(0.016, btn("Right"))
 check(lastCmd() == "ControlCommand_C_attack_hind_right", "kicks alternate")
-CoopActions.Update(0.016, btn("Left"))
+rest() CoopActions.Update(0.016, btn("Left"))
 check(lastCmd() == "ControlCommand_C_stretch_front", "Left stretch")
-CoopActions.Update(0.016, btn("Left"))
+rest() CoopActions.Update(0.016, btn("Left"))
 check(lastCmd() == "ControlCommand_C_stretch_up", "stretches in turn")
 -- Down: sit, then lie down, then stand up
 anim = "c_wait"
-CoopActions.Update(0.016, btn("Down"))
+rest() CoopActions.Update(0.016, btn("Down"))
 check(lastCmd() == "ControlCommand_C_sit", "Down sits")
 anim = "c_sit_loop"
-CoopActions.Update(0.016, btn("Down"))
+rest() CoopActions.Update(0.016, btn("Down"))
 check(lastCmd() == "ControlCommand_C_lie_down", "Down again lies down")
 anim = "c_lie_down_loop"
 Harness.tricoProps.standCommand = "ControlCommand_C_stand_test"
-CoopActions.Update(0.016, btn("Down"))
+rest() CoopActions.Update(0.016, btn("Down"))
 check(lastCmd() == "ControlCommand_C_stand_test", "and stands up")
 -- L1: the threat posture while held, ended on release
 anim = "c_stand"
-CoopActions.Update(0.016, btn("L1"))
+rest() CoopActions.Update(0.016, btn("L1"))
 check(lastCmd() == "ControlCommand_C_threat_posture", "L1 threat")
 CoopActions.Update(0.1, btn("L1", 0, 0, true))
 check(lastCmd() == "ControlCommand_C_threat_posture", "held")
@@ -167,26 +169,72 @@ check(lastCmd() == "ControlCommand_C_threat_posture_end", "ended on release")
 -- while Trico walks a move waits (steering pauses) and goes once it stands; refused after 3 s
 anim = "c_walkC"
 n = #Harness.CallsNamed("cmd")
-CoopActions.Update(0.016, btn("R1"))
+rest() CoopActions.Update(0.016, btn("R1"))
 check(#Harness.CallsNamed("cmd") == n and CoopActions.pending and CoopActions.pending.name == "roar", "roar waits")
 CoopTrico.Update(0.016, btn(nil, 0, 1))
 check(not CoopTrico.steering, "steering waits for the move")
 anim = "c_stand"
-CoopActions.Update(0.1, btn())
+for _ = 1, 11 do CoopActions.Update(0.1, btn()) end
 check(lastCmd() == "ControlCommand_C_roar" and CoopActions.pending == nil, "roar once standing")
 anim = "c_walkC"
 n = #Harness.CallsNamed("cmd")
-CoopActions.Update(0.016, btn("Triangle"))
-for _ = 1, 61 do CoopActions.Update(0.1, btn()) end
-check(#Harness.CallsNamed("cmd") == n and CoopActions.pending == nil, "never standing: refused after 6 s")
+rest() CoopActions.Update(0.016, btn("Triangle"))
+for _ = 1, 79 do CoopActions.Update(0.1, btn()) end
+check(#Harness.CallsNamed("cmd") == n and CoopActions.pending, "still waiting before 8 s")
+for _ = 1, 2 do CoopActions.Update(0.1, btn()) end
+check(#Harness.CallsNamed("cmd") == n and CoopActions.pending == nil, "never standing: refused after 8 s")
 -- the start of a walk is not standing
 anim = "c_stand_walk_fastC"
-CoopActions.Update(0.016, btn("R1"))
+rest() CoopActions.Update(0.016, btn("R1"))
 check(#Harness.CallsNamed("cmd") == n and CoopActions.pending, "c_stand_walk_fastC is walking")
+CoopActions.Release()
+-- presses made while a move waits queue up behind it (two at most) and go in turn
+anim = "c_walkC"
+n = #Harness.CallsNamed("cmd")
+CoopActions.Update(0.016, btn("Triangle"))
+CoopActions.Update(0.3, btn())
+CoopActions.Update(0.016, btn("R1"))
+CoopActions.Update(0.3, btn())
+CoopActions.Update(0.016, btn("Left"))
+check(#CoopActions.queue == 2 and CoopActions.queue[1].name == "stomp" and CoopActions.queue[2].name == "roar"
+	and #Harness.CallsNamed("cmd") == n, "two queued, the third dropped")
+anim = "c_stand"
+CoopActions.Update(0.1, btn())
+check(lastCmd() == "ControlCommand_C_attack_below" and CoopActions.pending.name == "roar", "the first goes once standing")
+CoopActions.Update(0.5, btn())
+check(lastCmd() == "ControlCommand_C_attack_below", "the next waits for the gap")
+anim = "ext_c_attack_below"
+CoopActions.Update(0.6, btn())
+check(lastCmd() == "ControlCommand_C_attack_below", "and for Trico to stand again")
+anim = "c_stand"
+CoopActions.Update(0.1, btn())
+check(lastCmd() == "ControlCommand_C_roar" and CoopActions.pending == nil and #CoopActions.queue == 0, "then the next")
+-- each queued move has its own 8 s from its press
+anim = "c_walkC"
+rest()
+n = #Harness.CallsNamed("cmd")
+CoopActions.Update(0.016, btn("Triangle"))
+for _ = 1, 50 do CoopActions.Update(0.1, btn()) end
+CoopActions.Update(0.016, btn("R1"))
+for _ = 1, 31 do CoopActions.Update(0.1, btn()) end
+check(#CoopActions.queue == 1 and CoopActions.pending.name == "roar", "the older one dropped first")
+anim = "c_stand"
+CoopActions.Update(0.1, btn())
+check(lastCmd() == "ControlCommand_C_roar", "the younger one still goes")
+-- a posture move queued behind the gap leaves from sitting too
+anim = "c_sit_loop"
+rest()
+CoopActions.Update(0.016, btn("Down"))
+check(lastCmd() == "ControlCommand_C_lie_down", "lie down at once")
+n = #Harness.CallsNamed("cmd")
+CoopActions.Update(0.016, btn("Down"))
+check(#Harness.CallsNamed("cmd") == n and CoopActions.pending.name == "lieDown", "a quick second press waits")
+CoopActions.Update(1.1, btn())
+check(#Harness.CallsNamed("cmd") == n + 1 and lastCmd() == "ControlCommand_C_lie_down", "and goes from sitting")
 CoopActions.Release()
 -- while Trico sits, a standing move first asks it to stand
 anim = "ext_c_sit_loop"
-CoopActions.Update(0.016, btn("Right"))
+rest() CoopActions.Update(0.016, btn("Right"))
 check(lastCmd() == "ControlCommand_C_stand_test" and CoopActions.pending.name == "kickRight"
 	or lastCmd() == "ControlCommand_C_stand_test" and CoopActions.pending.name == "kickLeft", "stands up first")
 anim = "c_stand"
@@ -196,7 +244,7 @@ check(string.find(lastCmd(), "attack_hind") ~= nil, "then kicks")
 -- Circle with the stick left or right: a paw pull, once Trico stands still (steering waits)
 anim = "c_walkC"
 n = #Harness.CallsNamed("cmd")
-CoopActions.Update(0.016, btn("Circle", -0.9, 0))
+rest() CoopActions.Update(0.016, btn("Circle", -0.9, 0))
 check(CoopActions.pending and CoopActions.pending.name == "pullLeft" and #Harness.CallsNamed("cmd") == n,
 	"pull waits while Trico walks")
 CoopTrico.Update(0.016, btn(nil, -0.9, 0))
@@ -204,14 +252,14 @@ check(not CoopTrico.steering, "steering waits for the pull")
 anim = "c_stand"
 CoopActions.Update(0.1, btn(nil, -0.9, 0))
 check(lastCmd() == "ControlCommand_C_touch_left_pull" and CoopActions.pending == nil, "left paw pull once standing")
-CoopActions.Update(0.016, btn("Circle", 0.9, 0))
+rest() CoopActions.Update(0.016, btn("Circle", 0.9, 0))
 CoopActions.Update(0.1, btn())
 check(lastCmd() == "ControlCommand_C_touch_right_pull", "right paw pull")
 anim = "c_walkC"
 n = #Harness.CallsNamed("cmd")
-CoopActions.Update(0.016, btn("Circle", 0.9, 0))
-for _ = 1, 61 do CoopActions.Update(0.1, btn()) end
-check(CoopActions.pending == nil and #Harness.CallsNamed("cmd") == n, "never still: refused after 6 s")
+rest() CoopActions.Update(0.016, btn("Circle", 0.9, 0))
+for _ = 1, 81 do CoopActions.Update(0.1, btn()) end
+check(CoopActions.pending == nil and #Harness.CallsNamed("cmd") == n, "never still: refused after 8 s")
 anim = "c_stand"
 
 -- Circle near an edible barrel: the nearest one in reach (or in view) gets the top level for 15 s
