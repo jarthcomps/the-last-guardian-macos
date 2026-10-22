@@ -19,9 +19,13 @@
 --   "hold":    hold R2 to aim and fire, like the boy holding the shield up: while R2 is held the
 --              emblem is on the cursor and the ready and shot commands go out as in "both";
 --              letting go puts everything back;
---   "aimhold": hold L2 to aim: the emblem is the cursor (starting AIMHOLD_START ahead) and Trico
---              charges and fires on its own as with the boy's shield; R2 while aiming sends the
---              ready and shot commands at once. The shield's green guide beam is hidden while the
+--   "aimhold": hold L2 to aim: the emblem is the cursor and Trico charges and fires on its own
+--              as with the boy's shield; R2 while aiming sends the ready and shot commands at once.
+--              The aim is a direction from Trico's head (starting the way Trico faces, level):
+--              the right stick turns it left and right and tilts it up and down, and the emblem
+--              sits AIM_RANGE along it, so targets across gaps and up walls can be aimed at. The
+--              game's camera follows the emblem (its reticle stays at the centre of the screen),
+--              so this plays like aiming the boy's shield. The shield's green guide beam is hidden while the
 --              Trico player aims (the player gets the shield's cursor, not its beam). Letting go
 --              of L2 puts everything back.
 -- Both also turn on the free pulse mode (fire without the emblem being Trico's interest) and point
@@ -37,7 +41,12 @@ local CMD_CANCEL = "ControlCommand_C_A_tail_pulse_cancel"
 local DEADZONE = 0.25
 local SPEED = 8.0          -- cursor metres per second at full stick
 local START_RANGE = 10.0   -- where the cursor appears, ahead of Trico
-local AIMHOLD_START = 7.0  -- "aimhold": nearer, so Trico's own search for the emblem is shorter
+local AIM_RANGE = 15.0     -- "aimhold": metres from Trico's head to the emblem
+local AIM_HEAD = 3.0       -- Trico's head above his position when the bone isn't found
+local AIM_YAW_SPEED = 90   -- degrees per second at full stick
+local AIM_PITCH_SPEED = 45
+local AIM_PITCH_MIN = -35  -- degrees below level
+local AIM_PITCH_MAX = 50
 local MIN_RANGE = 4.0
 local MAX_RANGE = 25.0
 local HIDE_AFTER = 8.0     -- seconds without aiming before the cursor goes away
@@ -102,6 +111,29 @@ function CoopPulse.Step(rx, ry, fx, fz, dt)
 	local rgx, rgz = -fz, fx   -- right of the forward, as in coop_trico.lua
 	local s = SPEED * dt
 	return (fx * ry + rgx * rx) * s, (fz * ry + rgz * rx) * s
+end
+
+-- "aimhold": turn the aim direction with the right stick (right turns right: the right of a
+-- forward (x, z) is (-z, x), as in coop_trico.lua) and return the emblem's spot along it.
+function CoopPulse.AimPoint(rx, ry, dt, origin)
+	if math.sqrt(rx * rx + ry * ry) >= DEADZONE then
+		CoopPulse.aimYaw = (CoopPulse.aimYaw - rx * AIM_YAW_SPEED * dt) % 360
+		CoopPulse.aimPitch = math.max(AIM_PITCH_MIN, math.min(AIM_PITCH_MAX,
+			CoopPulse.aimPitch + ry * AIM_PITCH_SPEED * dt))
+	end
+	local yaw, pitch = math.rad(CoopPulse.aimYaw), math.rad(CoopPulse.aimPitch)
+	local flat = math.cos(pitch) * AIM_RANGE
+	return Vector(origin.X + math.sin(yaw) * flat, origin.Y + math.sin(pitch) * AIM_RANGE,
+		origin.Z + math.cos(yaw) * flat)
+end
+
+-- Trico's head, where the aim starts.
+function CoopPulse.AimOrigin(pos)
+	local ok, head = pcall(function()
+		return GameCharacter.FindBone(CharacterMngr:GetTrico(), "jt_Head").worldPosition
+	end)
+	if ok and head then return Vector(head) end
+	return Vector(pos.X, pos.Y + AIM_HEAD, pos.Z)
 end
 
 -- Keep the cursor between MIN_RANGE and MAX_RANGE from Trico (on the ground plane).
@@ -277,7 +309,12 @@ local function StepAimHold(dt, input, props, pos, fx, fz)
 	local cu = Ai2.CondorUtils
 	if not CoopPulse.active then
 		CoopPulse.active = true
-		CoopPulse.cursor = Vector(pos.X + fx * AIMHOLD_START, pos.Y, pos.Z + fz * AIMHOLD_START)
+		-- start the way Trico faces (else the camera's way), level
+		local dir = info.ai2Ext and info.ai2Ext.dirXZ
+		local dx0, dz0 = fx, fz
+		if dir and (dir.X ~= 0 or dir.Z ~= 0) then dx0, dz0 = dir.X, dir.Z end
+		CoopPulse.aimYaw = math.deg(math.atan2(dx0, dz0))
+		CoopPulse.aimPitch = 0
 		CoopPulse.shot = false
 		CoopPulse.shotIn = nil
 		CoopPulse.shots = CoopPulse.shots + 1
@@ -285,10 +322,7 @@ local function StepAimHold(dt, input, props, pos, fx, fz)
 		cu.EnableFreePulseMode(props)
 	end
 	CoopPulse.firing = FIRE_HOLD    -- for as long as L2 is held
-	local dx, dz = CoopPulse.Step(input.rx or 0, input.ry or 0, fx, fz, dt)
-	local c = CoopPulse.cursor
-	local x, z = CoopPulse.Clamp(pos, c.X + (dx or 0), c.Z + (dz or 0))
-	CoopPulse.cursor = Ground(props, Vector(x, c.Y, z))
+	CoopPulse.cursor = CoopPulse.AimPoint(input.rx or 0, input.ry or 0, dt, CoopPulse.AimOrigin(pos))
 	if CoopPulse.ownEmblem then inst.triggerAimPos = CoopPulse.cursor
 	else SetEmblem(CoopPulse.cursor) end
 	pcall(cu.OverwriteTailPulseDst, props, CoopPulse.cursor)
