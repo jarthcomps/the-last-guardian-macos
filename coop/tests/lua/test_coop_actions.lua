@@ -229,6 +229,8 @@ local boyPos = Vector(0, 0, -10)
 local savedPlayer = Ai2.Utils.GetPlayerAI
 Ai2.Utils.GetPlayerAI = function() return { pos = boyPos } end
 Ai2.Utils.Navmesh.CheckSameIsland = function(props, from, to, ex) return (from.Z > 11) == (to.Z > 11) end
+check(CoopActions.forceEdges == "always", "the default: always (Jarth's choice)")
+CoopActions.forceEdges = "near"
 CoopActions.spEdgeNames = nil
 local edges = CoopActions.SpEdges()
 check(#edges == 2 and edges[1].name == "Edge_0" and not edges[1].valid and near(edges[1].to.Z, 12), "the level's edges listed")
@@ -268,6 +270,27 @@ CoopActions.forceEdges = "always"
 CoopActions.Update(0.016, btn("Cross"))
 check(CoopActions.jump and CoopActions.jump.forced == "Edge_0", "always: switched on with the boy away")
 CoopActions.Release()
+-- a chained jump (its start where another edge ends: column to column): under "near" only with
+-- the boy riding, not just beside Trico
+Harness.objects.Edge_1 = { start = { worldPosition = Vector(0, 4, 12) }, ["end"] = { worldPosition = Vector(0, 4, 22) }, attr = "" }
+Class = function(c) if c == "AiSpPathEdge" then return { "Edge_0", "Edge_far", "Edge_1" } end return {} end
+CoopActions.spEdgeNames = nil
+local list = CoopActions.SpEdges()
+check(not CoopActions.Chained(list[1], list) and CoopActions.Chained(list[3], list), "Edge_1 chains on from Edge_0's end")
+CoopActions.forceEdges = "near"
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 4, 12)
+boyPos, riding = Vector(1, 4, 11), false
+local mayC, whyC = CoopActions.MayForce(Harness.tricoProps, list[3])
+check(not mayC and string.find(whyC, "riding", 1, true), "near, boy beside: a chained jump left off")
+riding = true
+check(CoopActions.MayForce(Harness.tricoProps, list[3]) == true, "near, boy riding: a chained jump allowed")
+riding = false
+check(CoopActions.MayForce(Harness.tricoProps, list[1]) == true, "near, boy beside: the first jump allowed")
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, 0)
+Harness.objects.Edge_1 = nil
+Class = function(c) if c == "AiSpPathEdge" then return { "Edge_0", "Edge_far" } end return {} end
+CoopActions.spEdgeNames = nil
+CoopActions.forceEdges = "always"
 Harness.tricoProps.currentInfo.controlMode = "EVENT"
 local before = #edgeLog
 CoopActions.Update(0.016, btn("Cross"))
@@ -283,6 +306,18 @@ Class, MS, CoopActions.spEdgeNames = nil, nil, nil
 Harness.objects.Edge_0, Harness.objects.Edge_far = nil, nil
 Ai2.Utils.GetPlayerAI = savedPlayer
 
+-- debug: the boy put over Trico's back once, riding reported
+local placed = {}
+MS = { BoySetPosition = function(x, y, z) placed[#placed + 1] = { x, y, z } end, BoyIsRidingOnCondor = function() return true end }
+CoopDebug.enabled = true
+CoopActions.testBoy = { at = 0.5, up = 6 }
+for _ = 1, 10 do CoopActions.Update(0.1, btn()) end
+check(#placed == 1 and near(placed[1][2], 6), "test boy: placed once, 6 m over Trico")
+CoopDebug.Flush()
+check(#Harness.Find("^AC test boy riding=true") >= 1, "test boy: riding reported")
+CoopActions.testBoy, MS = nil, nil
+CoopDebug.enabled = false
+CoopDebug.queue, Harness.lightbar = {}, {}
 -- nothing while the lightning is aimed (L2 held)
 local aiming = btn("Square")
 aiming.hold.L2 = true

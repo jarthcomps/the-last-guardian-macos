@@ -948,6 +948,7 @@ end
 --                  stopped and set off again over and over; here he stops only once his own
 --                  stopping distance reaches what is left to the pose (an edge, a wall, release).
 CoopTrico.hooks = CoopTrico.hooks or {}
+local JUMP_APPROACH_TYPES = { "MV_C_WALKSTOP", "MV_C_WALKSLOW", "MV_C_WALK" }
 local function SteeringManual(t)
 	return CoopTrico.steering and CoopTrico.strategy == "ctrl" and type(t) == "table" and t.manualMode
 		and not t.forcedStop
@@ -987,6 +988,13 @@ function CoopTrico.InstallHooks()
 					walk.accelLevel = (len > CTRL_FAST_PUSH and types[#types] == "MV_C_WALKFAST") and "high" or "low"
 					walk.stopAccelLevel = "low"
 				end
+			elseif type(t) == "table" and not t.forcedStop and CoopActions and CoopActions.jump
+				and not CoopTrico.steering then
+				-- a Cross jump held: his own approach to the take-off point in his ordinary walk
+				-- (his movement mode, with the boy's interest lowered, allowed only the slow walk:
+				-- 9 s for 4.5 m, coop-h-jump4)
+				t.useMoveTypes = JUMP_APPROACH_TYPES
+				t.coopMoveTypes = true
 			elseif type(t) == "table" and t.coopMoveTypes then
 				-- (his action's own state outlives the hold: our gaits go with it)
 				t.useMoveTypes, t.coopMoveTypes = nil, nil
