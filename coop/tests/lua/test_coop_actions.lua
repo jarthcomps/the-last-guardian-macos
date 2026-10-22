@@ -233,6 +233,34 @@ anim = "c_stand"
 for _ = 1, 12 do CoopActions.Update(0.1, btn()) end
 check(#Harness.CallsNamed("cmd") == n, "and never sent later")
 
+-- L3 tapped alone (a "turn" event): face the stick's way on the spot, or right round
+anim = "c_stand"
+CoopInput = { events = {} }
+local function tap(input)
+	CoopInput.events = { { kind = "turn" } }
+	CoopActions.Update(0.016, input)
+	CoopInput.events = {}
+end
+rest()
+Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
+tap(btn())
+check(string.find(lastCmd(), "turn_narrow") ~= nil, "centred stick: about-turn: " .. lastCmd())
+rest()
+-- stick held the way Trico already faces: nothing to do
+local before = #Harness.CallsNamed("cmd")
+CoopTrico.latch = nil
+Harness.objects._trico_camera = { worldPosition = Vector(1, 3, -10) }   -- camera forward is about +Z
+tap(btn(nil, 0, 1))
+check(#Harness.CallsNamed("cmd") == before, "already facing that way")
+rest()
+CoopTrico.latch = nil
+tap(btn(nil, -1, 0))   -- stick left: the left of +Z is +X
+check(lastCmd() == "ControlCommand_C_turn_90_left", "stick left: a quarter turn left: " .. lastCmd())
+CoopInput = nil
+CoopTrico.latch = nil
+Harness.objects._trico_camera = nil
+rest()
+
 -- a posture move queued behind the gap leaves from sitting too
 anim = "c_sit_loop"
 rest()
@@ -241,9 +269,42 @@ check(lastCmd() == "ControlCommand_C_lie_down", "lie down at once")
 n = #Harness.CallsNamed("cmd")
 CoopActions.Update(0.016, btn("Down"))
 check(#Harness.CallsNamed("cmd") == n and CoopActions.pending.name == "lieDown", "a quick second press waits")
+anim = "c_sit_to_lie_down"   -- Trico started the first one
 CoopActions.Update(1.1, btn())
 check(#Harness.CallsNamed("cmd") == n + 1 and lastCmd() == "ControlCommand_C_lie_down", "and goes from sitting")
 CoopActions.Release()
+
+-- a sent move is watched: sent again while Trico's animation doesn't change, three times at most
+anim = "c_stand"
+rest()
+CoopDebug.enabled = true
+n = #Harness.CallsNamed("cmd")
+CoopActions.Update(0.016, btn("R1"))
+check(#Harness.CallsNamed("cmd") == n + 1, "roar sent")
+CoopActions.Update(0.3, btn())
+check(#Harness.CallsNamed("cmd") == n + 1, "not resent within 0.5 s")
+CoopActions.Update(0.3, btn())
+check(#Harness.CallsNamed("cmd") == n + 2 and lastCmd() == "ControlCommand_C_roar", "resent")
+CoopActions.Update(0.6, btn())
+check(#Harness.CallsNamed("cmd") == n + 3, "and once more")
+CoopActions.Update(0.6, btn())
+check(#Harness.CallsNamed("cmd") == n + 3 and CoopActions.sent == nil, "then given up")
+CoopDebug.Flush()
+check(#Harness.Find("^AC roar not started") == 1, "the miss is logged")
+-- started: no resend
+rest()
+n = #Harness.CallsNamed("cmd")
+CoopActions.Update(0.016, btn("R1"))
+anim = "ext_c_roar_start"
+CoopActions.Update(0.1, btn())
+CoopActions.Update(1.0, btn())
+check(#Harness.CallsNamed("cmd") == n + 1 and CoopActions.sent == nil, "started: sent once")
+CoopDebug.Flush()
+check(#Harness.Find("^AC roar started anim=ext_c_roar_start") == 1, "the start is logged")
+CoopDebug.enabled = false
+Harness.lightbar = {}
+anim = "c_stand"
+rest()
 -- while Trico sits, a standing move first asks it to stand
 anim = "ext_c_sit_loop"
 rest() CoopActions.Update(0.016, btn("Right"))

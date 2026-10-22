@@ -64,7 +64,7 @@ check(#ex == 1 and ex[1][4] == false, "goal not excluded")
 local lv = Harness.CallsNamed("level")
 check(#lv == 1 and lv[1][4] == "CoopTrico_Steer" and lv[1][5] == "addMax", "top interest level")
 check(#Harness.CallsNamed("overwrite") == 0, "approach left to the AI")
-check(CoopTrico.forward[3] == "cam", "forward source kept for the report")
+check(CoopTrico.forward[3] == "cam*", "forward source kept for the report (latched)")
 
 -- goal refreshes every 0.3 s, not every frame; the entity is reused
 CoopTrico.Update(0.1, pad)
@@ -182,6 +182,69 @@ check(not CoopTrico.turning and near(CoopTrico.goal.Z, -8) and CoopTrico.nav == 
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 check(not ow.condition() and not CoopTrico.turning, "released")
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
+
+-- on a narrow beam the side goal is off the navmesh: Trico turns on the spot instead
+Harness.reachable = function(from, to) return math.abs(to.X) < 1 end   -- 2 m wide, along Z
+Harness.calls = {}
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+local spot = Harness.CallsNamed("cmd")
+check(#spot == 1 and spot[1][3] == "ControlCommand_C_turn_narrow_right" and CoopTrico.nav == "spot-aboutRight"
+	and #Harness.CallsNamed("level") == 0, "about-turn on the spot, no goal: " .. tostring(spot[1] and spot[1][3]))
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+check(#Harness.CallsNamed("cmd") == 1, "not asked again within 1.5 s")
+for _ = 1, 16 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
+check(#Harness.CallsNamed("cmd") == 2, "asked again while Trico still faces away")
+Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, -1)
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+check(not CoopTrico.turning and near(CoopTrico.goal.Z, -8) and #Harness.CallsNamed("cmd") == 2, "turned: walks along the beam")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
+Harness.reachable = function(from, to) return true end
+-- which turn: the right of a facing (x, z) is (-z, x)
+check(CoopTrico.TurnCommand(0, 1, -1, 0) == "turn90Right" and CoopTrico.TurnCommand(0, 1, 1, 0) == "turn90Left",
+	"quarter turns")
+check(CoopTrico.TurnCommand(0, 1, 0.3, -0.95) == "aboutLeft" and CoopTrico.TurnCommand(0, 1, -0.3, -0.95) == "aboutRight",
+	"about-turns, on the stick's side")
+
+-- the camera's direction is latched while the stick is held
+CoopTrico.strategy = "goal"
+Harness.objects._trico_camera = { worldPosition = Vector(0, 3, -8) }   -- forward +Z
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(near(CoopTrico.goal.Z, 8), "forward is the camera's")
+Harness.objects._trico_camera = { worldPosition = Vector(-8, 3, 0) }   -- the camera swings: forward +X
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 0.2, y = 1 })
+check(near(CoopTrico.goal.X, 0, 2) and CoopTrico.goal.Z > 7, "same thumb, same way while held")
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 1, y = 0 })    -- the stick swings round 90 degrees: read again
+check(CoopTrico.forward[1] > 0.9, "a big swing reads the camera again")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+check(CoopTrico.latch == nil, "let go: latch cleared")
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(CoopTrico.goal.X > 7, "pressed again: the camera as it is now")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+
+-- Trico-relative: up is the way Trico faces, whatever the camera
+CoopTrico.relative = "trico"
+Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, -1)
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(near(CoopTrico.goal.Z, -8) and CoopTrico.forward[3] == "trico", "Trico-relative forward")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+CoopTrico.relative = "camera"
+Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
+Harness.objects._trico_camera = { worldPosition = Vector(0, 3, -8) }
+
+-- a queued move holds steering for its first 1.5 s only
+CoopActions = { queueTime = 8, pending = { name = "stomp", timer = 8 } }
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(not CoopTrico.steering, "a fresh queued move: steering waits")
+CoopActions.pending.timer = 6.4
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(CoopTrico.steering, "after 1.5 s the stick wins")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+CoopActions = nil
 
 -- errors in the game's AI are contained and reported once (with the debug channel on)
 CoopDebug.enabled = true

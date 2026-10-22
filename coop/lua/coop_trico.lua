@@ -16,6 +16,13 @@
 --               start: a goal far round from Trico's facing is first replaced by one to the
 --               side, re-placed as Trico turns, until Trico faces the stick's way.
 -- With the stick released, Trico is asked to stop and its AI is left alone.
+--
+-- The stick is camera-relative by default, with the camera's direction latched when the stick
+-- leaves the dead zone and kept until it comes back (or the stick swings round more than
+-- RELATCH degrees), so a camera that moves under a steady thumb doesn't move the goal.
+-- CoopTrico.relative = "trico" makes it Trico-relative instead: up walks the way Trico faces,
+-- left and right turn him. Where the side goal that starts a turn is off Trico's navmesh (a
+-- narrow ledge or beam), Trico is asked to turn on the spot (the game's turn commands) instead.
 
 CoopTrico = CoopTrico or {}
 
@@ -44,7 +51,18 @@ local ARRIVING = 3.0           -- ... or how close Trico must get to it
 local MIN_PATH_GOAL = 2.0      -- shortest navmesh path end worth walking to
 local REPORT = 0.5             -- seconds between debug reports
 
+local RELATCH = 60.0           -- degrees the stick must swing before the camera is read again
+local TURN_GAP = 1.5           -- seconds between turn-on-the-spot requests
+local YIELD = 1.5              -- seconds steering waits for a queued move (coop_actions.lua)
+
 CoopTrico.strategy = CoopTrico.strategy or "goal"
+CoopTrico.relative = CoopTrico.relative or "camera"
+CoopTrico.commands = {
+	turn90Left = "ControlCommand_C_turn_90_left",
+	turn90Right = "ControlCommand_C_turn_90_right",
+	aboutLeft = "ControlCommand_C_turn_narrow_left",    -- 180 degrees on the spot (fits ledges)
+	aboutRight = "ControlCommand_C_turn_narrow_right",
+}
 
 function CoopTrico.Reset()
 	CoopTrico.steering = false
@@ -56,6 +74,8 @@ function CoopTrico.Reset()
 	CoopTrico.forward = nil        -- { x, z, source } of the last goal
 	CoopTrico.nav = nil
 	CoopTrico.turning = false
+	CoopTrico.latch = nil          -- { fx, fz, source, stick angle } while the stick is held
+	CoopTrico.turnIn = 0
 end
 
 local function Props()
@@ -210,6 +230,31 @@ function CoopTrico.TurnGoal(pos, faceX, faceZ, dx, dz, turning)
 	return Vector(pos.X + lx * TURN_DISTANCE, pos.Y, pos.Z + lz * TURN_DISTANCE), Vector(lx, 0, lz)
 end
 
+-- The turn-on-the-spot command that turns Trico from facing (faceX, faceZ) towards the way
+-- (wayX, wayZ): an about-turn beyond 120 degrees, else a quarter turn, on the way's side (the
+-- right of a facing (x, z) is (-z, x)).
+function CoopTrico.TurnCommand(faceX, faceZ, wayX, wayZ)
+	local right = (-faceZ) * wayX + faceX * wayZ >= 0
+	if wayX * faceX + wayZ * faceZ < -0.5 then return right and "aboutRight" or "aboutLeft" end
+	return right and "turn90Right" or "turn90Left"
+end
+
+-- The frame the stick is read in, as a forward (x, z) and its source: Trico's facing
+-- ("trico" steering), else the camera's, latched while the stick is held.
+function CoopTrico.Frame(sx, sy, pos, dirXZ)
+	if CoopTrico.relative == "trico" and dirXZ then return dirXZ.X, dirXZ.Z, "trico" end
+	local angle = math.deg(math.atan2(sx, sy))
+	local l = CoopTrico.latch
+	if l then
+		local swing = math.abs((angle - l[4] + 180) % 360 - 180)
+		if swing <= RELATCH then return l[1], l[2], l[3] end
+	end
+	local ok, fx, fz, src = pcall(CoopTrico.CameraForward, pos)
+	if not ok or not fx then return nil end
+	CoopTrico.latch = { fx, fz, src .. "*", angle }
+	return fx, fz, src .. "*"
+end
+
 local function DropGoal(props)
 	if not CoopTrico.goalLive then return end
 	CoopTrico.goalLive = false
@@ -224,6 +269,7 @@ local function Release(props)
 	CoopTrico.steering = false
 	CoopTrico.goal = nil
 	CoopTrico.turning = false
+	CoopTrico.latch = nil
 	DropGoal(props)
 	if not props then return end
 	if CoopTrico.strategy == "interest" then
@@ -285,9 +331,15 @@ function CoopTrico.Update(dt, input)
 	local sx, sy, len = CoopTrico.Stick(input)
 	-- a jump or a gesture (coop_actions.lua) has its own target: steering waits for it (the stick
 	-- then only picks the side or the way)
-	if CoopActions and (CoopActions.jump or CoopActions.gesture or CoopActions.pending) then sx = nil end
+	-- (a queued move only for its first YIELD seconds: after that the stick wins and the move
+	-- waits for Trico to stop)
+	local p = CoopActions and CoopActions.pending
+	local yielding = p and (CoopActions.queueTime or 8) - (p.timer or 0) < YIELD
+	if CoopActions and (CoopActions.jump or CoopActions.gesture or yielding) then sx = nil end
+	CoopTrico.turnIn = math.max(0, (CoopTrico.turnIn or 0) - dt)
 	if not sx then
 		if CoopTrico.steering then Release(props) end
+		if not CoopTrico.Stick(input) then CoopTrico.latch = nil end
 		return
 	end
 
@@ -298,8 +350,7 @@ function CoopTrico.Update(dt, input)
 	local info = props.currentInfo
 	local pos = info.aiPos
 	local dirXZ = info.ai2Ext and info.ai2Ext.dirXZ
-	local okF, fx, fz, src = pcall(CoopTrico.CameraForward, pos)
-	if not okF then fx, fz, src = nil, nil, nil end
+	local fx, fz, src = CoopTrico.Frame(sx, sy, pos, dirXZ)
 	CoopTrico.forward = { fx or 0, fz or 0, src or "trico" }
 	local goal, dir, nav, fallback
 	for _, scale in ipairs(NAV_STEPS) do
@@ -328,6 +379,20 @@ function CoopTrico.Update(dt, input)
 		local turnGoal, turnDir = nil, nil
 		if wayX then
 			turnGoal, turnDir = CoopTrico.TurnGoal(pos, dirXZ.X, dirXZ.Z, wayX, wayZ, wasTurning)
+		end
+		if turnGoal and not Reachable(props, pos, turnGoal) then
+			-- no room to walk round (a ledge, a beam): turn on the spot, and let the turn play
+			if CoopTrico.turnIn <= 0 then
+				CoopTrico.turnIn = TURN_GAP
+				local name = CoopTrico.TurnCommand(dirXZ.X, dirXZ.Z, wayX, wayZ)
+				pcall(Ai2.Utils.ReqCtrlCmd, info.ai2Ext, CoopTrico.commands[name])
+				CoopTrico.nav = "spot-" .. name
+				DropGoal(props)
+				CoopTrico.steering = true
+				CoopTrico.goal = nil
+				CoopTrico.turning = true
+			end
+			return
 		end
 		if turnGoal then
 			goal, dir, nav = turnGoal, turnDir, "turn"
