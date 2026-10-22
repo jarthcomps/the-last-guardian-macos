@@ -34,15 +34,16 @@ lightning follows the boy's aim as usual.
 
 | Input | Trico |
 |---|---|
-| Left stick | Walk and run where you point (relative to the camera) |
+| Left stick | Walk where you point (relative to the camera); in tight spots he turns on the spot first |
+| L3 (click the left stick) | Turn on the spot to face where the stick points, or right round with the stick centred |
 | Right stick | Turn the camera around Trico (see "The camera") |
 | Cross | Jump: to a ledge across a gap in the stick's direction, otherwise a pounce |
 | Square | Swipe (the stick picks the side) |
 | Triangle | Stomp |
 | Circle | Eat a nearby barrel of food; otherwise act on what Trico is looking at (a barrel box gets broken) |
 | Circle + stick left / right | Pull with the left / right paw |
-| L2 (hold) | Aim the lightning: the shield's target marker appears ahead of Trico |
-| Right stick, while L2 is held | Move the target |
+| L2 (hold) | Aim the lightning: the shield's marker appears where Trico looks, and the camera follows it |
+| Right stick, while L2 is held | Turn the aim left and right, tilt it up and down |
 | R2, while L2 is held | Fire now (Trico also fires by itself while aimed) |
 | R1 | Roar |
 | L1 (hold) | Threat posture (let go to end it) |
@@ -51,9 +52,10 @@ lightning follows the boy's aim as usual.
 | D-pad left | Stretch |
 | D-pad right | Hind-leg kick |
 
-Moves happen when Trico can do them. If it is sitting or walking it first stands up or stops,
+Moves happen when Trico can do them. If he is sitting or walking he first stands up or stops,
 then does the move. A second press made meanwhile waits its turn behind the first (two at most;
-a move that can't happen within about 8 seconds is dropped).
+a move that can't happen within about 8 seconds is dropped). Quick taps count: every press
+reaches Trico, however short.
 
 ## The camera
 
