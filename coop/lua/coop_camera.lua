@@ -154,6 +154,8 @@ local function Untune()
 	CoopCamera.frame = nil
 	CoopCamera.orbitState = nil
 	CoopCamera.tricoSeen, CoopCamera.boySeen = nil, nil   -- measured again for the next pin
+	if param and CoopCamera.Hold then CoopCamera.Hold(param, false) end
+	CoopCamera.held = nil
 	CoopCamera.spiking, CoopCamera.goodPos, CoopCamera.spikeFor = nil, nil, 0
 end
 
@@ -519,12 +521,30 @@ end
 -- While some of Trico's own turns and slides play, every position the game gives for him (his
 -- entity, his AI, his bones) jumps to near the world origin for a few seconds while his model
 -- stays put, and a camera aimed at his neck flies off there ("he vanished into a glitched area").
--- So while his position jumps more than SPIKE metres from the last good one, the Trico framing
--- aims at the boy instead (the "Default" target) and comes back to Trico once it is real again;
--- a jump lasting SPIKE_TIME is a real move (a story scene placing him elsewhere).
+-- So while his position is more than SPIKE metres from the last good one:
+--   up to HOLD_TIME   the camera holds still: the pinned set's follow springs are set to no
+--                     strength (their own values kept and put back), so it neither moves nor
+--                     turns towards the false position;
+--   up to ACCEPT_TIME the Trico framing aims at the boy instead (the "Default" target);
+--   after that        the jump is real (a story scene placing him elsewhere): back on Trico.
+-- It comes back to Trico as soon as his position is real again.
 local SPIKE = 15.0
-local SPIKE_TIME = 4.0
+local HOLD_TIME = 5.0
+local ACCEPT_TIME = 10.0
+CoopCamera.holdSprings = CoopCamera.holdSprings or {
+	"Base_SpringBasePos_Str", "Base_SpringBasePosXZ_Str", "Base_SpringBasePosY_Str",
+	"Rod_SpringPosXZ_Str", "Rod_SpringLength_Str", "Rod_SpringPitch_Str", "Rod_SpringYaw_Str",
+	"Gaze_SpringGazePos_Str", "Gaze_SpringLookYaw_Str", "Gaze_SpringLookPitch_Str",
+}
 local function RawTricoPos()
+	-- (debug: CoopCamera.testSpike = { at = seconds, length = seconds } fakes one, to see the hold)
+	local ts = CoopCamera.testSpike
+	if ts then
+		CoopCamera.testClock = (CoopCamera.testClock or 0)
+		if CoopCamera.testClock >= ts.at and CoopCamera.testClock < ts.at + ts.length then
+			return Vector(0.3, 0, -0.2)
+		end
+	end
 	local ok, p = pcall(function()
 		local info = Ai2.Utils.GetCondorAIProps().currentInfo
 		return (info.work and info.work.GetMySelfPos) or info.aiPos
@@ -533,19 +553,43 @@ local function RawTricoPos()
 	return nil
 end
 
+local function Hold(param, on)
+	if on and not CoopCamera.held then
+		CoopCamera.held = {}
+		for _, key in ipairs(CoopCamera.holdSprings) do
+			local ok, old = pcall(function() return param[key] end)
+			if ok and type(old) == "number" then
+				CoopCamera.held[key] = old
+				pcall(function() param[key] = 0 end)
+			end
+		end
+	elseif not on and CoopCamera.held then
+		for key, old in pairs(CoopCamera.held) do pcall(function() param[key] = old end) end
+		CoopCamera.held = nil
+	end
+end
+CoopCamera.Hold = Hold
+
 function CoopCamera.Spike(dt, param)
+	if CoopCamera.testSpike then CoopCamera.testClock = (CoopCamera.testClock or 0) + dt end
 	local p = RawTricoPos()
 	if not p or not param then return end
 	local good = CoopCamera.goodPos
 	local far = good and ((p.X - good.X) ^ 2 + (p.Z - good.Z) ^ 2 > SPIKE * SPIKE)
 	if far then CoopCamera.spikeFor = (CoopCamera.spikeFor or 0) + dt else CoopCamera.spikeFor = 0 end
-	local spiking = far and CoopCamera.spikeFor < SPIKE_TIME
-	if not spiking then CoopCamera.goodPos = Vector(p) end
-	if spiking ~= (CoopCamera.spiking or false) then
-		CoopCamera.spiking = spiking
-		CoopCamera.spikes = (CoopCamera.spikes or 0) + (spiking and 1 or 0)
-		pcall(function() param.Target_TargetType = spiking and "Default" or "Trico" end)
-		if CoopDebug then CoopDebug.Print("CA spike %s", spiking and "on: aiming at the boy" or "off") end
+	local stage = nil
+	if far and CoopCamera.spikeFor < HOLD_TIME then stage = "hold"
+	elseif far and CoopCamera.spikeFor < ACCEPT_TIME then stage = "boy" end
+	if not stage then CoopCamera.goodPos = Vector(p) end
+	if stage ~= CoopCamera.spiking then
+		if stage == "hold" and not CoopCamera.spiking then CoopCamera.spikes = (CoopCamera.spikes or 0) + 1 end
+		CoopCamera.spiking = stage
+		Hold(param, stage == "hold")
+		pcall(function() param.Target_TargetType = stage == "boy" and "Default" or "Trico" end)
+		if CoopDebug then
+			CoopDebug.Print("CA spike %s", stage == "hold" and "on: holding still"
+				or stage == "boy" and "lasting: aiming at the boy" or "off")
+		end
 	end
 end
 

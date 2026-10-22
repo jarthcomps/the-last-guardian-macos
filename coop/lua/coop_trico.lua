@@ -70,6 +70,9 @@ local REPORT = 0.5             -- seconds between debug reports
 
 local FOCUS_TIME = 2.0         -- seconds after the Trico player's last input that Trico keeps
                                -- his mind off the boy
+local BAN_TIME = 15.0          -- ... and keeps the idle-fidget bans below (a shake or a stretch
+                               -- takes no commands for up to 7 s, so a pause between presses
+                               -- must not let one start)
 local FOCUS_REFRESH = 0.5
 local FOCUS_LASTS = 2.5        -- each lowering of the boy's interest lapses by itself after this
 local KEEP_ANGLE = 30.0        -- degrees the stick may wobble while the goal stays put
@@ -296,7 +299,8 @@ end
 -- the pose stays well beyond it, moving on with him every frame; nearer means a slower gait.
 local DIRECT_NEAR = 12.0       -- metres ahead at the edge of the dead zone
 local DIRECT_FAR = 25.0        -- ... and at full stick
-function CoopTrico.DirectMove(props, pos, dirX, dirZ, len)
+-- The free walk's intermediate path (its "pose") DIRECT_NEAR..DIRECT_FAR ahead, built in place.
+function CoopTrico.BuildAhead(props, pos, dirX, dirZ, len)
 	local info = props.currentInfo
 	local ai = info.ai2Ext
 	local dist = DIRECT_NEAR + (DIRECT_FAR - DIRECT_NEAR) * (len or 1)
@@ -323,6 +327,12 @@ function CoopTrico.DirectMove(props, pos, dirX, dirZ, len)
 	Ai2BuildPath(ai, dp, 0)
 	info.apDestination = target
 	info.apDestinationDir = dir
+	CoopTrico.goal = target
+	return target
+end
+
+function CoopTrico.DirectMove(props, pos, dirX, dirZ, len)
+	local target = CoopTrico.BuildAhead(props, pos, dirX, dirZ, len)
 	-- every frame: a request runs once, and with none pending his own cost calculation picks the
 	-- next frame's move (a stop, with no destination of his own)
 	-- forward, along neither his behaviour path nor a line path (a line-path flag left over from
@@ -331,7 +341,19 @@ function CoopTrico.DirectMove(props, pos, dirX, dirZ, len)
 	Ai2.CondorUtils.Path.ReqDiscretePathMode(props, false, false, false, false)
 	props.moveMngr:RequestForward({ isFreeMove = true, manualMode = true, alongLinePath = false })
 	CoopTrico.directRequests = (CoopTrico.directRequests or 0) + 1
-	CoopTrico.goal = target
+	return target
+end
+
+-- "ctrl" walking: the pose ahead, and his own forward move set as the planned move (his planning
+-- is off, so nothing replaces it), in the free walk's manual mode: the action layer's MoveForward
+-- then walks him towards the pose with his own gaits, the rest to walk being the way to the pose
+-- (with no path at all, the walk animation played on the spot).
+CoopTrico.manualMove = { isFreeMove = true, manualMode = true, alongLinePath = false }
+function CoopTrico.ManualMove(props, pos, dirX, dirZ, len)
+	local target = CoopTrico.BuildAhead(props, pos, dirX, dirZ, len)
+	Ai2.CondorUtils.Path.ReqDiscretePathMode(props, false, false, false, false)
+	props.plannedMove = "ForwardMove"
+	props.moveParam = CoopTrico.manualMove
 	return target
 end
 
@@ -524,7 +546,7 @@ function CoopTrico.Focus(dt, input, props)
 	if Active(input) then CoopTrico.idleFor = 0 else CoopTrico.idleFor = (CoopTrico.idleFor or 99) + dt end
 	CoopTrico.focusIn = (CoopTrico.focusIn or 0) - dt
 	CoopTrico.focused = CoopTrico.idleFor < FOCUS_TIME
-	if CoopTrico.focused then Ban(props) else CoopTrico.Unban() end
+	if CoopTrico.idleFor < BAN_TIME then Ban(props) else CoopTrico.Unban() end
 	if not CoopTrico.focused or CoopTrico.focusIn > 0 then return end
 	CoopTrico.focusIn = FOCUS_REFRESH
 	local ai = props.currentInfo.ai2Ext
@@ -718,6 +740,12 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		CoopTrico.skipping = { approach = props.approach, was = props.approach.skipCreate }
 		props.approach.skipCreate = true
 	end
+	-- a planned move none of his actions handle: with none at all (nil) his action layer runs its
+	-- stop every frame and stops the walk commands below
+	if props.plannedMove == nil or props.plannedMove == "MoveStop" then
+		props.plannedMove = "CoopManual"
+		props.moveParam = nil
+	end
 	CoopTrico.steering = true
 	local okA, anim = pcall(Ai2.Utils.GetCurAnimState, ai)
 	anim = okA and tostring(anim) or ""
@@ -755,9 +783,18 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		end
 		return
 	end
-	local gear = CoopTrico.CtrlGear(len)
-	pcall(Ai2.Utils.ReqCtrlCmd, ai, gear)
-	CoopTrico.nav = "ctrl-walk"
+	local ok, err = pcall(CoopTrico.ManualMove, props, pos, wx, wz, len)
+	if ok then
+		CoopTrico.nav = "ctrl-walk"
+	else
+		-- (no path to be had: his walk commands, which at least start him)
+		pcall(Ai2.Utils.ReqCtrlCmd, ai, CoopTrico.CtrlGear(len))
+		CoopTrico.nav = "ctrl-cmd"
+		if err ~= CoopTrico.lastError then
+			CoopTrico.lastError = err
+			if CoopDebug then CoopDebug.Print("TR error %s", tostring(err)) end
+		end
+	end
 end
 
 function CoopTrico.Unskip(props)
@@ -765,6 +802,10 @@ function CoopTrico.Unskip(props)
 	if not sk then return end
 	CoopTrico.skipping = nil
 	sk.approach.skipCreate = sk.was
+	if props and (props.plannedMove == "CoopManual" or props.moveParam == CoopTrico.manualMove) then
+		props.plannedMove = nil
+		props.moveParam = nil
+	end
 	if props and props.currentInfo and props.currentInfo.ai2Ext then
 		pcall(Ai2.Utils.ReqCtrlCmd, props.currentInfo.ai2Ext, CoopTrico.ctrlStop)
 	end

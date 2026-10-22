@@ -390,8 +390,10 @@ check(bw.IdlingBan and bw.SitIdlingBan and bw.BoyDaisukiProcBan and Harness.tric
 	"focused: idling, affection and jump slides banned")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 for _ = 1, 25 do CoopTrico.Update(0.1, { x = 0, y = 0 }) end
+check(not CoopTrico.focused and bw.IdlingBan, "2 s later: the boy back in mind, idle fidgets still banned")
+for _ = 1, 130 do CoopTrico.Update(0.1, { x = 0, y = 0 }) end
 check(not bw.IdlingBan and bw.SitIdlingBan and not bw.BoyDaisukiProcBan and not Harness.tricoProps.moveMngr.prioSelect,
-	"2 s later: ours lifted, the story's SitIdlingBan kept")
+	"15 s later: ours lifted, the story's SitIdlingBan kept")
 CoopTrico.Update(0.016, { x = 0, y = 1 })
 CoopTrico.Release()
 check(not bw.IdlingBan and not CoopTrico.banned, "released: lifted")
@@ -450,6 +452,53 @@ CoopTrico.Update(0.016, { x = 0, y = 1 })
 check(CoopTrico.steering, "after 1.5 s the stick wins")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 CoopActions = nil
+
+-- "ctrl": his planning off, a planned move of our own (none at all makes his action layer stop
+-- him every frame), walk commands, and both put back when the stick is let go
+CoopTrico.strategy = "ctrl"
+Harness.tricoProps = Harness.NewTricoProps(0, 0, 0)
+Harness.tricoProps.plannedMove = "MoveStop"
+Harness.calls = {}
+-- (no path functions in the harness yet: the walk commands, which at least start him)
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(Harness.tricoProps.approach.skipCreate == true, "ctrl: his planning skipped")
+check(Harness.tricoProps.plannedMove == "CoopManual", "ctrl: a planned move his actions leave alone")
+local cmds = Harness.CallsNamed("cmd")
+check(#cmds == 1 and cmds[1][3] == "ControlCommand_C_walk_fast" and CoopTrico.nav == "ctrl-cmd",
+	"ctrl without a path: full stick walks fast")
+-- with the free walk's path: the pose 25 m ahead (full stick), his own forward move in manual mode
+local built = {}
+Harness.tricoProps.currentInfo.detailPath = { Navmesh = 1, Interval = 1 }
+Ai2.CondorUtils.GetPath = function() return built end
+Ai2.CondorUtils.Path = { ReqDiscretePathMode = Harness.Record("discrete") }
+Ai2.Actions = { Condor = { Path = { Pack = {} } } }
+Ai2BuildPath = Harness.Record("build")
+Harness.calls = {}
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(Harness.tricoProps.plannedMove == "ForwardMove" and Harness.tricoProps.moveParam.manualMode
+	and CoopTrico.nav == "ctrl-walk", "ctrl: his forward move, manual")
+check(built.BasePos and near(built.BasePos.Z, 25) and near(built.BaseDir.Z, 1) and #Harness.CallsNamed("build") == 1,
+	"ctrl: the pose 25 m ahead")
+check(#Harness.CallsNamed("cmd") == 0, "ctrl: no walk commands while the path works")
+Harness.tricoProps.plannedMove = "MoveTurn"
+Harness.tricoProps.moveParam = nil
+Ai2BuildPath = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(Harness.tricoProps.plannedMove == "MoveTurn", "ctrl: a move of his own is not overwritten")
+Ai2BuildPath = Harness.Record("build")
+Harness.tricoProps.plannedMove = "ForwardMove"
+Harness.tricoProps.moveParam = CoopTrico.manualMove
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+check(not Harness.tricoProps.approach.skipCreate, "ctrl: planning back on release")
+check(Harness.tricoProps.plannedMove == nil and Harness.tricoProps.moveParam == nil, "ctrl: our forward move dropped")
+Ai2BuildPath, Ai2.CondorUtils.GetPath, Ai2.CondorUtils.Path, Ai2.Actions = nil, nil, nil, nil
+Harness.tricoProps.plannedMove = "CoopManual"
+CoopTrico.Unskip(Harness.tricoProps)
+check(Harness.tricoProps.plannedMove == "CoopManual", "ctrl: unskip only once")
+Harness.tricoProps.plannedMove = nil
+CoopTrico.strategy = "goal"
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+CoopTrico.Update(0.016, { x = 0, y = 0 })
 
 -- errors in the game's AI are contained and reported once (with the debug channel on)
 CoopDebug.enabled = true

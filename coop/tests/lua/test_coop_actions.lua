@@ -126,6 +126,50 @@ check(not CoopTrico.steering, "steering waits while the jump target is held")
 CoopActions.Release()
 check(CoopActions.jump == nil, "released")
 
+-- the level's own jump spots first: Instruction interests in auto-Trico's search volume (attached
+-- once the Trico player is there), across a special edge, the one nearest the stick's way
+local function spot(name, x, y, z) return { worldPosition = Vector(x, y, z), GetName = function() return name end } end
+local spots = { spot("Inst_back", 0, 6, -20), spot("Inst_walk", 2, 0, 20), spot("Inst_left", 20, 6, 4),
+	spot("Inst_pillar", -3, 6, 25), spot("Inst_far", 0, 6, 60) }
+local vol = { name = "autoTrico_findSpEdgeVol" }
+Ai2.Utils.GetVolumeByAssetName = function(props, name) return name == vol.name and vol or nil end
+Ai2.Utils.AttachVolume = Harness.Record("attach")
+Ai2.Utils.DetachVolume = Harness.Record("detach")
+Ai2.Utils.IsInVolumeSubType = function(v, types)
+	check(v == vol and types[1] == "Instruction" and types[2] == "Instruction_30s", "searched the volume for Instructions")
+	return true, spots
+end
+Ai2.Utils.Navmesh.CheckSameIsland = function(props, from, to, excludeSpEdge)
+	if to.Y < 3 then return true end   -- the ground Trico walks on
+	return not excludeSpEdge           -- the raised spots: only through a special edge
+end
+CoopActions.Update(0.016, btn())
+check(#Harness.CallsNamed("attach") == 1, "volume attached ahead of the press")
+CoopActions.Update(0.016, btn())
+check(#Harness.CallsNamed("attach") == 1, "attached once")
+local nMoved = #Harness.moved
+CoopActions.Update(0.016, btn("Cross"))
+check(CoopActions.jump and CoopActions.jump.entity == spots[4] and near(CoopActions.jump.target.Z, 25),
+	"the pillar ahead (not the walkable spot, the one behind or the one out of range)")
+lv = Harness.CallsNamed("level")
+check(lv[#lv][3] == spots[4] and lv[#lv][4] == "CoopActions_Jump" and lv[#lv][5] == "addMax", "the spot's own interest to the top")
+check(#Harness.moved == nMoved, "no made-up interest moved there")
+-- the stick to the left picks the spot that way
+CoopActions.Update(0.016, btn("Cross", -1, 0))
+check(CoopActions.jump.entity == spots[3], "the spot to the left")
+local resets = Harness.CallsNamed("levelReset")
+check(resets[#resets][3] == spots[4], "the earlier spot let go")
+-- held up to 20 s, until he is within 5.5 m of it
+for _ = 1, 150 do CoopActions.Update(0.1, btn()) end
+check(CoopActions.jump ~= nil, "still held after 15 s")
+Harness.tricoProps.currentInfo.aiPos = Vector(16, 0, 4)
+CoopActions.Update(0.016, btn())
+check(CoopActions.jump == nil, "there: dropped")
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, 0)
+CoopActions.Release()
+check(#Harness.CallsNamed("detach") == 1 and CoopActions.edgeVolume == nil, "volume detached on release")
+Ai2.Utils.GetVolumeByAssetName, Ai2.Utils.IsInVolumeSubType = nil, nil
+
 -- nothing while the lightning is aimed (L2 held)
 local aiming = btn("Square")
 aiming.hold.L2 = true

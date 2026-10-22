@@ -6,10 +6,15 @@
 -- player skips the handshake: the scripts put such an interest ahead of Trico and set what the
 -- handshake sets (condorinstruction.lua), so the game's own action runs, approach and all. Sending
 -- the action's control command alone does nothing while Trico idles (c_wait), as tried in game.
---   Cross:    jump. Ahead (the stick's way, else Trico's facing) the scripts look for a point on
---             another navmesh island that a special edge leads to; an auto-Trico style interest
---             there makes Trico take the jump its own way. With none, the jump gesture (Trico
---             pounces, as the boy's gesture does without a target).
+--   Cross:    jump. First the level's own jump spots: the Instruction interests (where the boy's
+--             "jump" gesture sends Trico) inside auto-Trico's search volume, on another navmesh
+--             island that a special edge (a jump) leads to, the one nearest the stick's way
+--             (else Trico's facing) within EDGE_CONE; it gets the top interest level, as
+--             auto-Trico's special-edge mode does, so Trico walks up and takes the jump his own
+--             way (forward jumps onto pillars and ledges). Else a point ahead on such an island
+--             (a grid of distances, angles and heights) gets an auto-Trico style interest. With
+--             neither, the jump gesture (Trico pounces, as the boy's gesture does without a
+--             target).
 --   Square:   the attack gesture (a side swipe, the side the game picks from the target's angle,
 --             so the target goes on the stick's side).
 --   Circle:   eat: the nearest edible barrel Trico knows (within BARREL_REACH, or in its view
@@ -44,6 +49,12 @@ local JUMP_ANGLES = { 0, 25, -25 }            -- degrees from the jump's way
 local JUMP_HEIGHTS = { 0, 5, -5, 10, -10 }    -- metres up and down (ledges, rock piles)
 local JUMP_ARRIVED = 4.0                      -- metres from the target that count as there
 local JUMP_TIMEOUT = 10.0
+local EDGE_VOLUME = "autoTrico_findSpEdgeVol"   -- auto-Trico's volume for finding jump spots
+local EDGE_TYPES = { "Instruction", "Instruction_30s" }
+local EDGE_CONE = 70.0                          -- degrees either side of the jump's way
+local EDGE_RANGE = 45.0                         -- metres at most
+local EDGE_TIMEOUT = 20.0                       -- seconds to walk up and jump
+local EDGE_ARRIVED = 5.5                        -- metres from the spot that count as there (as auto-Trico)
 local GESTURE_NAME = "CoopActions_Gesture"
 local GESTURE_INTEREST = "Instruction_Unique"
 local GESTURE_LEVEL_NAME = "CoopActions_Gesture"
@@ -157,6 +168,59 @@ function CoopActions.Way(props, input)
 	local len = math.sqrt(wx * wx + wz * wz)
 	if len < 0.001 then return faceX, faceZ end
 	return wx / len, wz / len
+end
+
+-- The search volume is attached as soon as the Trico player is there (an attach is only a request
+-- the engine carries out later, so it can't wait for the press).
+function CoopActions.AttachEdgeVolume(props)
+	if CoopActions.edgeVolume then return CoopActions.edgeVolume end
+	local vol = Ai2.Utils.GetVolumeByAssetName(props, EDGE_VOLUME)
+	if not vol then return nil end
+	Ai2.Utils.AttachVolume(props, vol)
+	CoopActions.edgeVolume = vol
+	CoopActions.edgeProps = props
+	return vol
+end
+
+function CoopActions.DetachEdgeVolume()
+	local vol, props = CoopActions.edgeVolume, CoopActions.edgeProps
+	CoopActions.edgeVolume, CoopActions.edgeProps = nil, nil
+	if vol and props then pcall(Ai2.Utils.DetachVolume, props, vol) end
+end
+
+-- A level jump spot (an Instruction interest a special edge leads to) the stick's way: the
+-- entity and its position, or nil.
+function CoopActions.FindEdgeInterest(props, wayX, wayZ)
+	local vol = CoopActions.edgeVolume
+	if not vol then return nil end
+	local found, list = Ai2.Utils.IsInVolumeSubType(vol, EDGE_TYPES)
+	if not found or type(list) ~= "table" then
+		Say("AC edge search: no Instructions in the volume")
+		return nil
+	end
+	local pos = TricoAt(props)
+	local check = Ai2.Utils.Navmesh.CheckSameIsland
+	local best, bestPos, bestScore, bestD = nil, nil, nil, nil
+	local cosCone = math.cos(math.rad(EDGE_CONE))
+	for _, intr in ipairs(list) do
+		local okP, p = pcall(function() return intr.worldPosition end)
+		if okP and p then
+			local dx, dz = p.X - pos.X, p.Z - pos.Z
+			local d = math.sqrt(dx * dx + dz * dz)
+			local cos = d > 0.01 and (dx * wayX + dz * wayZ) / d or 1
+			if d <= EDGE_RANGE and cos >= cosCone then
+				local okA, walk = pcall(check, props, pos, p, true)
+				local okB, edge = pcall(check, props, pos, p, false)
+				if okA and okB and walk == false and edge == true then
+					-- the nearest to the stick's way first, then the nearest
+					local score = (1 - cos) * 40 + d
+					if not bestScore or score < bestScore then best, bestPos, bestScore, bestD = intr, p, score, d end
+				end
+			end
+		end
+	end
+	Say("AC edge search: %d Instructions, %s", #list, best and string.format("best %.1f m away", bestD) or "none across an edge the stick's way")
+	return best, bestPos
 end
 
 -- A point a special edge leads to (another navmesh island, reachable only through the edge).
@@ -448,6 +512,11 @@ local function DropJump(props, why)
 	local j = CoopActions.jump
 	if not j then return end
 	CoopActions.jump = nil
+	if j.entity then
+		pcall(Ai2.Utils.ResetInterestLevelAddition, props.currentInfo.ai2Ext, j.entity, JUMP_LEVEL_NAME)
+		Say("AC jump end %s", why)
+		return
+	end
 	local root = FindObject(JUMP_NAME)
 	local ai = props and props.currentInfo and props.currentInfo.ai2Ext
 	if root and ai then
@@ -459,11 +528,21 @@ end
 
 local function Jump(props, input)
 	local wayX, wayZ = CoopActions.Way(props, input)
+	local ai = props.currentInfo.ai2Ext
+	local okE, spot, spotPos = pcall(CoopActions.FindEdgeInterest, props, wayX, wayZ)
+	if okE and spot then
+		DropJump(props, "replaced")
+		Ai2.Utils.RegisterInterest(ai, spot)
+		Ai2.Utils.InterestExclusionSwitching(ai, spot, false)
+		Ai2.Utils.InterestLevelAddition(ai, spot, JUMP_LEVEL_NAME, "addMax")
+		CoopActions.jump = { target = Vector(spotPos), timer = EDGE_TIMEOUT, entity = spot, arrived = EDGE_ARRIVED }
+		local okN, name = pcall(function() return spot:GetName() end)
+		return string.format("spot %s %.1f,%.1f,%.1f", okN and tostring(name) or "?", spotPos.X, spotPos.Y, spotPos.Z)
+	end
 	local target = CoopActions.FindJumpTarget(props, wayX, wayZ)
 	if not target then
 		return "gesture " .. Gesture(props, "Gesture_Jump", wayX, wayZ)
 	end
-	local ai = props.currentInfo.ai2Ext
 	local root = NewInterest(JUMP_NAME, JUMP_INTEREST)
 	SetWorldPosition(root, tostring(target))
 	Ai2.Utils.RegisterInterest(ai, root)
@@ -522,7 +601,7 @@ local function Step(dt, input, props, anim)
 		local pos = TricoAt(props)
 		local dx, dz = pos.X - j.target.X, pos.Z - j.target.Z
 		local okSame, same = pcall(Ai2.Utils.Navmesh.CheckSameIsland, props, pos, j.target, true)
-		if math.sqrt(dx * dx + dz * dz) < JUMP_ARRIVED or (okSame and same) then
+		if math.sqrt(dx * dx + dz * dz) < (j.arrived or JUMP_ARRIVED) or (okSame and same) then
 			DropJump(props, "arrived")
 		elseif j.timer <= 0 then
 			DropJump(props, "timeout")
@@ -532,6 +611,7 @@ local function Step(dt, input, props, anim)
 		CoopActions.riseIn = nil
 		return
 	end
+	if not CoopActions.edgeVolume then pcall(CoopActions.AttachEdgeVolume, props) end
 	local down, hold = input.down or {}, input.hold or {}
 	if hold.L2 then CoopActions.riseIn = nil return end   -- aiming the lightning
 	TickQueue(dt, props, anim)
@@ -645,6 +725,7 @@ function CoopActions.Release()
 	CoopActions.sent = nil
 	pcall(DropJump, props, "released")
 	pcall(DropGesture, props, "released")
+	CoopActions.DetachEdgeVolume()
 	CoopActions.riseIn = nil
 end
 
