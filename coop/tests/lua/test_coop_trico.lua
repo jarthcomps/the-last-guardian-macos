@@ -509,6 +509,33 @@ check(Harness.tricoProps.plannedMove == "ForwardMove" and Harness.tricoProps.mov
 check(built.BasePos and near(built.BasePos.Z, 25) and near(built.BaseDir.Z, 1) and #Harness.CallsNamed("build") == 1,
 	"ctrl: the pose 25 m ahead")
 check(#Harness.CallsNamed("cmd") == 0, "ctrl: no walk commands while the path works")
+-- never past walkable ground: the navmesh ends 6 m ahead (a drop into the cavern), or carries on
+-- 10 m lower (the cavern floor): the pose stops 1.5 m short of the edge; at the edge, onto him
+local savedNear = Ai2FindNearestPosition
+Ai2FindNearestPosition = function(ai, p, ext)
+	if p.Z > 6.01 then return { found = 0 } end
+	return { found = 1, pos = Vector(p.X, 0.5, p.Z) }
+end
+CoopTrico.reachCache = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(near(built.BasePos.Z, 4.5) and CoopTrico.blocked == 6 and CoopTrico.nav == "ctrl-edge6", "ctrl: the pose short of a drop")
+Ai2FindNearestPosition = function(ai, p, ext)
+	return { found = 1, pos = Vector(p.X, p.Z > 8.01 and -10 or 0.5, p.Z) }
+end
+CoopTrico.reachCache = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(near(built.BasePos.Z, 6.5) and CoopTrico.blocked == 8, "ctrl: a cliff down to the cavern floor is an edge too")
+Ai2FindNearestPosition = function(ai, p, ext)
+	if p.Z > 1.01 then return { found = 0 } end
+	return { found = 1, pos = Vector(p.X, 0.5, p.Z) }
+end
+CoopTrico.reachCache = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(near(built.BasePos.Z, 0) and CoopTrico.blocked == 1, "ctrl: at the edge: the pose on him (he stops)")
+Ai2FindNearestPosition = savedNear
+CoopTrico.reachCache = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(near(built.BasePos.Z, 25) and CoopTrico.blocked == nil, "ctrl: open ground again: the full pose")
 -- still standing half a second into the walk (after a sit): his own forward request, once a second
 local savedAnimK = Ai2.Utils.GetCurAnimState
 Ai2.Utils.GetCurAnimState = function() return "c_stand" end

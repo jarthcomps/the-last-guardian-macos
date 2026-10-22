@@ -306,11 +306,57 @@ end
 -- the pose stays well beyond it, moving on with him every frame; nearer means a slower gait.
 local DIRECT_NEAR = 12.0       -- metres ahead at the edge of the dead zone
 local DIRECT_FAR = 25.0        -- ... and at full stick
--- The free walk's intermediate path (its "pose") DIRECT_NEAR..DIRECT_FAR ahead, built in place.
-function CoopTrico.BuildAhead(props, pos, dirX, dirZ, len)
+-- How far along (dirX, dirZ) from pos the ground stays walkable, up to `dist` metres: in REACH_STEP
+-- steps, each must have his navmesh right under it (within REACH_BOX) and no more than
+-- REACH_DROP up or down from the last. The manual free walk follows its pose without asking for
+-- ground ("he walked on air off the cliff"), so the pose may never lie past this.
+local REACH_STEP = 1.0
+local REACH_BOX = Vector(0.6, 2.5, 0.6)
+local REACH_DROP = 1.5
+local REACH_EVERY = 0.2        -- seconds between measures (kept while the way stays within 5 degrees)
+local EDGE_MARGIN = 1.5        -- metres short of the edge the pose stops
+function CoopTrico.WalkableReach(props, pos, dirX, dirZ, dist)
+	local ai = props.currentInfo.ai2Ext
+	local lastY = pos.Y
+	local d = 0
+	while d + REACH_STEP <= dist do
+		local probe = Vector(pos.X + dirX * (d + REACH_STEP), lastY, pos.Z + dirZ * (d + REACH_STEP))
+		local ok, near = pcall(Ai2FindNearestPosition, ai, probe, REACH_BOX)
+		if not ok or type(near) ~= "table" or near.found ~= 1 or not near.pos then return d end
+		local dx, dz = near.pos.X - probe.X, near.pos.Z - probe.Z
+		if dx * dx + dz * dz > REACH_BOX.X * REACH_BOX.X * 2 then return d end
+		if math.abs(near.pos.Y - lastY) > REACH_DROP then return d end
+		lastY = near.pos.Y
+		d = d + REACH_STEP
+	end
+	return dist
+end
+
+local function Reach(props, pos, dirX, dirZ, dist, dt)
+	if CoopTrico.noReach then return dist end   -- (debug: the limit off, to show the old walk on air)
+	local c = CoopTrico.reachCache
+	CoopTrico.reachIn = (CoopTrico.reachIn or 0) - (dt or 0)
+	if c and CoopTrico.reachIn > 0 and c.dirX * dirX + c.dirZ * dirZ > 0.996 and c.dist >= dist then
+		return math.max(0, c.reach - DistanceXZ(c.pos, pos))
+	end
+	local r = CoopTrico.WalkableReach(props, pos, dirX, dirZ, dist)
+	CoopTrico.reachCache = { pos = Vector(pos), dirX = dirX, dirZ = dirZ, dist = dist, reach = r }
+	CoopTrico.reachIn = REACH_EVERY
+	return r
+end
+
+-- The free walk's intermediate path (its "pose") DIRECT_NEAR..DIRECT_FAR ahead, built in place,
+-- never past the walkable ground (EDGE_MARGIN short of an edge; nearer than that, onto him).
+function CoopTrico.BuildAhead(props, pos, dirX, dirZ, len, dt)
 	local info = props.currentInfo
 	local ai = info.ai2Ext
 	local dist = DIRECT_NEAR + (DIRECT_FAR - DIRECT_NEAR) * (len or 1)
+	local reach = Reach(props, pos, dirX, dirZ, dist, dt)
+	CoopTrico.blocked = nil
+	if reach < dist then
+		CoopTrico.blocked = reach
+		dist = math.max(0, reach - EDGE_MARGIN)
+	end
 	local target = Vector(pos.X + dirX * dist, pos.Y, pos.Z + dirZ * dist)
 	local fit = Ai2FitNavmesh and Ai2FitNavmesh(ai.navMesh, target, Ai2.Approach.upperLimit, Ai2.Approach.pathLowerLimit)
 	if fit and fit.found == 1 then target = Vector(target.X, fit.pos.Y, target.Z) end
@@ -372,8 +418,8 @@ function CoopTrico.CtrlTypes(len)
 	return CTRL_TYPES[#CTRL_TYPES][2]
 end
 
-function CoopTrico.ManualMove(props, pos, dirX, dirZ, len)
-	local target = CoopTrico.BuildAhead(props, pos, dirX, dirZ, len)
+function CoopTrico.ManualMove(props, pos, dirX, dirZ, len, dt)
+	local target = CoopTrico.BuildAhead(props, pos, dirX, dirZ, len, dt)
 	Ai2.CondorUtils.Path.ReqDiscretePathMode(props, false, false, false, false)
 	props.curMoveTypes = CoopTrico.CtrlTypes(len)
 	local walk = props.moveMngr and props.moveMngr.walk
@@ -515,6 +561,15 @@ local function Report(props)
 	local info = props and props.currentInfo
 	if not info or not info.aiPos then return end
 	local p = CoopTrico.Position(props) or info.aiPos
+	-- (whether he stands on his navmesh: how far the nearest point is, across and up or down)
+	if Ai2FindNearestPosition then
+		local okG, ground = pcall(Ai2FindNearestPosition, info.ai2Ext, p, Vector(2, 6, 2))
+		if okG and type(ground) == "table" and ground.found == 1 and ground.pos then
+			CoopDebug.Print("TG on xz=%.2f dy=%.2f", DistanceXZ(ground.pos, p), p.Y - ground.pos.Y)
+		else
+			CoopDebug.Print("TG off")
+		end
+	end
 	local g = CoopTrico.goal
 	local intr = info.interestEntity
 	local okName, intrName = pcall(function() return intr and intr:GetName() end)
@@ -847,8 +902,10 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 	local spinning = string.find(anim, "slide", 1, true) or string.find(anim, "turn", 1, true)
 		or string.find(anim, "_sit", 1, true) or string.find(anim, "_lie", 1, true)   -- (getting up)
 		or string.find(anim, "stand_walk", 1, true)   -- (setting off: 2 s at a crawl)
+	-- (at an edge he stands by design: not stuck)
+	local atEdge = CoopTrico.blocked and CoopTrico.blocked < EDGE_MARGIN + 1.0
 	local from = CoopTrico.progressFrom
-	if not from or spinning or DistanceXZ(from, pos) > CTRL_PROGRESS then
+	if not from or spinning or atEdge or DistanceXZ(from, pos) > CTRL_PROGRESS then
 		CoopTrico.progressFrom = Vector(pos)
 		CoopTrico.stuckFor = 0
 	else
@@ -968,7 +1025,7 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		end
 		return
 	end
-	local ok, err = pcall(CoopTrico.ManualMove, props, pos, wx, wz, len)
+	local ok, err = pcall(CoopTrico.ManualMove, props, pos, wx, wz, len, dt)
 	-- after he has sat (and stood up), his action layer leaves the planned move alone until a
 	-- move request comes through: still standing CTRL_KICK into the walk, his own forward
 	-- request (the same move), once a second at most
@@ -991,7 +1048,7 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		return
 	end
 	if ok then
-		CoopTrico.nav = "ctrl-walk"
+		CoopTrico.nav = CoopTrico.blocked and string.format("ctrl-edge%.0f", CoopTrico.blocked) or "ctrl-walk"
 	else
 		-- (no path to be had: his walk commands, which at least start him)
 		pcall(Ai2.Utils.ReqCtrlCmd, ai, CoopTrico.CtrlGear(len))
