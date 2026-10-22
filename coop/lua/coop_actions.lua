@@ -575,6 +575,20 @@ local function Step(dt, input, props, anim)
 	end
 end
 
+-- A single move asked for from elsewhere (steering's turns on the spot): queued like a press,
+-- unless one of those moves already waits or is being started. Returns the report detail.
+function CoopActions.Request(name)
+	local props = Props()
+	if not props or not props.currentInfo then return "no Trico" end
+	for _, q in ipairs(CoopActions.queue) do
+		if q.name == name then return name .. " already waiting" end
+	end
+	if CoopActions.sent and CoopActions.sent.name == name then return name .. " already sent" end
+	local detail = Move(props, name, AnimState(props))
+	Say("AC %s requested: %s", name, tostring(detail))
+	return detail
+end
+
 -- Call once per frame with the Trico player's input (nil when nobody plays Trico).
 function CoopActions.Update(dt, input)
 	dt = dt or 0

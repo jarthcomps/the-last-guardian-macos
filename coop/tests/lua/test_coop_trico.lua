@@ -2,6 +2,11 @@ dofile(string.match(debug.getinfo(1, "S").source, "^@(.*/)") .. "harness.lua")
 
 Load("game/scripts/coop/coop_debug")
 Load("game/scripts/coop/coop_trico")
+-- the default goal distances sit beyond Trico's 6.5 m "reached" range (as auto-Trico's do)
+check(CoopTrico.distances.min > 6.5 and CoopTrico.distances.turn > 6.5 and CoopTrico.distances.goal >= 14,
+	"goals beyond the arrival range")
+-- the tests below use shorter distances, as the first steering did
+CoopTrico.distances = { goal = 8.0, min = 4.0, turn = 5.0, behind = 7.0 }
 
 local function near(a, b) return math.abs(a - b) < 1e-3 end
 
@@ -168,8 +173,15 @@ CoopTrico.strategy = "steer"
 Harness.calls = {}
 Harness.tricoProps = Harness.NewTricoProps(0, 0, 0)   -- facing +Z
 Harness.objects._trico_camera = { worldPosition = Vector(0, 3, -8) }  -- forward is +Z
+-- standing: turns on the spot at once
 CoopTrico.Update(0.016, { x = 0, y = -1 })  -- back: straight behind Trico
-check(CoopTrico.turning and CoopTrico.nav == "turn", "turn started")
+check(CoopTrico.turning and CoopTrico.nav == "spot-aboutRight" and #Harness.CallsNamed("cmd") == 1, "standing: turns on the spot")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+Harness.calls = {}
+-- walking: curves round through a side goal
+Harness.tricoProps.plannedMove = "MoveForward"
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+check(CoopTrico.turning and CoopTrico.nav == "turn", "walking: turn started")
 check(near(math.abs(CoopTrico.goal.X), 5) and near(CoopTrico.goal.Z, 0), "side goal")
 check(#Harness.CallsNamed("level") == 1 and #Harness.CallsNamed("overwrite") == 1, "interest and overwrite")
 ow = Harness.CallsNamed("overwrite")[1][4]
@@ -206,6 +218,7 @@ CoopTrico.Update(0.016, { x = 0, y = 0 })
 -- on a narrow beam the side goal is off the navmesh: Trico turns on the spot instead
 Harness.reachable = function(from, to) return math.abs(to.X) < 1 end   -- 2 m wide, along Z
 Harness.calls = {}
+CoopTrico.turnIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
 local spot = Harness.CallsNamed("cmd")
 check(#spot == 1 and spot[1][3] == "ControlCommand_C_turn_narrow_right" and CoopTrico.nav == "spot-aboutRight"
@@ -221,6 +234,27 @@ CoopTrico.Update(0.016, { x = 0, y = -1 })
 check(not CoopTrico.turning and near(CoopTrico.goal.Z, -8) and #Harness.CallsNamed("cmd") == 2, "turned: walks along the beam")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
+Harness.reachable = function(from, to) return true end
+-- with the action queue there, the spot turn goes through it (stood up first, watched, resent)
+local requested
+CoopActions = { queueTime = 8, Request = function(name) requested = name end }
+CoopTrico.turnIn = 0
+Harness.calls = {}
+Harness.reachable = function(from, to) return math.abs(to.X) < 1 end
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+check(requested == "aboutRight" and #Harness.CallsNamed("cmd") == 0, "the spot turn is a queued move")
+-- while the turn plays, no second one (it would turn him back)
+requested = nil
+local savedAnim = Ai2.Utils.GetCurAnimState
+Ai2.Utils.GetCurAnimState = function() return "c_turn_narrow_right" end
+for _ = 1, 30 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
+check(requested == nil, "no second turn while one plays")
+Ai2.Utils.GetCurAnimState = function() return "c_stand" end
+for _ = 1, 6 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
+check(requested == "aboutRight", "after it, still facing away: another")
+Ai2.Utils.GetCurAnimState = savedAnim
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+CoopActions = nil
 Harness.reachable = function(from, to) return true end
 -- which turn: the right of a facing (x, z) is (-z, x)
 check(CoopTrico.TurnCommand(0, 1, -1, 0) == "turn90Right" and CoopTrico.TurnCommand(0, 1, 1, 0) == "turn90Left",
@@ -284,7 +318,7 @@ Harness.tricoProps.isInjuredMovementMode = true
 CoopTrico.Update(0.5, nil)
 CoopDebug.Flush()
 local tr = Harness.Find("^TR ")
-check(#tr == 1 and tr[1][2] == "TR goal off p=0.0,0.0,0.0 g=- pm=nil rq=nil in=nil it=nil md=nil",
+check(#tr == 1 and string.find(tr[1][2], "TR goal off p=0.0,0.0,0.0 g=- pm=nil rq=nil in=nil it=nil md=nil an=", 1, true) == 1,
 	"report line: " .. tostring(tr[1] and tr[1][2]))
 local ts = Harness.Find("^TS ")
 check(#ts == 1, "second report line")
