@@ -3,6 +3,10 @@ dofile(string.match(debug.getinfo(1, "S").source, "^@(.*/)") .. "harness.lua")
 Load("game/scripts/coop/coop_debug")
 Load("game/scripts/coop/coop_pulse")
 check(CoopPulse.method == "aimhold", "aimhold is the default")
+check(CoopPulse.enabled == false, "the Trico player's lightning is off by default (waits on an engine fix)")
+check(not CoopPulse.Aiming({ hold = { L2 = true } }), "off: L2 is not aiming")
+CoopPulse.enabled = true   -- (the lightning's own tests below)
+check(CoopPulse.Aiming({ hold = { L2 = true } }) and not CoopPulse.Aiming({ hold = {} }), "on: L2 held is aiming")
 CoopPulse.method = "emblem"
 
 local function near(a, b) return math.abs(a - b) < 1e-3 end
@@ -306,6 +310,22 @@ CoopPulse.Update(0.1, pad(0, 1, true))
 check(inst.triggerObj ~= nil, "firing again")
 CoopPulse.Release()
 check(inst.triggerObj == nil and not CoopPulse.active, "released")
+
+-- switched off: L2 and R2 do nothing for the lightning: no emblem, no pulse commands, no free
+-- pulse mode, no hidden beam; anything of ours still up is put back, the boy's own aim untouched
+CoopPulse.Release()
+CoopPulse.enabled = false
+inst.triggerObj, inst.rayObj = nil, { entityFlags = "" }
+Harness.calls = {}
+for _ = 1, 10 do CoopPulse.Update(0.1, { x = 0, y = 0, rx = 1, ry = 0, hold = { L2 = true, R2 = true }, down = { R2 = true } }) end
+check(not CoopPulse.active and inst.triggerObj == nil and #Harness.CallsNamed("cmd") == 0
+	and #Harness.CallsNamed("free") == 0 and inst.rayObj.entityFlags == "", "off: L2 and R2 do nothing")
+local boyEmblem = { name = "boy's" }
+inst.triggerObj = boyEmblem
+CoopPulse.Update(0.1, { x = 0, y = 0, rx = 1, ry = 0, hold = { L2 = true }, down = {} })
+check(inst.triggerObj == boyEmblem, "off: the boy's own aim untouched")
+inst.triggerObj = nil
+CoopPulse.enabled = true
 
 -- no Trico yet: nothing happens
 Harness.tricoProps = nil

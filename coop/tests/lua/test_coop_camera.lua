@@ -261,8 +261,10 @@ CoopCamera.Update(0.5, true, stick)
 check(tf.Rod_PitchBaseDeg == -25 + 20, "tilted, as far as allowed")
 stick.hold.L2 = true
 stick.rx = 1
+CoopPulse = { Aiming = function(i) return i.hold.L2 == true end }   -- (the lightning on)
 CoopCamera.Update(0.5, true, stick)
 check(near(tf.Rod_YawBaseDeg, yawOf(240), 1.01), "the stick aims while L2 is held")
+CoopPulse = nil
 stick.hold.L2 = nil
 stick.rx, stick.ry = 0, 0
 CoopCamera.Update(0.4, true, stick)

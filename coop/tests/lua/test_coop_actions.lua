@@ -318,11 +318,17 @@ check(#Harness.Find("^AC test boy riding=true") >= 1, "test boy: riding reported
 CoopActions.testBoy, MS = nil, nil
 CoopDebug.enabled = false
 CoopDebug.queue, Harness.lightbar = {}, {}
--- nothing while the lightning is aimed (L2 held)
+-- nothing while the lightning is aimed (L2 held, the lightning on); with it off L2 blocks nothing
+CoopPulse = { enabled = true, Aiming = function(i) return i.hold.L2 == true end }
 local aiming = btn("Square")
 aiming.hold.L2 = true
 CoopActions.Update(0.016, aiming)
 check(CoopActions.gesture == nil, "no actions while aiming")
+CoopPulse.Aiming = function() return false end
+CoopActions.Update(0.016, aiming)
+check(CoopActions.gesture ~= nil, "the lightning off: L2 held blocks nothing")
+CoopActions.Release()
+CoopPulse = nil
 
 -- single moves: sent from an idle Trico, refused (and reported) otherwise; rest() lets the gap
 -- after a sent move pass

@@ -512,7 +512,8 @@ local function Orbit(dt, input)
 	if type(o) ~= "table" or not o.enabled or not param then return end
 	local st = CoopCamera.orbitState
 	local rx, ry = 0, 0
-	if input and not (input.hold and input.hold.L2) then rx, ry = input.rx or 0, input.ry or 0 end
+	local aiming = CoopPulse and CoopPulse.Aiming and CoopPulse.Aiming(input)
+	if input and not aiming then rx, ry = input.rx or 0, input.ry or 0 end
 	local turning = math.abs(rx) > o.deadzone or math.abs(ry) > o.deadzone
 	if BoyTurning() and not turning then
 		-- the boy's player took the camera: the game's own camera, as it is, while his stick is
