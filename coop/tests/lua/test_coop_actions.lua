@@ -183,6 +183,12 @@ for _ = 1, 79 do CoopActions.Update(0.1, btn()) end
 check(#Harness.CallsNamed("cmd") == n and CoopActions.pending, "still waiting before 8 s")
 for _ = 1, 2 do CoopActions.Update(0.1, btn()) end
 check(#Harness.CallsNamed("cmd") == n and CoopActions.pending == nil, "never standing: refused after 8 s")
+-- lying, a standing move asks with the stand command
+anim = "ext_c_lie_down_loop"
+rest() CoopActions.Update(0.016, btn("R1"))
+check(lastCmd() == "ControlCommand_C_stand_test", "up from lying: the stand command")
+CoopActions.Release()
+n = #Harness.CallsNamed("cmd")
 -- the start of a walk is not standing
 anim = "c_stand_walk_fastC"
 rest() CoopActions.Update(0.016, btn("R1"))
@@ -308,8 +314,13 @@ rest()
 -- while Trico sits, a standing move first asks it to stand
 anim = "ext_c_sit_loop"
 rest() CoopActions.Update(0.016, btn("Right"))
-check(lastCmd() == "ControlCommand_C_stand_test" and CoopActions.pending.name == "kickRight"
-	or lastCmd() == "ControlCommand_C_stand_test" and CoopActions.pending.name == "kickLeft", "stands up first")
+check(lastCmd() == "ControlCommand_C_sit_end" and (CoopActions.pending.name == "kickRight"
+	or CoopActions.pending.name == "kickLeft"), "stands up first, with the end of sitting")
+local asked = #Harness.CallsNamed("cmd")
+CoopActions.Update(1.0, btn())
+check(#Harness.CallsNamed("cmd") == asked, "not asked again at once")
+CoopActions.Update(1.1, btn())
+check(#Harness.CallsNamed("cmd") == asked + 1 and lastCmd() == "ControlCommand_C_sit_end", "asked again after 2 s")
 anim = "c_stand"
 CoopActions.Update(0.1, btn())
 check(string.find(lastCmd(), "attack_hind") ~= nil, "then kicks")

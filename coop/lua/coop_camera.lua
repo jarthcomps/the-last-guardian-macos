@@ -462,6 +462,27 @@ local function YawProbe(dt)
 	end
 end
 
+-- Debug (CoopCamera.trace = seconds between lines): the Trico framing's state, often, to catch
+-- the camera hunting back and forth.
+local function Trace(dt)
+	CoopCamera.traceIn = (CoopCamera.traceIn or 0) - dt
+	if CoopCamera.traceIn > 0 then return end
+	CoopCamera.traceIn = CoopCamera.trace
+	local cam = FindObject and FindObject(CAMERA_NAME)
+	local okF, fwd = pcall(function() return Vector(0, 0, -1):Rotate(cam.worldRotation) end)
+	local okP, p = pcall(function() return cam.worldPosition end)
+	local fr, o = CoopCamera.frame, CoopCamera.orbitState
+	local t = CoopCamera.seenInfo and CoopCamera.seenInfo.CoopCamTrico
+	local b = CoopCamera.boyScreen
+	CoopDebug.Print("CT %.1f,%.1f,%.1f f%.2f,%.2f,%.2f l%.1f p%.0f b%s%s t%s%.2f/%.1f o%s",
+		okP and p and p.X or 0, okP and p and p.Y or 0, okP and p and p.Z or 0,
+		okF and fwd.X or 0, okF and fwd.Y or 0, okF and fwd.Z or 0,
+		fr and fr.length or 0, fr and fr.pitch or 0,
+		tostring(CoopCamera.boySeen):sub(1, 1), b and string.format("%.2f,%.2f", b[1], b[2]) or "-",
+		tostring(CoopCamera.tricoSeen):sub(1, 1), t and tonumber(t.ratio_xy) or -1, t and tonumber(t.distance_z) or -1,
+		o and string.format("%.0f/%.0f", o.yaw, o.pitch) or "-")
+end
+
 -- Call once per frame with whether the Trico framing is asked for (CoopInput.tricoCamera) and
 -- the Trico player's input (CoopInput.TricoPad(), nil when nobody plays Trico).
 function CoopCamera.Update(dt, tricoFraming, tricoInput)
@@ -481,7 +502,10 @@ function CoopCamera.Update(dt, tricoFraming, tricoInput)
 			CoopCamera.lastError = errO
 			if CoopDebug then CoopDebug.Print("CA error %s", tostring(errO)) end
 		end
-		if CoopDebug and CoopDebug.enabled then pcall(YawProbe, dt) end
+		if CoopDebug and CoopDebug.enabled then
+			pcall(YawProbe, dt)
+			if CoopCamera.trace then pcall(Trace, dt) end
+		end
 	end
 	CoopCamera.checkIn = CoopCamera.checkIn - dt
 	if changed or CoopCamera.checkIn <= 0 then

@@ -88,7 +88,9 @@ CoopActions.commands = {
 	turn90Right = "ControlCommand_C_turn_90_right",
 	aboutLeft = "ControlCommand_C_turn_narrow_left",
 	aboutRight = "ControlCommand_C_turn_narrow_right",
+	sitEnd = "ControlCommand_C_sit_end",     -- up from sitting (as the game's own scripts do)
 }
+local STAND_AGAIN = 2.0                       -- seconds between stand-up requests while a move waits
 CoopActions.queueTime = QUEUE_TIME
 local FACING = 0.7                            -- cosine: a turn already this close is not needed
 local STRETCHES = { "stretchFront", "stretchUp", "stretchBack" }
@@ -247,6 +249,12 @@ end
 
 local function Lying(anim) return string.find(anim, "lie") ~= nil end
 
+-- Ask a seated Trico to stand: the end of sitting from a sit, the stand command from lying.
+local function StandUp(props, anim)
+	CoopActions.standIn = STAND_AGAIN
+	return Command(props, (string.find(anim, "sit") and not Lying(anim)) and "sitEnd" or "stand")
+end
+
 local function Idle(anim)
 	if not StartsWith(anim, IDLE) then return false end
 	for _, word in ipairs(MOVING) do
@@ -304,7 +312,7 @@ local function Move(props, name, anim, seatedToo)
 	if not Queue(name, seatedToo) then return name .. " dropped, " .. QUEUE_MAX .. " waiting" end
 	local place = #CoopActions.queue > 1 and (" behind " .. CoopActions.queue[1].name) or ""
 	if StartsWith(anim, SEATED) and not seatedToo then
-		Command(props, "stand")
+		StandUp(props, anim)
 		return name .. " waiting" .. place .. ", standing up from " .. anim
 	end
 	return name .. " waiting" .. place .. " " .. anim
@@ -322,6 +330,11 @@ local function TickQueue(dt, props, anim)
 		end
 	end
 	local first = q[1]
+	-- still seated with a standing move waiting: ask again now and then
+	CoopActions.standIn = (CoopActions.standIn or 0) - dt
+	if first and not first.seated and StartsWith(anim, SEATED) and CoopActions.standIn <= 0 then
+		StandUp(props, anim)
+	end
 	if first and CoopActions.gap <= 0 and (Idle(anim) or (first.seated and StartsWith(anim, SEATED))) then
 		table.remove(q, 1)
 		Say("AC %s sent %s anim=%s", first.name, Send(props, first.name, anim), anim)
