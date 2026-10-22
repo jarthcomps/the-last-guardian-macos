@@ -40,7 +40,9 @@ CoopCamera.tune = CoopCamera.tune or {
 	Rod_YawBasisType = "Free",
 	Rod_YawBaseDeg = 180.0,   -- the set's own; listed so the orbit's changes are put back too
 	Base_FovDeg = 75.0,
-	AutoAvoid_Flags = "Valid|ChkTerrain",   -- turn the rod away from walls
+	AutoAvoid_Flags = "Valid|ChkTerrain|ChkCondor",   -- turn the rod away from walls and Trico (as Run does)
+	Rod_Flags = "ApproachHead|ShortenByPitch",        -- the set's own, less IgnoreCondorHit: the
+	                                                  -- rod no longer passes into Trico's feathers
 	ObjSensor_Flags = "Valid",               -- fade objects between the camera and the boy
 	PreAvoid_Flags = "Valid",                -- and look ahead for walls (as Run does)
 	-- the test set only moves the camera once Trico is 20-30 m away (a lazy overhead view);

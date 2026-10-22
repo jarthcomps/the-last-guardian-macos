@@ -459,7 +459,8 @@ local function Step(dt, input, props, anim)
 	elseif down.R1 then did, detail = "roar", Move(props, "roar", anim)
 	elseif down.L1 then
 		did, detail = "threat", Move(props, "threat", anim)
-		CoopActions.threat = true
+		-- held until L1 is let go (unless the press was dropped: nothing to end then)
+		CoopActions.threat = not string.find(detail, "dropped", 1, true)
 	elseif down.Down then
 		if Lying(anim) then did, detail = "stand", Move(props, "stand", anim, true)
 		elseif StartsWith(anim, SEATED) then did, detail = "lie down", Move(props, "lieDown", anim, true)
@@ -471,11 +472,16 @@ local function Step(dt, input, props, anim)
 		CoopActions.kick = CoopActions.kick == "kickLeft" and "kickRight" or "kickLeft"
 		did, detail = "kick", Move(props, CoopActions.kick, anim)
 	end
-	if CoopActions.pending and did == "threat" then CoopActions.threat = true end
 	if CoopActions.threat and not hold.L1 then
 		CoopActions.threat = false
-		Command(props, "threatEnd")
-		did, detail = did or "threat", detail or "end"
+		-- let go before the posture was sent: take it out of the queue instead of ending it
+		local q, unqueued = CoopActions.queue, false
+		for i = #q, 1, -1 do
+			if q[i].name == "threat" then table.remove(q, i) unqueued = true end
+		end
+		CoopActions.pending = q[1]
+		if not unqueued then Command(props, "threatEnd") end
+		did, detail = did or "threat", detail or (unqueued and "let go before it started" or "end")
 	end
 	if hold.Up and CoopActions.riseIn and not did then
 		CoopActions.riseIn = CoopActions.riseIn - dt

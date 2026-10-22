@@ -221,6 +221,18 @@ check(#CoopActions.queue == 1 and CoopActions.pending.name == "roar", "the older
 anim = "c_stand"
 CoopActions.Update(0.1, btn())
 check(lastCmd() == "ControlCommand_C_roar", "the younger one still goes")
+-- L1 let go while the threat posture still waits: it leaves the queue, nothing to end
+anim = "c_walkC"
+rest()
+n = #Harness.CallsNamed("cmd")
+CoopActions.Update(0.016, btn("L1"))
+check(CoopActions.pending and CoopActions.pending.name == "threat", "threat waits while Trico walks")
+CoopActions.Update(0.1, btn())
+check(CoopActions.pending == nil and #Harness.CallsNamed("cmd") == n, "let go: unqueued, no end sent")
+anim = "c_stand"
+for _ = 1, 12 do CoopActions.Update(0.1, btn()) end
+check(#Harness.CallsNamed("cmd") == n, "and never sent later")
+
 -- a posture move queued behind the gap leaves from sitting too
 anim = "c_sit_loop"
 rest()
