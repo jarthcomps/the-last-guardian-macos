@@ -46,6 +46,21 @@ int main() {
            ParseStatus::Parsed);
     assert((buttons.back() == std::tuple{0, Button::Cross, false}));
 
+    for (const auto& [line, expected] :
+         {std::pair{"TEST_PAD_BUTTON 1 l3 1", Button::L3}, std::pair{"TEST_PAD_BUTTON 1 r3 1", Button::R3},
+          std::pair{"TEST_PAD_BUTTON 0 l2 1", Button::L2}, std::pair{"TEST_PAD_BUTTON 0 r2 1", Button::R2},
+          std::pair{"TEST_PAD_BUTTON 2 touchpad 1", Button::TouchPad},
+          std::pair{"TEST_PAD_BUTTON 1 connect 1", Button::Connect}}) {
+        assert(Dispatch(line, true, button, axis, screenshot, metrics, frame_dump, burst) ==
+               ParseStatus::Parsed);
+        assert(std::get<1>(buttons.back()) == expected);
+    }
+    assert(Dispatch("TEST_PAD_BUTTON 1 select 1", true, button, axis, screenshot, metrics, frame_dump, burst) ==
+           ParseStatus::Invalid);
+    buttons.clear();
+    assert(Dispatch("TEST_PAD_BUTTON 0 cross 1", true, button, axis, screenshot, metrics, frame_dump, burst) ==
+           ParseStatus::Parsed);
+
     assert(Dispatch("TEST_PAD_AXIS 3 right_y 0", true, button, axis, screenshot, metrics, frame_dump, burst) ==
            ParseStatus::Parsed);
     assert((axes.back() == std::tuple{3, Axis::RightY, 0}));

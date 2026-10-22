@@ -24,6 +24,13 @@ enum class Button {
     Right,
     L1,
     R1,
+    L2,
+    R2,
+    L3,
+    R3,
+    TouchPad,
+    /// Not a button: pressed connects the slot's controller, released disconnects it.
+    Connect,
 };
 
 enum class Axis { LeftX, LeftY, RightX, RightY };
@@ -101,7 +108,10 @@ inline bool ParseButton(std::string_view text, Button& button) {
         {"options", Button::Options},   {"up", Button::Up},
         {"down", Button::Down},         {"left", Button::Left},
         {"right", Button::Right},       {"l1", Button::L1},
-        {"r1", Button::R1},
+        {"r1", Button::R1},             {"l2", Button::L2},
+        {"r2", Button::R2},             {"l3", Button::L3},
+        {"r3", Button::R3},             {"touchpad", Button::TouchPad},
+        {"connect", Button::Connect},
     };
     for (const auto& [name, value] : names) {
         if (text == name) {

@@ -2,18 +2,23 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/elf_info.h"
+#include "common/memory_patcher.h"
 #include "common/logging/log.h"
 #include "common/singleton.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/pad/pad_errors.h"
 #include "core/user_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "input/controller.h"
+#include "input/tlg_coop.h"
 #include "pad.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <mutex>
 #include <optional>
 
 namespace Libraries::Pad {
@@ -42,6 +47,53 @@ static bool g_initialized = false;
 static u64 pad_handle_counter = 1;
 static std::unordered_map<HandleKey, s32, HandleKeyHash> pad_handle_map{};
 static std::unordered_map<s32, GameController*> handle_to_controller_map{};
+
+// The Last Guardian co-op (SHADPS4_TLG_COOP=1, see input/tlg_coop.h).
+static std::mutex coop_mutex;
+static Input::TlgCoop::Session coop_session;
+static Input::TlgCoop::PressLatch coop_trico_latch; // short Trico presses survive until read
+static u64 coop_state_logged = 0;    // last once-a-second state line (kept in the launcher's log)
+static u64 coop_trico_read_time = 0; // process time of the last Trico read: older queued states
+                                     // (menus, the other role) are not presses to report
+static bool coop_scripts_seen = false;
+
+static bool CoopEnabled() {
+    static const bool enabled = Input::TlgCoop::EnabledByEnvironment() &&
+                                Input::TlgCoop::IsGuardianSerial(MemoryPatcher::g_game_serial);
+    return enabled;
+}
+
+static bool CoopActive() {
+    if (!CoopEnabled()) {
+        return false;
+    }
+    std::lock_guard lock{coop_mutex};
+    return coop_scripts_seen;
+}
+
+static void CoopApplyLightBars() {
+    using namespace Input::TlgCoop;
+    auto& controllers = *Common::Singleton<GameControllers>::Instance();
+    controllers.ResetLightbarColors();
+    const int boy = coop_session.ControllerFor(Role::Boy);
+    const int trico = coop_session.ControllerFor(Role::Trico);
+    if (boy != kNoController) {
+        controllers.SetControllerCustomColor(boy, kBoyColour[0], kBoyColour[1], kBoyColour[2]);
+    }
+    if (trico != kNoController) {
+        controllers.SetControllerCustomColor(trico, kTricoColour[0], kTricoColour[1],
+                                             kTricoColour[2]);
+    }
+}
+
+static void CoopScriptsHello() {
+    std::lock_guard lock{coop_mutex};
+    if (!coop_scripts_seen) {
+        coop_scripts_seen = true;
+        LOG_INFO(Lib_Pad, "TLG co-op: scripts found, co-op controls on");
+        CoopApplyLightBars();
+    }
+}
 
 int PS4_SYSV_ABI scePadClose(s32 handle) {
     LOG_WARNING(Lib_Pad, "called, handle: {}", handle);
@@ -429,8 +481,172 @@ int ProcessStates(OrbisPadData* pData, const Input::State* states, s32 num) {
     return num;
 }
 
-int PS4_SYSV_ABI scePadRead(s32 handle, OrbisPadData* pData, s32 num) {
-    LOG_TRACE(Lib_Pad, "called");
+
+enum class PadReadFunction { Read = 0, ReadState = 1 };
+
+// Co-op read calls per function and game pad, logged once a second.
+static std::array<std::array<u32, 2>, 2> coop_read_counts{};
+static u64 coop_read_counts_since = 0;
+
+// A connected pad with centred sticks, no buttons and released triggers.
+static Input::State CoopNeutralState(u64 now) {
+    Input::State state{};
+    state.connected = true;
+    state.connected_count = 1;
+    state.time = now;
+    return state;
+}
+
+// Reads one of the game's two pads in co-op mode. The boy pad (0) gets the state of the physical
+// controller playing the boy, or a neutral state when nobody does. The Trico pad (1) always looks
+// neutral to the game; the Trico player's sticks and buttons go to the scripts in its touch points.
+static int CoopRead(int game_pad, OrbisPadData* pData, s32 num, PadReadFunction function) {
+    using namespace Input::TlgCoop;
+    auto& controllers = *Common::Singleton<GameControllers>::Instance();
+    std::lock_guard lock{coop_mutex};
+    const u64 now = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    ++coop_read_counts[static_cast<int>(function)][game_pad];
+    if (coop_read_counts_since == 0) {
+        coop_read_counts_since = now;
+    } else if (now - coop_read_counts_since >= 1'000'000) {
+        LOG_INFO(Lib_Pad,
+                 "TLG co-op: reads in {} ms: scePadRead pad0 = {} pad1 = {}, scePadReadState "
+                 "pad0 = {} pad1 = {}",
+                 (now - coop_read_counts_since) / 1000, coop_read_counts[0][0],
+                 coop_read_counts[0][1], coop_read_counts[1][0], coop_read_counts[1][1]);
+        coop_read_counts = {};
+        coop_read_counts_since = now;
+    }
+    {
+        // The game may poll either pad (in the world it reads the second one for the boy too), so
+        // every co-op read feeds the session.
+        std::array<PadInput, kPhysicalPads> pads{};
+        for (int c = 0; c < kPhysicalPads; ++c) {
+            const Input::State state = controllers[c]->ReadState();
+            pads[c] = {state.connected, static_cast<u32>(state.buttonsState)};
+        }
+        const auto events = coop_session.Update(now, pads);
+        for (const Event& event : events) {
+            static constexpr const char* kinds[] = {"joined", "left", "swapped", "camera"};
+            LOG_INFO(Lib_Pad, "TLG co-op: controller {} {} ({}); boy = {}, Trico = {}",
+                     event.controller, kinds[static_cast<int>(event.kind)],
+                     event.role == Role::Boy ? "boy" : "Trico",
+                     coop_session.ControllerFor(Role::Boy),
+                     coop_session.ControllerFor(Role::Trico));
+        }
+        if (!events.empty()) {
+            // Drop states queued while a controller was not routed to the game.
+            std::array<Input::State, ORBIS_PAD_MAX_DATA_NUM> discard;
+            for (int c = 0; c < kPhysicalPads; ++c) {
+                controllers[c]->ReadStates(discard.data(), ORBIS_PAD_MAX_DATA_NUM);
+            }
+            CoopApplyLightBars();
+            coop_trico_latch.Reset();
+            coop_trico_read_time = Libraries::Kernel::sceKernelGetProcessTime();
+        }
+    }
+
+    std::array<Input::State, ORBIS_PAD_MAX_DATA_NUM> states;
+    if (game_pad == 1) {
+        u8 lx = kStickCentre, ly = kStickCentre, rx = kStickCentre, ry = kStickCentre;
+        u32 buttons = 0;
+        const int trico = coop_session.ControllerFor(Role::Trico);
+        if (trico != kNoController) {
+            // Drain the queue so a later swap does not hand the game stale Trico input.
+            const int queued = controllers[trico]->ReadStates(states.data(), ORBIS_PAD_MAX_DATA_NUM);
+            const Input::State newest =
+                queued > 0 ? states[queued - 1] : controllers[trico]->ReadState();
+            // every press queued since the last read counts, not only the newest state's (but
+            // not states from before it, nor more than half a second old)
+            const u64 read_time = Libraries::Kernel::sceKernelGetProcessTime();
+            const u64 since = std::max(coop_trico_read_time, read_time > 500'000 ? read_time - 500'000 : 0);
+            u32 seen = 0;
+            for (int i = 0; i < queued; ++i) {
+                if (states[i].time > since) {
+                    seen |= static_cast<u32>(states[i].buttonsState);
+                }
+            }
+            coop_trico_read_time = read_time;
+            if (newest.connected) {
+                lx = static_cast<u8>(newest.axes[static_cast<int>(Input::Axis::LeftX)]);
+                ly = static_cast<u8>(newest.axes[static_cast<int>(Input::Axis::LeftY)]);
+                rx = static_cast<u8>(newest.axes[static_cast<int>(Input::Axis::RightX)]);
+                ry = static_cast<u8>(newest.axes[static_cast<int>(Input::Axis::RightY)]);
+                const u32 mask = coop_session.MaskFor(trico);
+                buttons = coop_trico_latch.Read(now, seen & ~mask,
+                                                static_cast<u32>(newest.buttonsState) & ~mask);
+                coop_session.NoteTricoButtons(now, buttons);
+            }
+        }
+        // Once a second, at warning level so the launcher's log keeps it: what the Trico player
+        // sends, so a real session can be checked afterwards.
+        if (now - coop_state_logged >= 1'000'000) {
+            coop_state_logged = now;
+            LOG_WARNING(Lib_Pad,
+                        "TLG co-op state: boy = {}, Trico = {}, Trico sticks L {},{} R {},{}, "
+                        "buttons {:#x}, turns {}, flags {:#x}",
+                        coop_session.ControllerFor(Role::Boy), trico, lx, ly, rx, ry, buttons,
+                        coop_session.TurnCount(), coop_session.Flags());
+        }
+        states[0] = CoopNeutralState(now);
+        const int ret = ProcessStates(pData, states.data(), 1);
+        pData[0].connected = true;
+        pData[0].touchData.touchNum = 2;
+        pData[0].touchData.touch[0].x = PackStick(lx, ly);
+        pData[0].touchData.touch[0].y = PackStick(rx, ry);
+        pData[0].touchData.touch[0].id = kTouchStickId;
+        pData[0].touchData.touch[1].x = coop_session.Flags();
+        pData[0].touchData.touch[1].y = StatePointY(coop_session.Sequence(), buttons);
+        pData[0].touchData.touch[1].id = kTouchMagicId;
+        return ret;
+    }
+
+    int physical = coop_session.ControllerFor(Role::Boy);
+    if (physical == kNoController && !coop_session.AnyHuman()) {
+        physical = 0; // nobody plays: let the game see the first controller as it is
+    }
+    int count = 0;
+    if (physical != kNoController) {
+        count = controllers[physical]->ReadStates(states.data(), num);
+        const u32 mask = coop_session.MaskFor(physical);
+        for (int i = 0; i < count; ++i) {
+            states[i].buttonsState = static_cast<OrbisPadButtonDataOffset>(
+                static_cast<u32>(states[i].buttonsState) & ~mask);
+        }
+    } else {
+        states[0] = CoopNeutralState(now);
+        count = 1;
+    }
+    return ProcessStates(pData, states.data(), count);
+}
+
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::L3) == Input::TlgCoop::kButtonL3);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::R3) == Input::TlgCoop::kButtonR3);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::Options) ==
+              Input::TlgCoop::kButtonOptions);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::TouchPad) ==
+              Input::TlgCoop::kButtonTouchPad);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::Cross) ==
+              Input::TlgCoop::kScriptButtons[0]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::Circle) ==
+              Input::TlgCoop::kScriptButtons[1]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::Square) ==
+              Input::TlgCoop::kScriptButtons[2]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::Triangle) ==
+              Input::TlgCoop::kScriptButtons[3]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::L1) == Input::TlgCoop::kScriptButtons[4]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::R1) == Input::TlgCoop::kScriptButtons[5]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::L2) == Input::TlgCoop::kScriptButtons[6]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::R2) == Input::TlgCoop::kScriptButtons[7]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::Up) == Input::TlgCoop::kScriptButtons[8]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::Down) == Input::TlgCoop::kScriptButtons[9]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::Left) == Input::TlgCoop::kScriptButtons[10]);
+static_assert(static_cast<u32>(OrbisPadButtonDataOffset::Right) ==
+              Input::TlgCoop::kScriptButtons[11]);
+
+static int PadRead(s32 handle, OrbisPadData* pData, s32 num, PadReadFunction function) {
     if (pData == nullptr || num < 1 || num > ORBIS_PAD_MAX_DATA_NUM) {
         return ORBIS_PAD_ERROR_INVALID_ARG;
     }
@@ -439,9 +655,21 @@ int PS4_SYSV_ABI scePadRead(s32 handle, OrbisPadData* pData, s32 num) {
         return ORBIS_PAD_ERROR_INVALID_HANDLE;
     }
     auto& controller = *it->second;
+    if (CoopActive()) {
+        auto& controllers = *Common::Singleton<GameControllers>::Instance();
+        const int game_pad = it->second == controllers[0] ? 0 : it->second == controllers[1] ? 1 : -1;
+        if (game_pad >= 0) {
+            return CoopRead(game_pad, pData, num, function);
+        }
+    }
     std::array<Input::State, ORBIS_PAD_MAX_DATA_NUM> states;
     const int ret_num = controller.ReadStates(states.data(), num);
     return ProcessStates(pData, states.data(), ret_num);
+}
+
+int PS4_SYSV_ABI scePadRead(s32 handle, OrbisPadData* pData, s32 num) {
+    LOG_TRACE(Lib_Pad, "called");
+    return PadRead(handle, pData, num, PadReadFunction::Read);
 }
 
 int PS4_SYSV_ABI scePadReadBlasterForTracker() {
@@ -466,7 +694,7 @@ int PS4_SYSV_ABI scePadReadHistory() {
 
 int PS4_SYSV_ABI scePadReadState(s32 handle, OrbisPadData* pData) {
     LOG_TRACE(Lib_Pad, "handle: {}", handle);
-    const int result = scePadRead(handle, pData, 1);
+    const int result = PadRead(handle, pData, 1, PadReadFunction::ReadState);
     return result < 0 ? result : ORBIS_OK;
 }
 
@@ -572,6 +800,15 @@ int PS4_SYSV_ABI scePadSetLightBar(s32 handle, const OrbisPadLightBarParam* pPar
     if (pParam != nullptr) {
         LOG_DEBUG(Lib_Pad, "called handle = {} rgb = {} {} {}", handle, pParam->r, pParam->g,
                   pParam->b);
+        if (CoopEnabled() &&
+            it->second == (*Common::Singleton<GameControllers>::Instance())[1]) {
+            // The second pad only exists for the co-op scripts: its light bar calls carry their
+            // hello and debug text (logged above), never a colour.
+            if (Input::TlgCoop::IsScriptsHello(pParam->r, pParam->g, pParam->b)) {
+                CoopScriptsHello();
+            }
+            return ORBIS_OK;
+        }
 
         if (pParam->r < 0xD && pParam->g < 0xD && pParam->b < 0xD) {
             LOG_INFO(Lib_Pad, "Invalid lightbar setting");

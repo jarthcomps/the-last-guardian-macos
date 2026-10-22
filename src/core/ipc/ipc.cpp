@@ -64,6 +64,18 @@ Libraries::Pad::OrbisPadButtonDataOffset ToOrbisButton(TestControl::Button butto
         return OrbisButton::L1;
     case TestControl::Button::R1:
         return OrbisButton::R1;
+    case TestControl::Button::L2:
+        return OrbisButton::L2;
+    case TestControl::Button::R2:
+        return OrbisButton::R2;
+    case TestControl::Button::L3:
+        return OrbisButton::L3;
+    case TestControl::Button::R3:
+        return OrbisButton::R3;
+    case TestControl::Button::TouchPad:
+        return OrbisButton::TouchPad;
+    case TestControl::Button::Connect:
+        return OrbisButton::None;
     }
     return OrbisButton::None;
 }
@@ -197,6 +209,14 @@ void IPC::InputLoop() {
                 cmd, test_control_enabled,
                 [](int slot, TestControl::Button button, bool pressed) {
                     auto& controllers = *Common::Singleton<Input::GameControllers>::Instance();
+                    if (button == TestControl::Button::Connect) {
+                        if (pressed) {
+                            controllers[slot]->ConnectController(controllers[slot]->m_sdl_gamepad);
+                        } else {
+                            controllers[slot]->DisconnectController();
+                        }
+                        return;
+                    }
                     controllers[slot]->Button(ToOrbisButton(button), pressed);
                 },
                 [](int slot, TestControl::Axis axis, int value) {

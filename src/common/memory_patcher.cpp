@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "input/tlg_coop.h"
 #include <algorithm>
 #include <codecvt>
 #include <fstream>
@@ -215,8 +216,28 @@ void ApplyPatchesFromXML(std::filesystem::path path) {
     }
 }
 
+void ApplyTlgCoopPatch() {
+    if (!Input::TlgCoop::EnabledByEnvironment() || !Input::TlgCoop::IsGuardianSerial(g_game_serial)) {
+        return;
+    }
+    using Input::TlgCoop::PatchResult;
+    const auto result = Input::TlgCoop::ApplySecondPadPatch(
+        reinterpret_cast<std::uint8_t*>(g_eboot_address), g_eboot_image_size);
+    switch (result) {
+    case PatchResult::Applied:
+    case PatchResult::AlreadyApplied:
+        LOG_INFO(Loader, "TLG co-op: the game will open the second controller");
+        break;
+    case PatchResult::Mismatch:
+    case PatchResult::OutOfRange:
+        LOG_ERROR(Loader, "TLG co-op: unknown game executable, second controller left off");
+        break;
+    }
+}
+
 void OnGameLoaded() {
     std::filesystem::path patch_dir = Common::FS::GetUserPath(Common::FS::PathType::PatchesDir);
+    ApplyTlgCoopPatch();
     if (!patch_file.empty()) {
 
         auto file_path = (patch_dir / patch_file).native();
