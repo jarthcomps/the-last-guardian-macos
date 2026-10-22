@@ -503,7 +503,8 @@ local function Turn(props, input, anim)
 		wayX, wayZ = x / len, z / len
 		if wayX * face.X + wayZ * face.Z > FACING then return "already facing" end
 	end
-	return Move(props, CoopTrico.TurnCommand(face.X, face.Z, wayX, wayZ), anim)
+	-- the move manager's own turning slide (never the raw turn commands: see CoopTrico.TurnTo)
+	return CoopTrico.TurnTo(props, wayX, wayZ)
 end
 
 local function AnimState(props)

@@ -188,7 +188,7 @@ Harness.tricoProps = Harness.NewTricoProps(0, 0, 0)   -- facing +Z
 Harness.objects._trico_camera = { worldPosition = Vector(0, 3, -8) }  -- forward is +Z
 -- standing: turns on the spot at once
 CoopTrico.Update(0.016, { x = 0, y = -1 })  -- back: straight behind Trico
-check(CoopTrico.turning and CoopTrico.nav == "spot-aboutRight" and #Harness.CallsNamed("cmd") == 1, "standing: turns on the spot")
+check(CoopTrico.turning and CoopTrico.nav == "spot-aboutRight" and #Harness.CallsNamed("slide") == 1, "standing: turns on the spot")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 Harness.calls = {}
 -- walking, with the old side goals on (CoopTrico.sideTurns): curves round through a side goal
@@ -214,7 +214,7 @@ CoopTrico.sideTurns = false
 Harness.calls = {}
 Harness.tricoProps.plannedMove = "MoveForward"
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(not CoopTrico.turning and CoopTrico.goal and near(CoopTrico.goal.Z, -8) and #Harness.CallsNamed("cmd") == 0,
+check(not CoopTrico.turning and CoopTrico.goal and near(CoopTrico.goal.Z, -8) and #Harness.CallsNamed("slide") == 0,
 	"walking: the goal goes straight behind, no side goal, no spot turn")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 Harness.tricoProps.plannedMove = nil
@@ -248,49 +248,44 @@ Harness.reachable = function(from, to) return math.abs(to.X) < 1 end   -- 2 m wi
 Harness.calls = {}
 CoopTrico.turnIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-local spot = Harness.CallsNamed("cmd")
-check(#spot == 1 and spot[1][3] == "ControlCommand_C_turn_180_right" and CoopTrico.nav == "spot-aboutRight"
-	and #Harness.CallsNamed("level") == 0, "about-turn on the spot, no goal: " .. tostring(spot[1] and spot[1][3]))
+local spot = Harness.CallsNamed("slide")
+check(#spot == 1 and near(spot[1][3].destinationDir.Z, -1) and CoopTrico.nav == "spot-aboutRight"
+	and #Harness.CallsNamed("level") == 0, "about-turn on the spot (his own slide, facing back), no goal")
 CoopTrico.refreshIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(#Harness.CallsNamed("cmd") == 1, "not asked again within 1.5 s")
+check(#Harness.CallsNamed("slide") == 1, "not asked again within 1.5 s")
 for _ = 1, 21 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
-check(#Harness.CallsNamed("cmd") == 1, "one spot turn per stick direction (his facing reads stale after one)")
+check(#Harness.CallsNamed("slide") == 1, "one spot turn per stick direction (his facing reads stale after one)")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 CoopTrico.turnIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(#Harness.CallsNamed("cmd") == 2, "let go and pushed again: another")
+check(#Harness.CallsNamed("slide") == 2, "let go and pushed again: another")
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, -1)
 CoopTrico.refreshIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(not CoopTrico.turning and near(CoopTrico.goal.Z, -8) and #Harness.CallsNamed("cmd") == 2, "turned: walks along the beam")
+check(not CoopTrico.turning and near(CoopTrico.goal.Z, -8) and #Harness.CallsNamed("slide") == 2, "turned: walks along the beam")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
 Harness.reachable = function(from, to) return true end
--- with the action queue there, the spot turn goes through it (stood up first, watched, resent)
-local requested
-CoopActions = { queueTime = 8, Request = function(name) requested = name end }
+-- the spot turn is his own slide, one per stick way, never a second while one plays
 CoopTrico.turnIn = 0
 Harness.calls = {}
 Harness.reachable = function(from, to) return math.abs(to.X) < 1 end
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(requested == "aboutRight" and #Harness.CallsNamed("cmd") == 0, "the spot turn is a queued move")
--- while the turn plays, no second one (it would turn him back)
-requested = nil
+check(#Harness.CallsNamed("slide") == 1, "the spot turn is his own slide")
 local savedAnim = Ai2.Utils.GetCurAnimState
-Ai2.Utils.GetCurAnimState = function() return "c_turn_180_right" end
+Ai2.Utils.GetCurAnimState = function() return "c_slide_rot_right" end
 for _ = 1, 30 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
-check(requested == nil, "no second turn while one plays")
+check(#Harness.CallsNamed("slide") == 1, "no second turn while one plays")
 Ai2.Utils.GetCurAnimState = function() return "c_stand" end
 for _ = 1, 6 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
-check(requested == nil, "after it, the same stick way: no second turn")
+check(#Harness.CallsNamed("slide") == 1, "after it, the same stick way: no second turn")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 CoopTrico.turnIn = 0
 CoopTrico.Update(0.016, { x = 0, y = -1 })
-check(requested == "aboutRight", "pushed again: another")
+check(#Harness.CallsNamed("slide") == 2, "pushed again: another")
 Ai2.Utils.GetCurAnimState = savedAnim
 CoopTrico.Update(0.016, { x = 0, y = 0 })
-CoopActions = nil
 Harness.reachable = function(from, to) return true end
 -- during a turn on the spot the AI's position reads 0,0,0: the character's stands in for it
 CharacterMngr = { GetTrico = function() return { worldPosition = Vector(5, 1, 6) } end }
@@ -368,18 +363,19 @@ local wx, wz = math.sin(math.rad(120)), math.cos(math.rad(120))   -- 120 degrees
 Harness.objects._trico_camera = { worldPosition = Vector(0, 3, -8) }   -- forward +Z: stick = way
 CoopTrico.latch = nil
 CoopTrico.Update(0.016, { x = -wx, y = wz })   -- the stick's right is -X
-local turns = Harness.CallsNamed("cmd")
-check(#turns == 1 and turns[1][3] == "ControlCommand_C_turn_90_left", "120 degrees: one quarter turn")
+local turns = Harness.CallsNamed("slide")
+check(#turns == 1 and near(turns[1][3].destinationDir.X, wx) and near(turns[1][3].destinationDir.Z, wz),
+	"120 degrees: one turn, his own slide to face the stick's way")
 -- after it he faces 30 degrees short of the way
 local fx2, fz2 = math.sin(math.rad(90)), math.cos(math.rad(90))
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(fx2, 0, fz2)
 for _ = 1, 40 do CoopTrico.Update(0.1, { x = -wx, y = wz }) end
-check(#Harness.CallsNamed("cmd") == 1 and CoopTrico.goal ~= nil, "no more turns: he walks the rest")
+check(#Harness.CallsNamed("slide") == 1 and CoopTrico.goal ~= nil, "no more turns: he walks the rest")
 -- and an overshoot (60 degrees off on the other side) isn't turned back either
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(math.sin(math.rad(-180)), 0, math.cos(math.rad(-180)))
 CoopTrico.turnIn = 0
 for _ = 1, 40 do CoopTrico.Update(0.1, { x = -wx, y = wz }) end
-check(#Harness.CallsNamed("cmd") == 1, "60 degrees off: walked, not turned")
+check(#Harness.CallsNamed("slide") == 1, "60 degrees off: walked, not turned")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
 -- while focused, Trico's idle and boy-affection behaviours and jump slides are banned; only the

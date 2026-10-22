@@ -18,6 +18,16 @@
 --               has no move planned (standing, waiting for his interests to pick the goal) the
 --               move manager is also asked for a forward move to it (CoopTrico.kick), so he
 --               sets off at once.
+--   "direct":   no destination for his AI at all: every frame the stick is held, the free walk's
+--               own path (the "freemove_intermediate" detail path) is set a few metres out in the
+--               stick's way and the move manager is asked for a manual free move, the walk the
+--               game's move code uses when it steers him itself (no stop decision, no interests).
+--               The game still picks his gait, turns and footing.
+--   "ctrl":     his own move planning switched off (approach.skipCreate, as the game does for
+--               scripted moments) and his animation controller driven with the game's own
+--               commands: a walk (slow, normal or fast by stick) while he faces within
+--               CTRL_WALK_ANGLE of the stick's way, a quarter or about turn on the spot beyond
+--               it, the walk stop on release (planning back on).
 -- With the stick released, Trico is asked to stop and its AI is left alone.
 --
 -- The stick is camera-relative by default, with the camera's direction latched when the stick
@@ -280,6 +290,51 @@ function Steer.forward(props, goal, dir)
 	props.moveMngr:RequestForward({ isFreeMove = true, goalPos = goal, goalDir = dir })
 end
 
+-- "direct": the free walk's path to a pose ahead, and a manual free move (see the top).
+-- The free walk's own slow-down and stop planning compares his stopping distance (about 7 m
+-- from a walk) with what is left to the pose: a pose a few metres out made him stop at once. So
+-- the pose stays well beyond it, moving on with him every frame; nearer means a slower gait.
+local DIRECT_NEAR = 12.0       -- metres ahead at the edge of the dead zone
+local DIRECT_FAR = 25.0        -- ... and at full stick
+function CoopTrico.DirectMove(props, pos, dirX, dirZ, len)
+	local info = props.currentInfo
+	local ai = info.ai2Ext
+	local dist = DIRECT_NEAR + (DIRECT_FAR - DIRECT_NEAR) * (len or 1)
+	local target = Vector(pos.X + dirX * dist, pos.Y, pos.Z + dirZ * dist)
+	local fit = Ai2FitNavmesh and Ai2FitNavmesh(ai.navMesh, target, Ai2.Approach.upperLimit, Ai2.Approach.pathLowerLimit)
+	if fit and fit.found == 1 then target = Vector(target.X, fit.pos.Y, target.Z) end
+	local dir = Vector(dirX, 0, dirZ)
+	local dp = Ai2.CondorUtils.GetPath(ai, Ai2.Actions.Condor.Path.Pack.FreeMoveIntermediate)
+	local base = info.detailPath
+	dp.Navmesh = base.Navmesh
+	dp.Interval = base.Interval
+	-- long both ways from the pose, so the path runs back through Trico (his slow-down planning
+	-- measures what is left along it: with the usual 4 m it was always nearly used up)
+	dp.FrontLen = CoopTrico.directFront or 30.0
+	dp.BackLen = CoopTrico.directBack or 30.0
+	dp.WallSensorRadiusMul = base.WallSensorRadiusMul
+	dp.BasePos = target
+	dp.BaseDir = dir
+	dp.FrontGoal = base.FrontGoal
+	dp.BackGoal = base.BackGoal
+	dp.FrontGoalTransitOffset = base.FrontGoalTransitOffset
+	dp.BackGoalTransitOffset = base.BackGoalTransitOffset
+	dp.TurnRadius = base.TurnRadius
+	Ai2BuildPath(ai, dp, 0)
+	info.apDestination = target
+	info.apDestinationDir = dir
+	-- every frame: a request runs once, and with none pending his own cost calculation picks the
+	-- next frame's move (a stop, with no destination of his own)
+	-- forward, along neither his behaviour path nor a line path (a line-path flag left over from
+	-- his own last move makes the action layer stop a free move once he walks: he set off and
+	-- stopped at once)
+	Ai2.CondorUtils.Path.ReqDiscretePathMode(props, false, false, false, false)
+	props.moveMngr:RequestForward({ isFreeMove = true, manualMode = true, alongLinePath = false })
+	CoopTrico.directRequests = (CoopTrico.directRequests or 0) + 1
+	CoopTrico.goal = target
+	return target
+end
+
 function Steer.steer(props, goal, dir)
 	Steer.goal(props, goal, dir)
 	OverwriteApproach(props, goal, dir)
@@ -302,6 +357,18 @@ function CoopTrico.TurnGoal(pos, faceX, faceZ, dx, dz, turning)
 	if lx * dx + lz * dz < 0 then lx, lz = faceZ, -faceX end
 	local t = CoopTrico.distances.turn
 	return Vector(pos.X + lx * t, pos.Y, pos.Z + lz * t), Vector(lx, 0, lz)
+end
+
+-- Turn Trico on the spot to face the way (wayX, wayZ): his move manager's own change-of-direction
+-- slide to where he stands, facing that way (from a stand; from a walk it stops him first). The
+-- raw turn commands (C_turn_90/180/narrow) must not be sent from here: they align to a target
+-- pose his turn behaviour normally sets up, and without one they took him to the world origin
+-- ("he vanished into a glitched area while turning").
+function CoopTrico.TurnTo(props, wayX, wayZ)
+	local pos = CoopTrico.Position(props) or props.currentInfo.aiPos
+	props.moveMngr:RequestSlide({ destination = Vector(pos), destinationDir = Vector(wayX, 0, wayZ) })
+	CoopTrico.turns = (CoopTrico.turns or 0) + 1
+	return string.format("slide to face %.2f,%.2f", wayX, wayZ)
 end
 
 -- The turn-on-the-spot command that turns Trico from facing (faceX, faceZ) towards the way
@@ -341,6 +408,7 @@ local function DropGoal(props)
 end
 
 local function Release(props)
+	pcall(CoopTrico.Unskip, props)
 	CoopTrico.steering = false
 	CoopTrico.goal = nil
 	CoopTrico.turning = false
@@ -393,6 +461,12 @@ local function Report(props)
 		okF and fx and string.format("%.2f,%.2f,%s", fx, fz, src) or "-",
 		tostring(CoopTrico.nav), f and string.format("%.2f,%.2f,%s", f[1], f[2], f[3]) or "-",
 		face and string.format("%.2f,%.2f", face.X, face.Z) or "-")
+	-- the other facings, to find one that stays true through turns
+	local ad = info.aiDir
+	local okR, rf = pcall(function() return Vector(0, 0, 1):Rotate(info.work.GetMySelfRot) end)
+	CoopDebug.Print("TF aiDir=%s rot+z=%s an=%s", ad and string.format("%.2f,%.2f", ad.X, ad.Z) or "-",
+		okR and rf and string.format("%.2f,%.2f", rf.X, rf.Z) or "-",
+		tostring(select(2, pcall(Ai2.Utils.GetCurAnimState, info.ai2Ext))))
 end
 
 -- While the Trico player is giving input (stick or a button, within FOCUS_TIME), the boy's
@@ -471,6 +545,7 @@ function CoopTrico.Update(dt, input)
 		pcall(Report, props)
 	end
 	if not props or not props.currentInfo or not props.currentInfo.aiPos then return end
+	if CoopTrico.logAI and CoopDebug and CoopDebug.enabled then pcall(CoopTrico.HookAILog, props, dt) end
 	pcall(CoopTrico.Focus, dt, input, props)
 
 	local sx, sy, len = CoopTrico.Stick(input)
@@ -497,6 +572,8 @@ function CoopTrico.Update(dt, input)
 		if not CoopTrico.Stick(input) then CoopTrico.latch = nil end
 		return
 	end
+	if CoopTrico.strategy == "direct" then return CoopTrico.Direct(dt, props, sx, sy, len) end
+	if CoopTrico.strategy == "ctrl" then return CoopTrico.Ctrl(dt, props, sx, sy, len) end
 
 	CoopTrico.refreshIn = CoopTrico.refreshIn - dt
 	if CoopTrico.steering and CoopTrico.refreshIn > 0 then return end
@@ -573,18 +650,13 @@ function CoopTrico.Update(dt, input)
 			-- approach towards the goal); never a second turn while one still plays, or it would
 			-- turn him back
 			local okAnim, anim = pcall(Ai2.Utils.GetCurAnimState, info.ai2Ext)
-			local spinning = okAnim and string.find(tostring(anim), "turn", 1, true) ~= nil
+			local spinning = okAnim and (string.find(tostring(anim), "turn", 1, true) or string.find(tostring(anim), "slide_rot", 1, true)) ~= nil
 			if spinning then CoopTrico.turnIn = math.max(CoopTrico.turnIn, 0.5) end
 			if CoopTrico.turnIn <= 0 then
 				CoopTrico.turnIn = TURN_GAP
 				local name = CoopTrico.TurnCommand(dirXZ.X, dirXZ.Z, wayX, wayZ)
 				CoopTrico.spunFor = stickAngle
-				if CoopActions and CoopActions.Request then
-					-- as a queued move: stood up first if he sits, watched and resent
-					CoopActions.Request(name)
-				else
-					pcall(Ai2.Utils.ReqCtrlCmd, info.ai2Ext, CoopTrico.commands[name])
-				end
+				pcall(CoopTrico.TurnTo, props, wayX, wayZ)
 				CoopTrico.nav = "spot-" .. name
 				DropGoal(props)
 				CoopTrico.steering = true
@@ -621,6 +693,163 @@ function CoopTrico.Update(dt, input)
 	if not ok and err ~= CoopTrico.lastError then
 		CoopTrico.lastError = err
 		if CoopDebug then CoopDebug.Print("TR error %s", tostring(err)) end
+	end
+end
+
+-- "ctrl", every frame the stick is held (see the top).
+local CTRL_WALK_ANGLE = 50.0   -- degrees off the stick's way he keeps walking; beyond: turn
+local CTRL_GEARS = { { 0.55, "ControlCommand_C_walk_slow" }, { 0.9, "ControlCommand_C_walk" },
+	{ 2.0, "ControlCommand_C_walk_fast" } }
+CoopTrico.ctrlStop = "ControlCommand_C_walk_stop"
+
+function CoopTrico.CtrlGear(len)
+	for _, g in ipairs(CTRL_GEARS) do
+		if (len or 1) <= g[1] then return g[2] end
+	end
+	return CTRL_GEARS[#CTRL_GEARS][2]
+end
+
+function CoopTrico.Ctrl(dt, props, sx, sy, len)
+	local info = props.currentInfo
+	local ai = info.ai2Ext
+	local pos = CoopTrico.Position(props, dt)
+	if not pos or not ai then return end
+	if props.approach and not CoopTrico.skipping then
+		CoopTrico.skipping = { approach = props.approach, was = props.approach.skipCreate }
+		props.approach.skipCreate = true
+	end
+	CoopTrico.steering = true
+	local okA, anim = pcall(Ai2.Utils.GetCurAnimState, ai)
+	anim = okA and tostring(anim) or ""
+	CoopTrico.standIn = math.max(0, (CoopTrico.standIn or 0) - dt)
+	if string.find(anim, "_sit", 1, true) and not string.find(anim, "sit_end", 1, true) then
+		if CoopTrico.standIn <= 0 then
+			CoopTrico.standIn = 2.0
+			pcall(Ai2.Utils.ReqCtrlCmd, ai, "ControlCommand_C_sit_end")
+		end
+		CoopTrico.nav = "stand-up"
+		return
+	end
+	if (string.find(anim, "turn", 1, true) or string.find(anim, "slide_rot", 1, true)) and not string.find(anim, "walk", 1, true) then
+		CoopTrico.nav = "turning"
+		return
+	end
+	local dirXZ = ai.dirXZ
+	local fx, fz, src = CoopTrico.Frame(sx, sy, pos, dirXZ)
+	if not fx then
+		if not dirXZ then return end
+		fx, fz, src = dirXZ.X, dirXZ.Z, "trico"
+	end
+	CoopTrico.forward = { fx, fz, src }
+	local wx, wz = Flat(fx * sy - fz * sx, fz * sy + fx * sx)
+	if not wx or not dirXZ then return end
+	local cos = wx * dirXZ.X + wz * dirXZ.Z
+	CoopTrico.goal = Vector(pos.X + wx * 10, pos.Y, pos.Z + wz * 10)
+	if cos < math.cos(math.rad(CTRL_WALK_ANGLE)) then
+		-- too far round: a turn on the spot (stopping first if he walks), one at a time
+		if CoopTrico.turnIn <= 0 then
+			CoopTrico.turnIn = 1.0
+			local name = CoopTrico.TurnCommand(dirXZ.X, dirXZ.Z, wx, wz)
+			pcall(CoopTrico.TurnTo, props, wx, wz)
+			CoopTrico.nav = "ctrl-" .. name
+		end
+		return
+	end
+	local gear = CoopTrico.CtrlGear(len)
+	pcall(Ai2.Utils.ReqCtrlCmd, ai, gear)
+	CoopTrico.nav = "ctrl-walk"
+end
+
+function CoopTrico.Unskip(props)
+	local sk = CoopTrico.skipping
+	if not sk then return end
+	CoopTrico.skipping = nil
+	sk.approach.skipCreate = sk.was
+	if props and props.currentInfo and props.currentInfo.ai2Ext then
+		pcall(Ai2.Utils.ReqCtrlCmd, props.currentInfo.ai2Ext, CoopTrico.ctrlStop)
+	end
+end
+
+-- "direct", every frame the stick is held: stand up if he sits, one turn on the spot if he is
+-- standing and faces far from the stick's way, otherwise the manual free move towards it.
+function CoopTrico.Direct(dt, props, sx, sy, len)
+	local info = props.currentInfo
+	local pos = CoopTrico.Position(props, dt)
+	if not pos then return end
+	local okA, anim = pcall(Ai2.Utils.GetCurAnimState, info.ai2Ext)
+	anim = okA and tostring(anim) or ""
+	CoopTrico.steering = true
+	CoopTrico.standIn = math.max(0, (CoopTrico.standIn or 0) - dt)
+	if string.find(anim, "_sit", 1, true) and not string.find(anim, "sit_end", 1, true) then
+		if CoopTrico.standIn <= 0 then
+			CoopTrico.standIn = 2.0
+			pcall(Ai2.Utils.ReqCtrlCmd, info.ai2Ext, "ControlCommand_C_sit_end")
+		end
+		CoopTrico.nav = "stand-up"
+		return
+	end
+	if (string.find(anim, "turn", 1, true) or string.find(anim, "slide_rot", 1, true)) and not string.find(anim, "walk", 1, true) then
+		CoopTrico.nav = "turning"
+		return   -- let a turn on the spot play out
+	end
+	local dirXZ = info.ai2Ext and info.ai2Ext.dirXZ
+	local fx, fz, src = CoopTrico.Frame(sx, sy, pos, dirXZ)
+	if not fx then
+		if not dirXZ then return end
+		fx, fz, src = dirXZ.X, dirXZ.Z, "trico"
+	end
+	CoopTrico.forward = { fx, fz, src }
+	local wx, wz = Flat(fx * sy - fz * sx, fz * sy + fx * sx)   -- the right of (x, z) is (-z, x)
+	if not wx then return end
+	if dirXZ then
+		local stickAngle = math.deg(math.atan2(sx, sy))
+		local spun = CoopTrico.spunFor and math.abs((stickAngle - CoopTrico.spunFor + 180) % 360 - 180) <= RELATCH
+		local standing = props.plannedMove == nil or props.plannedMove == "MoveStop"
+		if not spun and standing and (wx * dirXZ.X + wz * dirXZ.Z) < TURN_START then
+			local name = CoopTrico.TurnCommand(dirXZ.X, dirXZ.Z, wx, wz)
+			CoopTrico.spunFor = stickAngle
+			pcall(CoopTrico.TurnTo, props, wx, wz)
+			CoopTrico.nav = "spot-" .. name
+			return
+		end
+	end
+	local ok, err = pcall(CoopTrico.DirectMove, props, pos, wx, wz, len)
+	if ok then
+		CoopTrico.nav = "direct"
+	elseif err ~= CoopTrico.lastError then
+		CoopTrico.lastError = err
+		if CoopDebug then CoopDebug.Print("TR error %s", tostring(err)) end
+	end
+end
+
+-- Debug (CoopTrico.logAI = true, with the debug channel on): turn on Trico's own move log and
+-- pass its stop and request messages on, each distinct one at most once a second.
+function CoopTrico.HookAILog(props, dt)
+	local log = props and props.log
+	if not log then return end
+	if not CoopTrico.aiLogHooked then
+		CoopTrico.aiLogHooked = true
+		log.valid = true
+		local add = log.AddMessage
+		local seen = {}
+		CoopTrico.aiLogSeen = seen
+		log.AddMessage = function(self, report, fmt, ...)
+			local ok, msg = pcall(string.format, tostring(fmt), ...)
+			msg = ok and msg or tostring(fmt)
+			if string.find(msg, "stop") or string.find(msg, "request") or string.find(msg, "cancel") then
+				local key = tostring(report and report.name) .. ":" .. msg
+				if not seen[key] then
+					seen[key] = true
+					if CoopDebug then CoopDebug.Print("AI %s: %s", tostring(report and report.name), string.sub(msg, 1, 90)) end
+				end
+			end
+			return add(self, report, fmt, ...)
+		end
+	end
+	CoopTrico.aiLogClear = (CoopTrico.aiLogClear or 1) - dt
+	if CoopTrico.aiLogClear <= 0 then
+		CoopTrico.aiLogClear = 1
+		for k in pairs(CoopTrico.aiLogSeen) do CoopTrico.aiLogSeen[k] = nil end
 	end
 end
 

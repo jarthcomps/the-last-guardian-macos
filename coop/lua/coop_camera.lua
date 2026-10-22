@@ -39,6 +39,7 @@ CoopCamera.tune = CoopCamera.tune or {
 	Rod_PitchBaseDeg = -25.0,
 	Rod_YawBasisType = "Free",
 	Rod_YawBaseDeg = 180.0,   -- the set's own; listed so the orbit's changes are put back too
+	Target_TargetType = "Trico",   -- the set's own; listed so a spike's switch is put back too
 	Base_FovDeg = 75.0,
 	AutoAvoid_Flags = "Valid|ChkTerrain|ChkCondor",   -- turn the rod away from walls and Trico (as Run does)
 	Rod_Flags = "ApproachHead|ShortenByPitch",        -- the set's own, less IgnoreCondorHit: the
@@ -153,6 +154,7 @@ local function Untune()
 	CoopCamera.frame = nil
 	CoopCamera.orbitState = nil
 	CoopCamera.tricoSeen, CoopCamera.boySeen = nil, nil   -- measured again for the next pin
+	CoopCamera.spiking, CoopCamera.goodPos, CoopCamera.spikeFor = nil, nil, 0
 end
 
 -- Whether a bone of an entity is in the shot: true, false, or nil when the camera manager
@@ -246,6 +248,7 @@ local function Frame(dt)
 	if type(f) ~= "table" or not f.enabled or not param or type(tune) ~= "table" then return end
 	local trico, boy = CoopCamera.tricoSeen, CoopCamera.boySeen
 	if trico == nil and boy == nil then return end
+	if CoopCamera.spiking then return end   -- (his bones read wrong too: hold the framing)
 	local fr = CoopCamera.frame or { grow = 0, lift = 0, both = 0, out = 0, floor = nil }
 	CoopCamera.frame = fr
 	local here = TricoPos()
@@ -513,6 +516,39 @@ local function YawProbe(dt)
 	end
 end
 
+-- While some of Trico's own turns and slides play, every position the game gives for him (his
+-- entity, his AI, his bones) jumps to near the world origin for a few seconds while his model
+-- stays put, and a camera aimed at his neck flies off there ("he vanished into a glitched area").
+-- So while his position jumps more than SPIKE metres from the last good one, the Trico framing
+-- aims at the boy instead (the "Default" target) and comes back to Trico once it is real again;
+-- a jump lasting SPIKE_TIME is a real move (a story scene placing him elsewhere).
+local SPIKE = 15.0
+local SPIKE_TIME = 4.0
+local function RawTricoPos()
+	local ok, p = pcall(function()
+		local info = Ai2.Utils.GetCondorAIProps().currentInfo
+		return (info.work and info.work.GetMySelfPos) or info.aiPos
+	end)
+	if ok and p then return p end
+	return nil
+end
+
+function CoopCamera.Spike(dt, param)
+	local p = RawTricoPos()
+	if not p or not param then return end
+	local good = CoopCamera.goodPos
+	local far = good and ((p.X - good.X) ^ 2 + (p.Z - good.Z) ^ 2 > SPIKE * SPIKE)
+	if far then CoopCamera.spikeFor = (CoopCamera.spikeFor or 0) + dt else CoopCamera.spikeFor = 0 end
+	local spiking = far and CoopCamera.spikeFor < SPIKE_TIME
+	if not spiking then CoopCamera.goodPos = Vector(p) end
+	if spiking ~= (CoopCamera.spiking or false) then
+		CoopCamera.spiking = spiking
+		CoopCamera.spikes = (CoopCamera.spikes or 0) + (spiking and 1 or 0)
+		pcall(function() param.Target_TargetType = spiking and "Default" or "Trico" end)
+		if CoopDebug then CoopDebug.Print("CA spike %s", spiking and "on: aiming at the boy" or "off") end
+	end
+end
+
 -- Debug (CoopCamera.trace = seconds between lines): the Trico framing's state, often, to catch
 -- the camera hunting back and forth.
 local function Trace(dt)
@@ -547,6 +583,7 @@ function CoopCamera.Update(dt, tricoFraming, tricoInput)
 	end
 	CoopCamera.want = want
 	if CoopCamera.mode == "trico" then
+		pcall(CoopCamera.Spike, dt, CoopCamera.tunedParam)
 		pcall(Watch)
 		local okO, errO = pcall(Orbit, dt, tricoInput)
 		if not okO and errO ~= CoopCamera.lastError then

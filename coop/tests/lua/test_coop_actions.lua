@@ -254,33 +254,37 @@ local function tap(input)
 end
 rest()
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
+local function lastSlide()
+	local c = Harness.CallsNamed("slide")
+	return c[#c] and c[#c][3]
+end
 tap(btn())
-check(string.find(lastCmd(), "turn_180") ~= nil, "centred stick: about-turn: " .. lastCmd())
+check(lastSlide() and math.abs(lastSlide().destinationDir.Z + 1) < 1e-3, "centred stick: his own slide right round")
 rest()
 -- stick held the way Trico already faces: nothing to do
-local before = #Harness.CallsNamed("cmd")
+local before = #Harness.CallsNamed("slide")
 CoopTrico.latch = nil
 Harness.objects._trico_camera = { worldPosition = Vector(1, 3, -10) }   -- camera forward is about +Z
 tap(btn(nil, 0, 1))
-check(#Harness.CallsNamed("cmd") == before, "already facing that way")
+check(#Harness.CallsNamed("slide") == before, "already facing that way")
 rest()
 CoopTrico.latch = nil
 tap(btn(nil, -1, 0))   -- stick left: the left of +Z is +X
-check(lastCmd() == "ControlCommand_C_turn_90_left", "stick left: a quarter turn left: " .. lastCmd())
+check(lastSlide() and lastSlide().destinationDir.X > 0.9, "stick left: his own slide to face +X")
 -- a turn event just after a swap is the swap's own L3: ignored
 rest()
 CoopActions.sent = nil   -- (the turn above is never seen to start here: no resends)
-local nturn = #Harness.CallsNamed("cmd")
+local nturn = #Harness.CallsNamed("slide")
 CoopInput.events = { { kind = "swap", value = "boy" } }
 CoopActions.Update(0.016, btn())
 CoopInput.events = { { kind = "turn" } }
 CoopActions.Update(0.5, btn())
 CoopInput.events = {}
-check(#Harness.CallsNamed("cmd") == nturn, "no turn right after a swap")
+check(#Harness.CallsNamed("slide") == nturn, "no turn right after a swap")
 CoopActions.Update(1.1, btn())
 CoopActions.sent = nil
 tap(btn())
-check(#Harness.CallsNamed("cmd") == nturn + 1, "but a tap later turns")
+check(#Harness.CallsNamed("slide") == nturn + 1, "but a tap later turns")
 CoopActions.sent = nil
 CoopInput = nil
 CoopTrico.latch = nil

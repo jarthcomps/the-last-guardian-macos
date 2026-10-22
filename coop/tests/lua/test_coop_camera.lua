@@ -252,6 +252,34 @@ Input = nil
 Ai2.Utils.GetCondorAIProps = savedProps
 Ai2 = savedAi2b
 
+-- Trico's position spiking to near the origin (his own turns and slides): the Trico view aims
+-- at the boy until it is real again, so the camera never flies off; a lasting jump is accepted
+local spikeAt = Vector(-70, 7, -80)
+local savedAi2c = Ai2
+Ai2 = Ai2 or {}
+Ai2.Utils = Ai2.Utils or {}
+local savedPropsC = Ai2.Utils.GetCondorAIProps
+Ai2.Utils.GetCondorAIProps = function() return { currentInfo = { work = { GetMySelfPos = spikeAt }, aiPos = spikeAt } } end
+CoopCamera.Update(0.016, true)
+local ts = objects[CoopCamera.tricoParam]
+for _ = 1, 5 do CoopCamera.Update(0.1, true) end
+check(ts.Target_TargetType == nil or ts.Target_TargetType == "Trico" or ts.Target_TargetType ~= "Default", "steady: aimed at Trico")
+spikeAt = Vector(-0.4, 7, -0.6)
+local targets = {}
+for _ = 1, 20 do CoopCamera.Update(0.1, true) targets[#targets + 1] = ts.Target_TargetType end
+check(ts.Target_TargetType == "Default" and CoopCamera.spiking, "a spike: aimed at the boy")
+for _, t in ipairs(targets) do check(t == "Default", "never at the spike while it lasts") end
+spikeAt = Vector(-70.5, 7, -80.2)
+CoopCamera.Update(0.1, true)
+check(ts.Target_TargetType == "Trico" and not CoopCamera.spiking, "real again: back on Trico")
+-- a jump that lasts (a scene placing him elsewhere) is accepted after 4 s
+spikeAt = Vector(40, 7, 40)
+for _ = 1, 45 do CoopCamera.Update(0.1, true) end
+check(ts.Target_TargetType == "Trico" and not CoopCamera.spiking, "a lasting move: back on Trico at the new place")
+CoopCamera.Update(0.016, false)
+Ai2.Utils.GetCondorAIProps = savedPropsC
+Ai2 = savedAi2c
+
 -- the debug dump: the set's table, once the game camera is up
 GameCamera.game_param_tbl = { Stand = { Base = { Distance = 4.5, Offset = { X = 0, Y = 1.5 } }, _cond = {} } }
 GameCam_Command = function(cmd, name) return { GetName = function() return name end } end
