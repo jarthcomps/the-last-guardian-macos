@@ -407,6 +407,20 @@ local ends = Harness.CallsNamed("cmd")
 check(#ends == 1 and ends[1][3] == "ControlCommand_C_sit_end" and CoopTrico.nav == "stand-up", "sitting: stood up first")
 for _ = 1, 4 do CoopTrico.refreshIn = 0 CoopTrico.Update(0.016, { x = 0, y = 1 }) end
 check(#Harness.CallsNamed("cmd") == 1, "not asked again at once")
+-- lying: his stand command
+Ai2.Utils.GetCurAnimState = function() return "ext_c_lie_down_loop" end
+Harness.calls = {}
+CoopTrico.standIn = 0
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(Harness.CallsNamed("cmd")[1] and Harness.CallsNamed("cmd")[1][3] == "ControlCommand_C_stand", "lying: stood up with his stand command")
+-- getting up (an end animation) is left to play
+Ai2.Utils.GetCurAnimState = function() return "ext_c_sit_end" end
+Harness.calls = {}
+CoopTrico.standIn = 0
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(#Harness.CallsNamed("cmd") == 0, "getting up: nothing sent")
 Ai2.Utils.GetCurAnimState = savedAnim2
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 -- which turn: the right of a facing (x, z) is (-z, x)
@@ -473,13 +487,57 @@ Ai2.CondorUtils.GetPath = function() return built end
 Ai2.CondorUtils.Path = { ReqDiscretePathMode = Harness.Record("discrete") }
 Ai2.Actions = { Condor = { Path = { Pack = {} } } }
 Ai2BuildPath = Harness.Record("build")
+Harness.tricoProps.moveMngr.walk = { suspendStopDecision = false }
 Harness.calls = {}
 CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(Harness.tricoProps.moveMngr.walk.suspendStopDecision == true, "ctrl: his stop decision suspended while held")
+local types = Harness.tricoProps.curMoveTypes
+check(types and types[#types] == "MV_C_WALKFAST", "ctrl: full stick allows the fast walk")
+check(#CoopTrico.CtrlTypes(0.4) == 2 and CoopTrico.CtrlTypes(0.4)[2] == "MV_C_WALKSLOW", "ctrl: a light push walks slowly")
 check(Harness.tricoProps.plannedMove == "ForwardMove" and Harness.tricoProps.moveParam.manualMode
 	and CoopTrico.nav == "ctrl-walk", "ctrl: his forward move, manual")
 check(built.BasePos and near(built.BasePos.Z, 25) and near(built.BaseDir.Z, 1) and #Harness.CallsNamed("build") == 1,
 	"ctrl: the pose 25 m ahead")
 check(#Harness.CallsNamed("cmd") == 0, "ctrl: no walk commands while the path works")
+-- still standing half a second into the walk (after a sit): his own forward request, once a second
+local savedAnimK = Ai2.Utils.GetCurAnimState
+Ai2.Utils.GetCurAnimState = function() return "c_stand" end
+CoopTrico.ctrlStill, CoopTrico.kickIn = 0, 0
+Harness.calls = {}
+for _ = 1, 3 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(#Harness.CallsNamed("forward") == 0, "ctrl: no kick at once")
+for _ = 1, 3 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+local fw = Harness.CallsNamed("forward")
+check(#fw == 1 and fw[1][3] == CoopTrico.manualMove, "ctrl: kicked with his forward request")
+for _ = 1, 5 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(#Harness.CallsNamed("forward") == 1, "ctrl: not again within a second")
+Ai2.Utils.GetCurAnimState = function() return "c_walkC" end
+for _ = 1, 20 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(#Harness.CallsNamed("forward") == 2 - 1, "ctrl: walking: no kicks")
+-- a stale request of his (a slide taken by his sitting shuffle) holding a turn up: dropped after
+-- 1.5 s standing, and the turn asked again
+Ai2.Utils.GetCurAnimState = function() return "c_stand" end
+local stale = { name = "slide" }
+Harness.tricoProps.moveMngr.runningRequest = stale
+Harness.tricoProps.moveMngr.CancelPlannedMove = function(self, props) props.plannedMove = nil props.moveParam = nil end
+CoopTrico.ctrlStill, CoopTrico.unstickIn = 0, 0
+Harness.calls = {}
+for _ = 1, 10 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
+check(Harness.tricoProps.moveMngr.runningRequest == stale, "ctrl: not dropped within 1.5 s")
+for _ = 1, 7 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
+check(Harness.tricoProps.moveMngr.runningRequest == nil and CoopTrico.unsticks >= 1, "ctrl: stale request dropped")
+check(#Harness.CallsNamed("slide") >= 2, "ctrl: the turn asked again")
+Ai2.Utils.GetCurAnimState = savedAnimK
+-- the stick behind him: a turning slide, his destination moved ahead the stick's way (on it he
+-- counts as arrived and his slide does nothing)
+Harness.tricoProps.isOnGoalInVolume = true
+Harness.calls = {}
+CoopTrico.turnIn = 0
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+local dest = Harness.tricoProps.currentInfo.apDestination
+check(#Harness.CallsNamed("slide") == 1 and dest and near(dest.Z, -20) and not Harness.tricoProps.isOnGoalInVolume,
+	"ctrl: turned, destination ahead the stick's way")
+CoopTrico.Update(0.016, { x = 0, y = 1 })
 Harness.tricoProps.plannedMove = "MoveTurn"
 Harness.tricoProps.moveParam = nil
 Ai2BuildPath = nil
@@ -491,6 +549,7 @@ Harness.tricoProps.moveParam = CoopTrico.manualMove
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 check(not Harness.tricoProps.approach.skipCreate, "ctrl: planning back on release")
 check(Harness.tricoProps.plannedMove == nil and Harness.tricoProps.moveParam == nil, "ctrl: our forward move dropped")
+check(Harness.tricoProps.moveMngr.walk.suspendStopDecision == false, "ctrl: his stop decision back on release")
 Ai2BuildPath, Ai2.CondorUtils.GetPath, Ai2.CondorUtils.Path, Ai2.Actions = nil, nil, nil, nil
 Harness.tricoProps.plannedMove = "CoopManual"
 CoopTrico.Unskip(Harness.tricoProps)

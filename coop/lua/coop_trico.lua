@@ -348,10 +348,35 @@ end
 -- is off, so nothing replaces it), in the free walk's manual mode: the action layer's MoveForward
 -- then walks him towards the pose with his own gaits, the rest to walk being the way to the pose
 -- (with no path at all, the walk animation played on the spot).
+-- His gaits from how far the stick is pushed (his planning, now off, would set them from his
+-- interest; left alone they stay at his last idle walk-slow), and his own stop decision
+-- suspended while the stick is held, as the game's scripted chases do (put back on release):
+-- with it on he stopped half way through a hold and set off again slowly.
 CoopTrico.manualMove = { isFreeMove = true, manualMode = true, alongLinePath = false }
+local CTRL_TYPES = {
+	{ 0.55, { "MV_C_WALKSTOP", "MV_C_WALKSLOW" } },
+	{ 0.9, { "MV_C_WALKSTOP", "MV_C_WALKSLOW", "MV_C_WALK" } },
+	{ 2.0, { "MV_C_WALKSTOP", "MV_C_WALKSLOW", "MV_C_WALK", "MV_C_WALKFAST" } },
+}
+function CoopTrico.CtrlTypes(len)
+	for _, g in ipairs(CTRL_TYPES) do
+		if (len or 1) <= g[1] then return g[2] end
+	end
+	return CTRL_TYPES[#CTRL_TYPES][2]
+end
+
 function CoopTrico.ManualMove(props, pos, dirX, dirZ, len)
 	local target = CoopTrico.BuildAhead(props, pos, dirX, dirZ, len)
 	Ai2.CondorUtils.Path.ReqDiscretePathMode(props, false, false, false, false)
+	props.curMoveTypes = CoopTrico.CtrlTypes(len)
+	local walk = props.moveMngr and props.moveMngr.walk
+	local sk = CoopTrico.skipping
+	if walk and sk and sk.stopDecision == nil then
+		sk.stopDecision = walk.suspendStopDecision or false
+		sk.walk = walk
+	end
+	if walk then walk.suspendStopDecision = true end
+	props.isOnGoalInVolume = false
 	props.plannedMove = "ForwardMove"
 	props.moveParam = CoopTrico.manualMove
 	return target
@@ -608,12 +633,7 @@ function CoopTrico.Update(dt, input)
 	local okA, anim = pcall(Ai2.Utils.GetCurAnimState, info.ai2Ext)
 	anim = okA and tostring(anim) or ""
 	CoopTrico.standIn = math.max(0, (CoopTrico.standIn or 0) - REFRESH)
-	if string.find(anim, "_sit", 1, true) and not string.find(anim, "sit_end", 1, true) then
-		if CoopTrico.standIn <= 0 then
-			CoopTrico.standIn = 2.0
-			pcall(Ai2.Utils.ReqCtrlCmd, info.ai2Ext, "ControlCommand_C_sit_end")
-			CoopTrico.nav = "stand-up"
-		end
+	if CoopTrico.StandUp(props, anim) then
 		CoopTrico.steering = true
 		return
 	end
@@ -718,7 +738,25 @@ function CoopTrico.Update(dt, input)
 	end
 end
 
+-- Seated or lying, the stick first stands him up (every 2 s at most): from sitting with sit_end
+-- (as the game's own scripts do), from lying with his stand command. True while that is so.
+function CoopTrico.StandUp(props, anim)
+	local seated = (string.find(anim, "_sit", 1, true) or string.find(anim, "_lie", 1, true))
+		and not string.find(anim, "_end", 1, true)
+	if not seated then return false end
+	if (CoopTrico.standIn or 0) <= 0 then
+		CoopTrico.standIn = 2.0
+		local cmd = string.find(anim, "_sit", 1, true) and "ControlCommand_C_sit_end"
+			or props.standCommand or "ControlCommand_C_stand"
+		pcall(Ai2.Utils.ReqCtrlCmd, props.currentInfo.ai2Ext, cmd)
+	end
+	CoopTrico.nav = "stand-up"
+	return true
+end
+
 -- "ctrl", every frame the stick is held (see the top).
+local CTRL_KICK = 0.5          -- seconds standing into a walk before his forward request
+local CTRL_UNSTICK = 1.5       -- ... and before his own stuck requests are dropped
 local CTRL_WALK_ANGLE = 50.0   -- degrees off the stick's way he keeps walking; beyond: turn
 local CTRL_GEARS = { { 0.55, "ControlCommand_C_walk_slow" }, { 0.9, "ControlCommand_C_walk" },
 	{ 2.0, "ControlCommand_C_walk_fast" } }
@@ -740,24 +778,33 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		CoopTrico.skipping = { approach = props.approach, was = props.approach.skipCreate }
 		props.approach.skipCreate = true
 	end
+	CoopTrico.steering = true
+	local okA, anim = pcall(Ai2.Utils.GetCurAnimState, ai)
+	anim = okA and tostring(anim) or ""
+	-- still standing CTRL_UNSTICK into a hold: a request of his that never finishes (a slide
+	-- asked for while he sat went to his sitting shuffle) keeps every later one waiting behind
+	-- it, so his running request and planned move are dropped and the turn or walk asked again
+	local standing = string.find(anim, "stand", 1, true) and not string.find(anim, "walk", 1, true)
+	CoopTrico.ctrlStill = standing and (CoopTrico.ctrlStill or 0) + dt or 0
+	CoopTrico.unstickIn = math.max(0, (CoopTrico.unstickIn or 0) - dt)
+	if CoopTrico.ctrlStill >= CTRL_UNSTICK and CoopTrico.unstickIn <= 0 and props.moveMngr then
+		CoopTrico.unstickIn = 2.0
+		CoopTrico.unsticks = (CoopTrico.unsticks or 0) + 1
+		local m = props.moveMngr
+		m.runningRequest = nil
+		m.requests = {}
+		pcall(function() m:CancelPlannedMove(props) end)
+		CoopTrico.turnIn = 0
+		if CoopDebug then CoopDebug.Print("TR unstick %s", anim) end
+	end
 	-- a planned move none of his actions handle: with none at all (nil) his action layer runs its
 	-- stop every frame and stops the walk commands below
 	if props.plannedMove == nil or props.plannedMove == "MoveStop" then
 		props.plannedMove = "CoopManual"
 		props.moveParam = nil
 	end
-	CoopTrico.steering = true
-	local okA, anim = pcall(Ai2.Utils.GetCurAnimState, ai)
-	anim = okA and tostring(anim) or ""
 	CoopTrico.standIn = math.max(0, (CoopTrico.standIn or 0) - dt)
-	if string.find(anim, "_sit", 1, true) and not string.find(anim, "sit_end", 1, true) then
-		if CoopTrico.standIn <= 0 then
-			CoopTrico.standIn = 2.0
-			pcall(Ai2.Utils.ReqCtrlCmd, ai, "ControlCommand_C_sit_end")
-		end
-		CoopTrico.nav = "stand-up"
-		return
-	end
+	if CoopTrico.StandUp(props, anim) then return end
 	if (string.find(anim, "turn", 1, true) or string.find(anim, "slide_rot", 1, true)) and not string.find(anim, "walk", 1, true) then
 		CoopTrico.nav = "turning"
 		return
@@ -775,6 +822,11 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 	CoopTrico.goal = Vector(pos.X + wx * 10, pos.Y, pos.Z + wz * 10)
 	if cos < math.cos(math.rad(CTRL_WALK_ANGLE)) then
 		-- too far round: a turn on the spot (stopping first if he walks), one at a time
+		-- (his destination ahead the stick's way, not where he stands: on his destination he
+		-- counts as arrived, and his slide action then does nothing)
+		info.apDestination = Vector(pos.X + wx * 20, pos.Y, pos.Z + wz * 20)
+		info.apDestinationDir = Vector(wx, 0, wz)
+		props.isOnGoalInVolume = false
 		if CoopTrico.turnIn <= 0 then
 			CoopTrico.turnIn = 1.0
 			local name = CoopTrico.TurnCommand(dirXZ.X, dirXZ.Z, wx, wz)
@@ -784,6 +836,16 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		return
 	end
 	local ok, err = pcall(CoopTrico.ManualMove, props, pos, wx, wz, len)
+	-- after he has sat (and stood up), his action layer leaves the planned move alone until a
+	-- move request comes through: still standing CTRL_KICK into the walk, his own forward
+	-- request (the same move), once a second at most
+	CoopTrico.kickIn = math.max(0, (CoopTrico.kickIn or 0) - dt)
+	if ok and CoopTrico.ctrlStill >= CTRL_KICK and CoopTrico.kickIn <= 0 then
+		CoopTrico.kickIn = 1.0
+		CoopTrico.kicks = (CoopTrico.kicks or 0) + 1
+		pcall(function() props.moveMngr:RequestForward(CoopTrico.manualMove) end)
+		if CoopDebug then CoopDebug.Print("TR kick %s", anim) end
+	end
 	if ok then
 		CoopTrico.nav = "ctrl-walk"
 	else
@@ -802,6 +864,7 @@ function CoopTrico.Unskip(props)
 	if not sk then return end
 	CoopTrico.skipping = nil
 	sk.approach.skipCreate = sk.was
+	if sk.walk then sk.walk.suspendStopDecision = sk.stopDecision end
 	if props and (props.plannedMove == "CoopManual" or props.moveParam == CoopTrico.manualMove) then
 		props.plannedMove = nil
 		props.moveParam = nil
@@ -821,14 +884,7 @@ function CoopTrico.Direct(dt, props, sx, sy, len)
 	anim = okA and tostring(anim) or ""
 	CoopTrico.steering = true
 	CoopTrico.standIn = math.max(0, (CoopTrico.standIn or 0) - dt)
-	if string.find(anim, "_sit", 1, true) and not string.find(anim, "sit_end", 1, true) then
-		if CoopTrico.standIn <= 0 then
-			CoopTrico.standIn = 2.0
-			pcall(Ai2.Utils.ReqCtrlCmd, info.ai2Ext, "ControlCommand_C_sit_end")
-		end
-		CoopTrico.nav = "stand-up"
-		return
-	end
+	if CoopTrico.StandUp(props, anim) then return end
 	if (string.find(anim, "turn", 1, true) or string.find(anim, "slide_rot", 1, true)) and not string.find(anim, "walk", 1, true) then
 		CoopTrico.nav = "turning"
 		return   -- let a turn on the spot play out
@@ -877,7 +933,8 @@ function CoopTrico.HookAILog(props, dt)
 		log.AddMessage = function(self, report, fmt, ...)
 			local ok, msg = pcall(string.format, tostring(fmt), ...)
 			msg = ok and msg or tostring(fmt)
-			if string.find(msg, "stop") or string.find(msg, "request") or string.find(msg, "cancel") then
+			if string.find(msg, "stop") or string.find(msg, "request") or string.find(msg, "cancel")
+				or string.find(msg, "slide") or string.find(msg, "skip") or string.find(msg, "fail") then
 				local key = tostring(report and report.name) .. ":" .. msg
 				if not seen[key] then
 					seen[key] = true
