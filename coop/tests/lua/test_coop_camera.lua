@@ -190,6 +190,14 @@ check(tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "held for a while afte
 for _ = 1, 4 do CoopCamera.Update(0.5, true, stick) end
 check(tf.Rod_YawBasisType == "Free" and CoopCamera.orbitState == nil and tf.Rod_PitchBaseDeg == -25,
 	"eased back behind Trico, then the game's free camera again")
+-- a turn into a wall (the camera pushed within 4 m of Trico) goes back to the last good angle
+CoopCamera.seenInfo = { CoopCamTrico = { timer = 1, ratio_xy = 0.8, distance_z = 2.0 } }
+stick.rx = 1
+CoopCamera.Update(0.5, true, stick)
+check(CoopCamera.orbitState and CoopCamera.orbitState.yaw == 0, "no room: back to the last good angle")
+CoopCamera.seenInfo = nil
+stick.rx = 0
+for _ = 1, 10 do CoopCamera.Update(0.5, true, stick) end
 -- the boy's player turns the game's camera: theirs at once
 stick.rx = 1
 CoopCamera.Update(0.5, true, stick)

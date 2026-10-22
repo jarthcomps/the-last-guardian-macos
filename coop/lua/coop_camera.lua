@@ -75,6 +75,8 @@ CoopCamera.orbit = CoopCamera.orbit or {
 	deadzone = 0.25,
 	idle = 3.0,           -- seconds without input before easing back behind Trico
 	back = 90,            -- degrees per second while easing back
+	near = 4.0,           -- metres: a turn that brings the camera this close to Trico (a wall
+	                      -- pushing it into him) goes back to the last angle that had room
 	-- the "Global" yaw for a rod pointing from Trico toward the world direction (x, z):
 	-- yawZero + yawSign * atan2(x, z) in degrees (from the yaw probe run)
 	yawZero = 0,
@@ -388,9 +390,16 @@ local function Orbit(dt, input)
 		return
 	end
 	if turning then
-		st = st or { yaw = 0, pitch = 0, idle = 0 }
+		st = st or { yaw = 0, pitch = 0, idle = 0, good = 0 }
 		CoopCamera.orbitState = st
-		st.yaw = (st.yaw + rx * o.yawSpeed * dt + 180) % 360 - 180
+		local t = CoopCamera.seenInfo and CoopCamera.seenInfo.CoopCamTrico
+		local z = t and tonumber(t.distance_z)
+		if z and z > 0 and z < o.near then
+			st.yaw = st.good          -- no room this way: back to where there was
+		else
+			st.good = st.yaw
+			st.yaw = (st.yaw + rx * o.yawSpeed * dt + 180) % 360 - 180
+		end
 		st.pitch = math.max(o.pitchMin, math.min(o.pitchMax, st.pitch + ry * o.pitchSpeed * dt))
 		st.idle = 0
 	elseif st then
