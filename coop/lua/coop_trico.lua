@@ -463,6 +463,7 @@ end
 
 local function Release(props)
 	pcall(CoopTrico.Unskip, props)
+	CoopTrico.stoodUp = nil
 	CoopTrico.steering = false
 	CoopTrico.goal = nil
 	CoopTrico.turning = false
@@ -769,6 +770,7 @@ function CoopTrico.StandUp(props, anim)
 			or props.standCommand or "ControlCommand_C_stand"
 		pcall(Ai2.Utils.ReqCtrlCmd, props.currentInfo.ai2Ext, cmd)
 	end
+	CoopTrico.stoodUp = true   -- (ctrl wakes him as soon as he stands: see CoopTrico.Ctrl)
 	CoopTrico.nav = "stand-up"
 	return true
 end
@@ -778,7 +780,9 @@ local CTRL_KICK = 0.5          -- seconds standing into a walk before his forwar
 local CTRL_UNSTICK = 2.0       -- seconds without progress before his own stuck requests are dropped
 local CTRL_PROGRESS = 0.3      -- metres that count as progress
 local WAKE_TIME = 2.0          -- seconds his planning may run to get him going again
-local CTRL_WALK_ANGLE = 50.0   -- degrees off the stick's way he sets off walking; beyond: turn
+local CTRL_WALK_ANGLE = 35.0   -- degrees off the stick's way he sets off walking; beyond: turn
+                               -- (his turning slide can fall short, 55 of 105 degrees: a
+                               -- second one beats setting off crooked)
 local CTRL_CURVE_ANGLE = 100.0 -- ... and walking, keeps walking (curving round); beyond: stop, turn
 local CTRL_GEARS = { { 0.55, "ControlCommand_C_walk_slow" }, { 0.9, "ControlCommand_C_walk" },
 	{ 2.0, "ControlCommand_C_walk_fast" } }
@@ -812,6 +816,7 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 	CoopTrico.ctrlStill = standing and (CoopTrico.ctrlStill or 0) + dt or 0
 	local spinning = string.find(anim, "slide", 1, true) or string.find(anim, "turn", 1, true)
 		or string.find(anim, "_sit", 1, true) or string.find(anim, "_lie", 1, true)   -- (getting up)
+		or string.find(anim, "stand_walk", 1, true)   -- (setting off: 2 s at a crawl)
 	local from = CoopTrico.progressFrom
 	if not from or spinning or DistanceXZ(from, pos) > CTRL_PROGRESS then
 		CoopTrico.progressFrom = Vector(pos)
@@ -833,6 +838,12 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		-- way, as the steer strategy gives him, until he moves (WAKE_TIME at most)
 		if standing then CoopTrico.waking = WAKE_TIME end
 		if CoopDebug then CoopDebug.Print("TR unstick %s", anim) end
+	end
+	-- stood up from a sit or lie: his own action still holds him (his move manager runs nothing
+	-- until it lets go), so the wake-up starts at once rather than after CTRL_UNSTICK
+	if CoopTrico.stoodUp and standing then
+		CoopTrico.stoodUp = nil
+		CoopTrico.waking = WAKE_TIME
 	end
 	if CoopTrico.waking then
 		local moving = string.find(anim, "walk", 1, true) or string.find(anim, "slide", 1, true)
@@ -938,6 +949,7 @@ function CoopTrico.Unskip(props)
 	if not sk then return end
 	CoopTrico.skipping = nil
 	CoopTrico.waking = nil
+	CoopTrico.stoodUp = nil
 	CoopTrico.progressFrom, CoopTrico.stuckFor = nil, 0
 	sk.approach.skipCreate = sk.was
 	if sk.walk then sk.walk.suspendStopDecision = sk.stopDecision end

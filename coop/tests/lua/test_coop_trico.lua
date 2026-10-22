@@ -568,6 +568,22 @@ local brake = Harness.CallsNamed("cmd")
 check(CoopTrico.nav == "ctrl-brake" and brake[#brake][3] == "ControlCommand_C_walk_stop" and #Harness.CallsNamed("slide") == 0,
 	"ctrl walking: right round, braked first")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
+-- standing 45 degrees off the stick's way: a turn first (a turning slide can fall short; setting
+-- off crooked he drifted and turned again)
+Ai2.Utils.GetCurAnimState = function() return "c_stand" end
+Harness.calls = {}
+CoopTrico.turnIn = 0
+CoopTrico.Update(0.016, { x = -0.7, y = 0.7 })
+check(#Harness.CallsNamed("slide") == 1 and CoopTrico.nav ~= "ctrl-walk", "ctrl standing 45 degrees off: turned first, nav " .. tostring(CoopTrico.nav))
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+-- stood up by the stick: woken as soon as he stands
+Ai2.Utils.GetCurAnimState = function() return "ext_c_sit_loop" end
+CoopTrico.standIn, CoopTrico.waking = 0, nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+Ai2.Utils.GetCurAnimState = function() return "c_stand" end
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(CoopTrico.waking and CoopTrico.nav == "ctrl-wake", "ctrl: stood up: woken at once")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
 -- getting up from a sit takes seconds on the spot: not stuck
 Ai2.Utils.GetCurAnimState = function() return "ext_c_sit_end" end
 CoopTrico.progressFrom, CoopTrico.stuckFor, CoopTrico.unstickIn = nil, 0, 0
