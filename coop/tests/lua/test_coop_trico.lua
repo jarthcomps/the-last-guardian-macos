@@ -183,6 +183,26 @@ CoopTrico.Update(0.016, { x = 0, y = 0 })
 check(not ow.condition() and not CoopTrico.turning, "released")
 Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
 
+-- steer kicks a standing Trico off with a forward move to the goal; not while he already moves
+CoopTrico.strategy = "steer"
+Harness.calls = {}
+Harness.tricoProps.plannedMove = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+local kick = Harness.CallsNamed("forward")
+check(#kick == 1 and kick[1][3].isFreeMove and near(kick[1][3].goalPos.Z, 8)
+	and near(Harness.tricoProps.currentInfo.apDestination.Z, 8), "standing: kicked off towards the goal")
+Harness.tricoProps.plannedMove = "MoveForward"
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(#Harness.CallsNamed("forward") == 1, "already moving: no kick")
+Harness.tricoProps.plannedMove = nil
+Harness.tricoProps.isInjuredMovementMode = true
+CoopTrico.refreshIn = 0
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(#Harness.CallsNamed("forward") == 1, "injured: no free move")
+Harness.tricoProps.isInjuredMovementMode = nil
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+
 -- on a narrow beam the side goal is off the navmesh: Trico turns on the spot instead
 Harness.reachable = function(from, to) return math.abs(to.X) < 1 end   -- 2 m wide, along Z
 Harness.calls = {}

@@ -96,7 +96,9 @@ local FACING = 0.7                            -- cosine: a turn already this clo
 local STRETCHES = { "stretchFront", "stretchUp", "stretchBack" }
 -- animation states a single move may start from (not the walk starts: c_stand_walk_fastC...)
 local IDLE = { "c_stand", "c_wait", "c_idle" }
-local MOVING = { "walk", "run", "gallop", "turn", "slide", "jump" }
+local MOVING = { "walk", "run", "gallop", "turn", "slide", "jump",
+	-- and Trico's own fidgets from standing (c_stand_shake_high...), which take no commands
+	"shake", "stretch", "yawn", "excite", "roar", "attack", "look", "scratch", "sniff" }
 local SEATED = { "c_sit", "ext_c_sit", "c_lie", "ext_c_lie", "c_liedown", "ext_c_liedown" }
 
 function CoopActions.Reset()

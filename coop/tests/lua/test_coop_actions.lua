@@ -189,6 +189,11 @@ rest() CoopActions.Update(0.016, btn("R1"))
 check(lastCmd() == "ControlCommand_C_stand_test", "up from lying: the stand command")
 CoopActions.Release()
 n = #Harness.CallsNamed("cmd")
+-- nor is Trico shaking himself off (a standing fidget that takes no commands)
+anim = "c_stand_shake_high"
+rest() CoopActions.Update(0.016, btn("R1"))
+check(#Harness.CallsNamed("cmd") == n and CoopActions.pending, "c_stand_shake_high is busy")
+CoopActions.Release()
 -- the start of a walk is not standing
 anim = "c_stand_walk_fastC"
 rest() CoopActions.Update(0.016, btn("R1"))

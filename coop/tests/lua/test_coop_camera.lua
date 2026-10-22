@@ -119,7 +119,7 @@ local tm2 = objects.TricoAutoRunTest_middle
 check(tm2.Rod_LengthBase == 14 and tm2.Rod_PitchBaseDeg == -25, "both seen: the tuned rod")
 boyOut(true)
 for _ = 1, 4 do CoopCamera.Update(0.5, true) end
-check(tm2.Rod_LengthBase == 20 and tm2.Rod_PitchBaseDeg == -37, "the boy out of the shot: longer and steeper")
+check(tm2.Rod_LengthBase == 18.5 and tm2.Rod_PitchBaseDeg == -34, "the boy out of the shot for 1 s: longer and steeper")
 boyOut(false)
 seen.Trico = false
 for _ = 1, 20 do CoopCamera.Update(0.5, true) end
@@ -129,6 +129,34 @@ CoopCamera.Update(0.5, true)
 check(tm2.Rod_LengthBase == 26, "not eased back at once")
 for _ = 1, 80 do CoopCamera.Update(0.5, true) end
 check(tm2.Rod_LengthBase == 14 and tm2.Rod_PitchBaseDeg == -25, "eased back once both are seen")
+-- no hunting: a boy who drops out of the shot whenever the rod is under 17 m (easing back loses
+-- him) must not make the camera swing in and out for ever: it settles within a few swings
+Harness.tricoProps = Harness.NewTricoProps(0, 0, 0)
+local boyFrom = function() return tm2.Rod_LengthBase >= 17 end
+local lengths, turns, last, dir = {}, 0, nil, 0
+for i = 1, 160 do   -- 80 s of checks
+	boyOut(not boyFrom())
+	CoopCamera.Update(0.5, true)
+	local l = tm2.Rod_LengthBase
+	if last and l ~= last then
+		local d = l > last and 1 or -1
+		if dir ~= 0 and d ~= dir and i > 80 then turns = turns + 1 end
+		dir = d
+	end
+	last = l
+	lengths[#lengths + 1] = l
+end
+check(turns <= 1, "the second 40 s: the rod changes direction at most once (" .. turns .. ")")
+check(tm2.Rod_LengthBase >= 17, "and keeps the boy in shot")
+-- once Trico has walked on, the camera may ease back again
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, 10)
+boyOut(false)
+for _ = 1, 60 do CoopCamera.Update(0.5, true) end
+check(tm2.Rod_LengthBase < 17, "Trico moved on: eased back again")
+Harness.tricoProps = nil
+boyOut(false)
+for _ = 1, 200 do CoopCamera.Update(0.5, true) end
+
 -- the game's timer, when it counts, says seen whatever the ratio
 CameraManager.GetVisibleInfo2 = function() return { timer = 2.0, ratio_xy = 0.99, distance_z = 10 }, true end
 for _ = 1, 4 do CoopCamera.Update(0.5, true) end
@@ -176,6 +204,14 @@ local stick = { x = 0, y = 0, rx = 1, ry = 0, hold = {}, down = {} }
 CoopCamera.Update(0.5, true, stick)
 check(tf.Rod_YawBasisType == "Global" and tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "turned 60 degrees")
 check(CoopCamera.OrbitYaw(0, 1, 0) == 180 and CoopCamera.OrbitYaw(1, 0, 0) == 270, "behind Trico, as mapped")
+-- Trico turning under the orbit doesn't swing it: "behind" was taken when the turn began
+local turnedProps = { currentInfo = { ai2Ext = { dirXZ = Vector(1, 0, 0) } } }
+Ai2.Utils.GetCondorAIProps = function() return turnedProps end
+stick.rx = 0
+CoopCamera.Update(0.1, true, stick)
+check(tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "Trico turned: the orbit holds still")
+Ai2.Utils.GetCondorAIProps = function() return { currentInfo = { ai2Ext = { dirXZ = Vector(0, 0, 1) } } } end
+stick.rx = 1
 stick.rx, stick.ry = 0, 1
 CoopCamera.Update(0.5, true, stick)
 check(tf.Rod_PitchBaseDeg == -25 + 20, "tilted, as far as allowed")

@@ -14,7 +14,10 @@
 --               approach destination (the game stops free moves while Trico is injured).
 --   "steer":    "goal" plus the approach overwrite (destination and direction), and a turn
 --               start: a goal far round from Trico's facing is first replaced by one to the
---               side, re-placed as Trico turns, until Trico faces the stick's way.
+--               side, re-placed as Trico turns, until Trico faces the stick's way. While Trico
+--               has no move planned (standing, waiting for his interests to pick the goal) the
+--               move manager is also asked for a forward move to it (CoopTrico.kick), so he
+--               sets off at once.
 -- With the stick released, Trico is asked to stop and its AI is left alone.
 --
 -- The stick is camera-relative by default, with the camera's direction latched when the stick
@@ -57,6 +60,7 @@ local YIELD = 1.5              -- seconds steering waits for a queued move (coop
 
 CoopTrico.strategy = CoopTrico.strategy or "goal"
 CoopTrico.relative = CoopTrico.relative or "camera"
+if CoopTrico.kick == nil then CoopTrico.kick = true end
 CoopTrico.commands = {
 	turn90Left = "ControlCommand_C_turn_90_left",
 	turn90Right = "ControlCommand_C_turn_90_right",
@@ -216,6 +220,12 @@ end
 function Steer.steer(props, goal, dir)
 	Steer.goal(props, goal, dir)
 	OverwriteApproach(props, goal, dir)
+	if CoopTrico.kick and props.plannedMove == nil and not props.isInjuredMovementMode then
+		props.currentInfo.apDestination = goal
+		props.currentInfo.apDestinationDir = dir
+		props.moveMngr:RequestForward({ isFreeMove = true, goalPos = goal, goalDir = dir })
+		CoopTrico.kicks = (CoopTrico.kicks or 0) + 1
+	end
 end
 
 -- The side goal that starts a turn from Trico's facing (faceX, faceZ) towards the way (dx, dz),
