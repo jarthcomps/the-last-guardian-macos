@@ -164,15 +164,29 @@ CoopActions.Update(0.1, btn("L1", 0, 0, true))
 check(lastCmd() == "ControlCommand_C_threat_posture", "held")
 CoopActions.Update(0.1, btn())
 check(lastCmd() == "ControlCommand_C_threat_posture_end", "ended on release")
--- refused while busy (walking): nothing sent
+-- while Trico walks a move waits (steering pauses) and goes once it stands; refused after 3 s
 anim = "c_walkC"
 n = #Harness.CallsNamed("cmd")
 CoopActions.Update(0.016, btn("R1"))
-CoopActions.Update(0.016, btn("Down"))
-CoopActions.Update(0.016, btn("L1"))
-CoopActions.Update(0.1, btn())
-check(#Harness.CallsNamed("cmd") == n and not CoopActions.threat, "refused while walking")
+check(#Harness.CallsNamed("cmd") == n and CoopActions.pending and CoopActions.pending.name == "roar", "roar waits")
+CoopTrico.Update(0.016, btn(nil, 0, 1))
+check(not CoopTrico.steering, "steering waits for the move")
 anim = "c_stand"
+CoopActions.Update(0.1, btn())
+check(lastCmd() == "ControlCommand_C_roar" and CoopActions.pending == nil, "roar once standing")
+anim = "c_walkC"
+n = #Harness.CallsNamed("cmd")
+CoopActions.Update(0.016, btn("Triangle"))
+for _ = 1, 31 do CoopActions.Update(0.1, btn()) end
+check(#Harness.CallsNamed("cmd") == n and CoopActions.pending == nil, "never standing: refused after 3 s")
+-- while Trico sits, a standing move first asks it to stand
+anim = "ext_c_sit_loop"
+CoopActions.Update(0.016, btn("Right"))
+check(lastCmd() == "ControlCommand_C_stand_test" and CoopActions.pending.name == "kickRight"
+	or lastCmd() == "ControlCommand_C_stand_test" and CoopActions.pending.name == "kickLeft", "stands up first")
+anim = "c_stand"
+CoopActions.Update(0.1, btn())
+check(string.find(lastCmd(), "attack_hind") ~= nil, "then kicks")
 
 -- Circle with the stick left or right: a paw pull, once Trico stands still (steering waits)
 anim = "c_walkC"
@@ -191,8 +205,8 @@ check(lastCmd() == "ControlCommand_C_touch_right_pull", "right paw pull")
 anim = "c_walkC"
 n = #Harness.CallsNamed("cmd")
 CoopActions.Update(0.016, btn("Circle", 0.9, 0))
-for _ = 1, 21 do CoopActions.Update(0.1, btn()) end
-check(CoopActions.pending == nil and #Harness.CallsNamed("cmd") == n, "never still: refused after 2 s")
+for _ = 1, 31 do CoopActions.Update(0.1, btn()) end
+check(CoopActions.pending == nil and #Harness.CallsNamed("cmd") == n, "never still: refused after 3 s")
 anim = "c_stand"
 
 -- Circle: the Action gesture on Trico's interest, else on the dummy ahead

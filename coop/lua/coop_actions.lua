@@ -19,8 +19,9 @@
 --             sent once Trico stands still (steering waits for it, at most PENDING_TIME).
 --   Up:       rear up on the hind legs (C_rise, which Trico takes from idle too), held while the
 --             button is.
--- Single moves (one control command each, sent only while Trico stands, waits or sits; refused
--- and logged otherwise):
+-- Single moves (one control command each). Sent at once while Trico stands or waits; while it
+-- sits or lies Trico is first asked to stand, and while it walks steering waits: the move then
+-- goes as soon as Trico stands, within PENDING_TIME (refused and logged otherwise):
 --   Triangle stomp; R1 roar; L1 threat posture (held, ended on release); Down sit, then lie down,
 --   then stand up; Left stretch (front, up, back in turn); Right hind-leg kick (left and right in
 --   turn).
@@ -48,7 +49,7 @@ local GESTURE_STARTS = {                      -- the animation states the gestur
 	Gesture_Jump = { "ext_c_Gesture_attack_below" },
 }
 local RISE_REPEAT = 0.5
-local PENDING_TIME = 2.0                      -- seconds a paw pull waits for Trico to stand still
+local PENDING_TIME = 3.0                      -- seconds a move waits for Trico to stand still
 local PULL_STICK = 0.5                        -- stick x beyond which Circle pulls with that paw
 local WATCH = 3.0                             -- seconds of animation reports after an action
 local DEADZONE = 0.3
@@ -222,13 +223,18 @@ end
 
 local function Lying(anim) return string.find(anim, "lie") ~= nil end
 
--- A single move: one command, only from a standing, waiting (or, for the posture moves, seated)
--- Trico. Returns the detail for the report.
+-- A single move: at once from a standing or waiting (or, for the posture moves, seated) Trico;
+-- otherwise it waits for Trico to stand (asked to, when it sits or lies). Returns the report detail.
 local function Move(props, name, anim, seatedToo)
-	if not (StartsWith(anim, IDLE) or (seatedToo and StartsWith(anim, SEATED))) then
-		return "refused " .. anim
+	if StartsWith(anim, IDLE) or (seatedToo and StartsWith(anim, SEATED)) then
+		return Command(props, name)
 	end
-	return Command(props, name)
+	CoopActions.pending = { name = name, timer = PENDING_TIME }
+	if StartsWith(anim, SEATED) then
+		Command(props, "stand")
+		return name .. " waiting, standing up from " .. anim
+	end
+	return name .. " waiting " .. anim
 end
 
 -- Circle: the Action gesture on Trico's current interest, else on the dummy ahead.
@@ -351,11 +357,11 @@ local function Step(dt, input, props, anim)
 		pend.timer = pend.timer - dt
 		if StartsWith(anim, IDLE) then
 			CoopActions.pending = nil
-			Say("AC pull %s anim=%s", Command(props, pend.name), anim)
-			CoopActions.lastAction, CoopActions.watch, CoopActions.lastAnim = "pull", WATCH, nil
+			Say("AC %s sent %s anim=%s", pend.name, Command(props, pend.name), anim)
+			CoopActions.lastAction, CoopActions.watch, CoopActions.lastAnim = pend.name, WATCH, nil
 		elseif pend.timer <= 0 then
 			CoopActions.pending = nil
-			Say("AC pull refused %s", anim)
+			Say("AC %s refused %s", pend.name, anim)
 		end
 	end
 
@@ -375,7 +381,7 @@ local function Step(dt, input, props, anim)
 	elseif down.R1 then did, detail = "roar", Move(props, "roar", anim)
 	elseif down.L1 then
 		did, detail = "threat", Move(props, "threat", anim)
-		CoopActions.threat = string.sub(detail, 1, 7) ~= "refused"
+		CoopActions.threat = true
 	elseif down.Down then
 		if Lying(anim) then did, detail = "stand", Move(props, "stand", anim, true)
 		elseif StartsWith(anim, SEATED) then did, detail = "lie down", Move(props, "lieDown", anim, true)
@@ -387,6 +393,7 @@ local function Step(dt, input, props, anim)
 		CoopActions.kick = CoopActions.kick == "kickLeft" and "kickRight" or "kickLeft"
 		did, detail = "kick", Move(props, CoopActions.kick, anim)
 	end
+	if CoopActions.pending and did == "threat" then CoopActions.threat = true end
 	if CoopActions.threat and not hold.L1 then
 		CoopActions.threat = false
 		Command(props, "threatEnd")
