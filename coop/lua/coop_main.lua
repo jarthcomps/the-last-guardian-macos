@@ -59,7 +59,7 @@ local function tick(dt)
 	CoopTrico.Update(dt, CoopInput.TricoPad())
 	CoopActions.Update(dt, CoopInput.TricoPad())
 	CoopPulse.Update(dt, CoopInput.TricoPad())
-	CoopCamera.Update(dt, CoopInput.active and CoopInput.tricoCamera)
+	CoopCamera.Update(dt, CoopInput.active and CoopInput.tricoCamera, CoopInput.TricoPad())
 	CoopSwapFx.Update(dt, CoopInput.events)
 	if CoopDebug.enabled and Coop.clock >= Coop.nextReport then
 		Coop.nextReport = Coop.clock + 1

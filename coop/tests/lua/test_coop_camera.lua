@@ -9,7 +9,7 @@ local fixes = {}
 local objects = {}
 local function param(name)
 	objects[name] = objects[name] or { Rod_LengthBase = 40, Rod_PitchBaseDeg = -85, Rod_YawBasisType = "Global",
-		Base_FovDeg = 70 }
+		Rod_YawBaseDeg = 180, Base_FovDeg = 70 }
 	local obj = objects[name]
 	return setmetatable({ GetName = function() return "gamecamera_param_" .. name end },
 		{ __index = obj, __newindex = obj })
@@ -95,6 +95,118 @@ check(fixes[#fixes] == "TricoEye", "round again")
 CoopCamera.cycle = nil
 CoopCamera.tricoParam = "TricoAutoRunTest_far"
 CoopCamera.Update(0.016, false)
+
+-- keeping both in the shot: the camera manager says how far from the screen centre each is
+local seen = { Player = true, Trico = true }
+-- (ratio_xy: off the screen centre toward the edge; the second value only says the call worked)
+CameraManager.GetVisibleInfo2 = function(self, entity, bone, ratio, range, id)
+	return { timer = 0, ratio_xy = seen[entity] and 0.3 or math.min(ratio, 1.0), distance_z = 10 }, true
+end
+CharacterMngr = { GetTrico = function() return { GetName = function() return "Trico" end } end }
+-- the boy, and the rendering camera 10 m behind him looking along -Z
+local boyPos = Vector(0, 4, 0)
+local savedAi2 = Ai2
+Ai2 = Ai2 or {}
+Ai2.Utils = Ai2.Utils or {}
+local savedGetPlayerAI = Ai2.Utils.GetPlayerAI
+Ai2.Utils.GetPlayerAI = function() return { pos = boyPos } end
+Harness.objects._trico_camera = { worldPosition = Vector(0, 5, 10), worldRotation = { X = 0, Y = 0, Z = 0, W = 1 } }
+local function boyOut(out) seen.Player = not out; boyPos = out and Vector(30, 4, 0) or Vector(0, 4, 0) end
+CoopCamera.tricoParam = "TricoAutoRunTest_middle"
+CoopCamera.Update(0.016, true)
+CoopCamera.Update(0.6, true)
+local tm2 = objects.TricoAutoRunTest_middle
+check(tm2.Rod_LengthBase == 14 and tm2.Rod_PitchBaseDeg == -25, "both seen: the tuned rod")
+boyOut(true)
+for _ = 1, 4 do CoopCamera.Update(0.5, true) end
+check(tm2.Rod_LengthBase == 20 and tm2.Rod_PitchBaseDeg == -37, "the boy out of the shot: longer and steeper")
+boyOut(false)
+seen.Trico = false
+for _ = 1, 20 do CoopCamera.Update(0.5, true) end
+check(tm2.Rod_LengthBase == 26 and tm2.Rod_PitchBaseDeg == -50, "Trico out too: as far as allowed")
+seen.Trico = true
+CoopCamera.Update(0.5, true)
+check(tm2.Rod_LengthBase == 26, "not eased back at once")
+for _ = 1, 80 do CoopCamera.Update(0.5, true) end
+check(tm2.Rod_LengthBase == 14 and tm2.Rod_PitchBaseDeg == -25, "eased back once both are seen")
+-- the game's timer, when it counts, says seen whatever the ratio
+CameraManager.GetVisibleInfo2 = function() return { timer = 2.0, ratio_xy = 0.99, distance_z = 10 }, true end
+for _ = 1, 4 do CoopCamera.Update(0.5, true) end
+check(tm2.Rod_LengthBase == 14, "a running timer counts as seen")
+-- not measured yet (all zero): no change
+CameraManager.GetVisibleInfo2 = function() return { timer = 0, ratio_xy = 0, distance_z = 0 }, true end
+for _ = 1, 4 do CoopCamera.Update(0.5, true) end
+check(tm2.Rod_LengthBase == 14, "nothing measured, nothing changed")
+CoopCamera.Update(0.016, false)
+check(tm2.Rod_LengthBase == 40 and tm2.Rod_PitchBaseDeg == -85 and CoopCamera.frame == nil, "the set's own values back")
+CoopCamera.framing.enabled = false
+boyOut(true)
+CameraManager.GetVisibleInfo2 = function(self, entity, bone, ratio, range, id)
+	return { timer = 0, ratio_xy = seen[entity] and 0.3 or 1.0, distance_z = 10 }, true
+end
+CoopCamera.Update(0.016, true)
+for _ = 1, 4 do CoopCamera.Update(0.5, true) end
+check(tm2.Rod_LengthBase == 14, "framing off: the tuned rod stays")
+CoopCamera.framing.enabled = true
+CoopCamera.Update(0.016, false)
+-- the boy behind the camera is out of the shot too
+CoopCamera.framing.enabled = true
+boyPos = Vector(0, 4, 20)
+CoopCamera.Update(0.016, true)
+for _ = 1, 4 do CoopCamera.Update(0.5, true) end
+check(tm2.Rod_LengthBase > 14, "the boy behind the camera")
+CoopCamera.Update(0.016, false)
+CameraManager.GetVisibleInfo2 = nil
+CharacterMngr = nil
+Harness.objects._trico_camera = nil
+Ai2.Utils.GetPlayerAI = savedGetPlayerAI
+Ai2 = savedAi2
+CoopCamera.tricoParam = "TricoAutoRunTest_far"
+
+-- the Trico player's right stick turns the camera around Trico (not while aiming with L2)
+local savedAi2b = Ai2
+Ai2 = Ai2 or {}
+Ai2.Utils = Ai2.Utils or {}
+local savedProps = Ai2.Utils.GetCondorAIProps
+Ai2.Utils.GetCondorAIProps = function() return { currentInfo = { ai2Ext = { dirXZ = Vector(0, 0, 1) } } } end
+Input = { pad1 = { RMag = 0 } }
+CoopCamera.Update(0.016, true)
+local tf = objects.TricoAutoRunTest_far
+local stick = { x = 0, y = 0, rx = 1, ry = 0, hold = {}, down = {} }
+CoopCamera.Update(0.5, true, stick)
+check(tf.Rod_YawBasisType == "Global" and tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "turned 60 degrees")
+check(CoopCamera.OrbitYaw(0, 1, 0) == 180 and CoopCamera.OrbitYaw(1, 0, 0) == 270, "behind Trico, as mapped")
+stick.rx, stick.ry = 0, 1
+CoopCamera.Update(0.5, true, stick)
+check(tf.Rod_PitchBaseDeg == -25 + 20, "tilted, as far as allowed")
+stick.hold.L2 = true
+stick.rx = 1
+CoopCamera.Update(0.5, true, stick)
+check(tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "the stick aims while L2 is held")
+stick.hold.L2 = nil
+stick.rx, stick.ry = 0, 0
+for _ = 1, 4 do CoopCamera.Update(0.5, true, stick) end
+check(tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "held for a while after letting go (L2 counts as idle)")
+for _ = 1, 4 do CoopCamera.Update(0.5, true, stick) end
+check(tf.Rod_YawBasisType == "Free" and CoopCamera.orbitState == nil and tf.Rod_PitchBaseDeg == -25,
+	"eased back behind Trico, then the game's free camera again")
+-- the boy's player turns the game's camera: theirs at once
+stick.rx = 1
+CoopCamera.Update(0.5, true, stick)
+check(tf.Rod_YawBasisType == "Global", "Trico's player turns it")
+stick.rx = 0
+Input.pad1.RMag = 0.9
+CoopCamera.Update(0.016, true, stick)
+check(tf.Rod_YawBasisType == "Free" and CoopCamera.orbitState == nil, "the boy's stick takes it back")
+Input.pad1.RMag = 0
+stick.rx = 1
+CoopCamera.Update(0.5, true, stick)
+CoopCamera.Update(0.016, false)
+check(tf.Rod_YawBasisType == "Global" and tf.Rod_YawBaseDeg == 180 and CoopCamera.orbitState == nil,
+	"the set's own yaw back on release")
+Input = nil
+Ai2.Utils.GetCondorAIProps = savedProps
+Ai2 = savedAi2b
 
 -- the debug dump: the set's table, once the game camera is up
 GameCamera.game_param_tbl = { Stand = { Base = { Distance = 4.5, Offset = { X = 0, Y = 1.5 } }, _cond = {} } }
