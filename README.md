@@ -31,6 +31,31 @@ Play **The Last Guardian** (PS4) on Mac. This repository contains a small launch
 
 Controllers that macOS recognizes (DualSense, DualShock 4, Xbox) work through SDL. Keyboard controls can be changed in shadPS4's settings.
 
+## Two-player co-op (experimental, launcher 1.2.0)
+
+One player is the boy, the other is Trico. Trico keeps his own mind, so it plays like a very willing
+Trico rather than a remote-controlled one. Turn on **Two-player co-op (experimental)** in the launcher
+and press Play. It needs update 1.03, and your game folders are not changed. Turn the option off to
+go back to the normal game.
+
+- **Two controllers:** controller 1 is the boy, controller 2 is Trico. **L3 + R3** swaps the roles.
+  With one controller, swap whenever you want to steer Trico yourself.
+- **Trico:** the left stick walks him (a full push walks fast, a half push walks slowly, and he stops
+  short of drops). Cross jumps: point the stick at the next jump and press it. He takes the canyon's
+  stepping-stone columns this way, and it works best if you walk him up to the edge first. The face
+  buttons, shoulders and D-pad are his moves (stomp, roar, sit, stretch, attack...). Select switches
+  the camera to Trico's view, which follows him as he turns.
+- **The boy:** the game's normal controls. His mirror shield fires Trico's lightning as usual.
+
+Known limits:
+- Trico can't gallop under direct control.
+- Trico's player can't aim the lightning yet (L2/R2 do nothing): the game switches to the boy's
+  aiming view, and that needs an engine-side fix.
+- Cross can jump Trico ahead of the boy, for example across the stepping stones without him. If the
+  boy is left stranded, reload the checkpoint.
+
+The full controls and details are in [`coop/README.md`](coop/README.md).
+
 ## Performance
 
 On an M2 Max at 720p, the game runs at roughly **27–32 FPS** in demanding areas. It's playable, but not a locked 30. The first time each area loads you'll see some stutter while shaders compile; those are cached for later runs. On an M4 mac mini, it ran around 24fps in the opening scene.
@@ -53,6 +78,12 @@ Outdoors, after leaving the first cave, it is slower: around **29–31 FPS** on 
 - **All speedups on by default (launcher 1.1.7):** Experimental speedups (hot write pages, fence batching, precise hazards, GPU keep-alive, hot page compare and the shader recipes) and Faster shader math are now on for new and existing installs. Turn them off in the launcher if something looks wrong.
 - **Shader recipes (Experimental speedups):** the driver rewrites 129 of the game's generated Metal shaders (119 pixel, 10 compute) with fixed text steps and uses a result only if its hash matches the one the recipe was verified with; otherwise it keeps the generated code. The recipe file ([`launcher/Resources/shader-recipes.txt`](launcher/Resources/shader-recipes.txt)) holds no shader code, just each shader's key, the steps and the expected hash; [`tools/msl-recipe`](tools/msl-recipe) is the reference implementation of the steps. Each compute recipe produced byte-identical results to the original shader on captured game dispatches; pixel shaders only read buffers, so making those reads read-only cannot change what they draw. Pixel shader GPU time drops about 8% and the frame rate rises about 1.5 FPS looking at the tower.
 - **Cheaper command processing (launcher 1.1.6):** the engine thread that translates the game's GPU commands does less per draw: environment switches read once, cached texture and pipeline lookups that survive unrelated changes, fewer locks and buffer syncs, no profiler hooks, and the driver skips re-sending unchanged per-draw state. About +17% outdoors over 1.1.5 in alternating runs. **Experimental speedups** also compares hot write pages with their last upload before sending them again.
+- **Two-player co-op (launcher 1.2.0, a launcher switch, off by default):** a second controller
+  plays Trico. The engine reads it, swaps roles and passes Trico's buttons to scripts
+  ([`coop/`](coop)) that steer him through his own AI: direct stick walking with his own gaits and a
+  walkable-ground check at edges, his own moves on the buttons, Cross for jumps (including opening
+  the level's closed jumps), and a Trico camera that follows his heading. The scripts go into the
+  launcher's own copy of the update archive only while the switch is on.
 - **Settings updates (launcher 1.1.5):** game settings added in a newer launcher are now merged into an existing install's settings instead of only being used on a first install.
 - **Render state fix:** a depth-only or stencil-only attachment left the other aspect's settings uninitialized, which could produce an invalid Vulkan load operation and crash; every render state field now has a default.
 - **Driver patch** ([`driver/kosmickrisp-tlg.patch`](driver/kosmickrisp-tlg.patch), against KosmicKrisp's Mesa `b628375`): splits render encoders only for barriers that actually involve the encoder's own writes, makes the pipeline cache key include the workaround settings (so changing them can't reuse stale shaders), adds the expanded upload-memory cache, and adds shader diagnostic names and encoder statistics, and can load hand-tuned Metal versions of the game's compute shaders in place of the generated code (`KK_SHADPS4_MSL_OVERRIDE_DIR`, a folder of `<key>.metal` files; off unless set). It also skips re-sending per-draw state that did not change (vertex bindings, root table, push data).
