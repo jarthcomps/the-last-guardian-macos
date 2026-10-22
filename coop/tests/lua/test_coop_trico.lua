@@ -496,10 +496,11 @@ Ai2.CondorUtils.GetPath = function() return built end
 Ai2.CondorUtils.Path = { ReqDiscretePathMode = Harness.Record("discrete") }
 Ai2.Actions = { Condor = { Path = { Pack = {} } } }
 Ai2BuildPath = Harness.Record("build")
-Harness.tricoProps.moveMngr.walk = { suspendStopDecision = false }
+Harness.tricoProps.moveMngr.walk = { suspendStopDecision = false, accelLevel = "low" }
 Harness.calls = {}
 CoopTrico.Update(0.016, { x = 0, y = 1 })
 check(Harness.tricoProps.moveMngr.walk.suspendStopDecision == true, "ctrl: his stop decision suspended while held")
+check(Harness.tricoProps.moveMngr.walk.accelLevel == "high", "ctrl: full stick: his quick acceleration")
 local types = Harness.tricoProps.curMoveTypes
 check(types and types[#types] == "MV_C_WALKFAST", "ctrl: full stick allows the fast walk")
 check(#CoopTrico.CtrlTypes(0.4) == 2 and CoopTrico.CtrlTypes(0.4)[2] == "MV_C_WALKSLOW", "ctrl: a light push walks slowly")
@@ -615,6 +616,7 @@ CoopTrico.Update(0.016, { x = 0, y = 0 })
 check(not Harness.tricoProps.approach.skipCreate, "ctrl: planning back on release")
 check(Harness.tricoProps.plannedMove == nil and Harness.tricoProps.moveParam == nil, "ctrl: our forward move dropped")
 check(Harness.tricoProps.moveMngr.walk.suspendStopDecision == false, "ctrl: his stop decision back on release")
+check(Harness.tricoProps.moveMngr.walk.accelLevel == "low", "ctrl: his acceleration back on release")
 Ai2BuildPath, Ai2.CondorUtils.GetPath, Ai2.CondorUtils.Path, Ai2.Actions = nil, nil, nil, nil
 Harness.tricoProps.plannedMove = "CoopManual"
 CoopTrico.Unskip(Harness.tricoProps)

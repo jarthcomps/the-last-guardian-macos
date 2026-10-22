@@ -380,9 +380,16 @@ function CoopTrico.ManualMove(props, pos, dirX, dirZ, len)
 	local sk = CoopTrico.skipping
 	if walk and sk and sk.stopDecision == nil then
 		sk.stopDecision = walk.suspendStopDecision or false
+		sk.accelLevel = walk.accelLevel
 		sk.walk = walk
 	end
-	if walk then walk.suspendStopDecision = true end
+	if walk then
+		walk.suspendStopDecision = true
+		-- a full push: his quick acceleration (his movement modes often leave it at "low", one
+		-- gear at a time, and from a slow walk he never got further in a 15 s hold)
+		if (len or 0) > CTRL_TYPES[2][1] then walk.accelLevel = "high"
+		elseif sk and sk.accelLevel ~= nil then walk.accelLevel = sk.accelLevel end
+	end
 	props.isOnGoalInVolume = false
 	props.plannedMove = "ForwardMove"
 	props.moveParam = CoopTrico.manualMove
@@ -952,7 +959,10 @@ function CoopTrico.Unskip(props)
 	CoopTrico.stoodUp = nil
 	CoopTrico.progressFrom, CoopTrico.stuckFor = nil, 0
 	sk.approach.skipCreate = sk.was
-	if sk.walk then sk.walk.suspendStopDecision = sk.stopDecision end
+	if sk.walk then
+		sk.walk.suspendStopDecision = sk.stopDecision
+		if sk.accelLevel ~= nil then sk.walk.accelLevel = sk.accelLevel end
+	end
 	if props and (props.plannedMove == "CoopManual" or props.moveParam == CoopTrico.manualMove) then
 		props.plannedMove = nil
 		props.moveParam = nil
