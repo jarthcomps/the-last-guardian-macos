@@ -5,12 +5,14 @@
 #               kosmickrisp_mesa_icd.json> PKG_TOOL=<ps4-pkg-tool binary> launcher/build.sh
 #
 # Both default to engine-bin/ next to this script (see README, "Building from source").
+# OUT (default build/) and DIST (default dist/) pick where the app and the zip go.
 set -euo pipefail
 HERE=${0:A:h}
 ROOT=${HERE:h}
 ENGINE_DIR=${ENGINE_DIR:-$HERE/engine-bin}
 PKG_TOOL=${PKG_TOOL:-$HERE/engine-bin/ps4-pkg-tool}
-OUT=$ROOT/build
+OUT=${OUT:-$ROOT/build}
+DIST=${DIST:-$ROOT/dist}
 APP="$OUT/The Last Guardian.app"
 
 for f in shadps4 libvulkan.dylib libvulkan_kosmickrisp.dylib kosmickrisp_mesa_icd.json; do
@@ -66,8 +68,8 @@ done
 codesign --force --sign - "$APP"
 codesign --verify --strict "$APP"
 
-mkdir -p "$ROOT/dist"
-rm -f "$ROOT/dist/The-Last-Guardian-macOS.zip"
-ditto -c -k --keepParent "$APP" "$ROOT/dist/The-Last-Guardian-macOS.zip"
+mkdir -p "$DIST"
+rm -f "$DIST/The-Last-Guardian-macOS.zip"
+ditto -c -k --keepParent "$APP" "$DIST/The-Last-Guardian-macOS.zip"
 echo "built $APP"
-ls -lh "$ROOT/dist/The-Last-Guardian-macOS.zip"
+ls -lh "$DIST/The-Last-Guardian-macOS.zip"
