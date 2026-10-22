@@ -47,10 +47,14 @@ local TURN_START = -0.17       -- cosine to Trico's facing (about 100 degrees) b
                                -- "steer" starts the turn with a goal to the side
 local TURN_DONE = 0.5          -- ... until Trico faces within 60 degrees of the stick's way
 local TURNING = { steer = true }
+-- The side goal that used to start a turn: off by default. In two-pad runs his AI lined up with
+-- it after a turn on the spot (a slide back round) and stopped; the goal goes straight in the
+-- stick's way instead, and his own approach turns him while walking.
+if CoopTrico.sideTurns == nil then CoopTrico.sideTurns = false end
 local REFRESH = 0.3            -- seconds between goal updates
 local REGOAL = 2.0             -- metres the goal must change by before it is moved (so Trico's
                                -- path planner can commit to it)
-local ARRIVING = 3.0           -- ... or how close Trico must get to it
+local ARRIVING = 3.0           -- ... or how close Trico must get to it (distances.arrive, when set)
 local MIN_PATH_GOAL = 2.0      -- shortest navmesh path end worth walking to
 local REPORT = 0.5             -- seconds between debug reports
 
@@ -58,6 +62,7 @@ local FOCUS_TIME = 2.0         -- seconds after the Trico player's last input th
                                -- his mind off the boy
 local FOCUS_REFRESH = 0.5
 local FOCUS_LASTS = 2.5        -- each lowering of the boy's interest lapses by itself after this
+local KEEP_ANGLE = 30.0        -- degrees the stick may wobble while the goal stays put
 local RELATCH = 60.0           -- degrees the stick must swing before the camera is read again
 local TURN_GAP = 2.0           -- seconds after a turn on the spot before another may be asked
                                -- for, so walking takes over from it
@@ -65,7 +70,9 @@ local YIELD = 1.5              -- seconds steering waits for a queued move (coop
 
 CoopTrico.strategy = CoopTrico.strategy or "goal"
 CoopTrico.relative = CoopTrico.relative or "camera"
-CoopTrico.distances = CoopTrico.distances or { goal = 14.0, min = 11.0, turn = 11.0, behind = 11.0 }
+-- (arrive: the goal moves on once Trico is this close, beyond his 6.5 m "reached", so it leaps
+-- ahead before he stops)
+CoopTrico.distances = CoopTrico.distances or { goal = 14.0, min = 11.0, turn = 11.0, behind = 11.0, arrive = 8.0 }
 -- (off: a forward request walks Trico straight along his facing, not to the goal, and repeated
 -- while he walks it restarts him: start-stop stutter in the two-pad runs)
 if CoopTrico.kick == nil then CoopTrico.kick = false end
@@ -338,6 +345,8 @@ local function Release(props)
 	CoopTrico.goal = nil
 	CoopTrico.turning = false
 	CoopTrico.latch = nil
+	CoopTrico.spunFor = nil
+	CoopTrico.goalStick = nil
 	DropGoal(props)
 	if not props then return end
 	if CoopTrico.strategy == "interest" then
@@ -399,10 +408,49 @@ local function Active(input)
 	return false
 end
 
+-- Also while focused: the game's own bans on Trico's idle actions (scratching, stretching, sitting
+-- down by himself) and on his boy-affection behaviours, and its "prefer walking" switch (no jump
+-- slides). Each is only set if it was off, and only those are cleared again afterwards, so a story
+-- script's own bans are never touched.
+local BANS = { "IdlingBan", "SitIdlingBan", "BoyDaisukiProcBan" }
+
+function CoopTrico.Unban()
+	local b = CoopTrico.banned
+	if not b then return end
+	CoopTrico.banned = nil
+	local work = b.props.currentInfo and b.props.currentInfo.work
+	for flag in pairs(b.set) do
+		if flag == "prioSelect" then
+			if b.props.moveMngr then b.props.moveMngr.prioSelect = false end
+		elseif work and work[flag] == true then
+			work[flag] = false
+		end
+	end
+end
+
+local function Ban(props)
+	if CoopTrico.banned and CoopTrico.banned.props == props then return end
+	CoopTrico.Unban()   -- (bans recorded for another Trico, say after his AI was made again)
+	local work = props.currentInfo.work
+	local set = {}
+	if work then
+		for _, flag in ipairs(BANS) do
+			if work[flag] == false then work[flag] = true set[flag] = true end
+		end
+	end
+	if props.moveMngr and not props.moveMngr.prioSelect then
+		props.moveMngr.prioSelect = true
+		set.prioSelect = true
+	end
+	CoopTrico.banned = { props = props, set = set }
+end
+
+
 function CoopTrico.Focus(dt, input, props)
 	if Active(input) then CoopTrico.idleFor = 0 else CoopTrico.idleFor = (CoopTrico.idleFor or 99) + dt end
 	CoopTrico.focusIn = (CoopTrico.focusIn or 0) - dt
 	CoopTrico.focused = CoopTrico.idleFor < FOCUS_TIME
+	if CoopTrico.focused then Ban(props) else CoopTrico.Unban() end
 	if not CoopTrico.focused or CoopTrico.focusIn > 0 then return end
 	CoopTrico.focusIn = FOCUS_REFRESH
 	local ai = props.currentInfo.ai2Ext
@@ -457,6 +505,19 @@ function CoopTrico.Update(dt, input)
 	local info = props.currentInfo
 	local pos = CoopTrico.Position(props, dt)
 	if not pos then return end
+	-- sitting: stand up first (the game's own end of sitting), then he can walk
+	local okA, anim = pcall(Ai2.Utils.GetCurAnimState, info.ai2Ext)
+	anim = okA and tostring(anim) or ""
+	CoopTrico.standIn = math.max(0, (CoopTrico.standIn or 0) - REFRESH)
+	if string.find(anim, "_sit", 1, true) and not string.find(anim, "sit_end", 1, true) then
+		if CoopTrico.standIn <= 0 then
+			CoopTrico.standIn = 2.0
+			pcall(Ai2.Utils.ReqCtrlCmd, info.ai2Ext, "ControlCommand_C_sit_end")
+			CoopTrico.nav = "stand-up"
+		end
+		CoopTrico.steering = true
+		return
+	end
 	local dirXZ = info.ai2Ext and info.ai2Ext.dirXZ
 	local fx, fz, src = CoopTrico.Frame(sx, sy, pos, dirXZ)
 	CoopTrico.forward = { fx or 0, fz or 0, src or "trico" }
@@ -494,23 +555,30 @@ function CoopTrico.Update(dt, input)
 	if TURNING[CoopTrico.strategy] and dirXZ then
 		local wayX, wayZ = Flat(goal.X - pos.X, goal.Z - pos.Z)
 		local turnGoal, turnDir = nil, nil
-		if wayX then
+		if wayX and CoopTrico.sideTurns then
 			turnGoal, turnDir = CoopTrico.TurnGoal(pos, dirXZ.X, dirXZ.Z, wayX, wayZ, wasTurning)
 		end
 		-- a turn on the spot is a fixed 90 or 180 degrees, so it is only asked for while the
 		-- way is still more than TURN_START round (fresh each time, not the walk's TURN_DONE): the
 		-- rest of the turn is walked, or Trico would turn back and forth for ever
-		local far = (wayX * dirXZ.X + wayZ * dirXZ.Z) < TURN_START
-		if turnGoal and far and (props.plannedMove == nil or not Reachable(props, pos, turnGoal)) then
-			-- standing, or no room to walk round (a ledge, a beam): turn on the spot, and let the
-			-- turn play (a walking Trico curves round towards the side goal instead); never a
-			-- second turn while one still plays, or it would turn him back
+		local far = wayX and (wayX * dirXZ.X + wayZ * dirXZ.Z) < TURN_START
+		-- one spot turn per stick direction: Trico's facing reads stale for a moment after a
+		-- turn, which would otherwise start another one (the stick must swing RELATCH degrees,
+		-- or be let go, before the next)
+		local stickAngle = math.deg(math.atan2(sx, sy))
+		local spun = CoopTrico.spunFor and math.abs((stickAngle - CoopTrico.spunFor + 180) % 360 - 180) <= RELATCH
+		local standing = props.plannedMove == nil or props.plannedMove == "MoveStop"
+		if far and not spun and (standing or (turnGoal and not Reachable(props, pos, turnGoal))) then
+			-- standing: turn on the spot, and let the turn play (a walking Trico is turned by his own
+			-- approach towards the goal); never a second turn while one still plays, or it would
+			-- turn him back
 			local okAnim, anim = pcall(Ai2.Utils.GetCurAnimState, info.ai2Ext)
 			local spinning = okAnim and string.find(tostring(anim), "turn", 1, true) ~= nil
 			if spinning then CoopTrico.turnIn = math.max(CoopTrico.turnIn, 0.5) end
 			if CoopTrico.turnIn <= 0 then
 				CoopTrico.turnIn = TURN_GAP
 				local name = CoopTrico.TurnCommand(dirXZ.X, dirXZ.Z, wayX, wayZ)
+				CoopTrico.spunFor = stickAngle
 				if CoopActions and CoopActions.Request then
 					-- as a queued move: stood up first if he sits, watched and resent
 					CoopActions.Request(name)
@@ -532,12 +600,18 @@ function CoopTrico.Update(dt, input)
 	end
 	-- keep the goal Trico is already walking to unless the stick asks for somewhere else (a
 	-- turn goal follows Trico round, and the real goal replaces it at once)
+	-- (also while the stick stays within KEEP_ANGLE of where the goal was set: a thumb wobbles,
+	-- and the snapped goal then flips between spots a few metres apart, each change replanning
+	-- Trico's route, so he walked a step and stopped)
 	local old = CoopTrico.steering and CoopTrico.goal
-	if old and not CoopTrico.turning and not wasTurning and DistanceXZ(old, goal) < REGOAL
-		and DistanceXZ(pos, old) > ARRIVING then
+	local stickNow = math.deg(math.atan2(sx, sy))
+	local sameWay = CoopTrico.goalStick and math.abs((stickNow - CoopTrico.goalStick + 180) % 360 - 180) <= KEEP_ANGLE
+	if old and not CoopTrico.turning and not wasTurning and (DistanceXZ(old, goal) < REGOAL or sameWay)
+		and DistanceXZ(pos, old) > (CoopTrico.distances.arrive or ARRIVING) then
 		goal, dir = old, CoopTrico.goalDir or dir
 	else
 		CoopTrico.nav = nav
+		CoopTrico.goalStick = stickNow
 	end
 	CoopTrico.steering = true
 	CoopTrico.goal = goal
@@ -553,6 +627,8 @@ end
 -- Give Trico back to its AI (when the player leaves the role).
 function CoopTrico.Release()
 	if CoopTrico.steering then Release(Props()) end
+	pcall(CoopTrico.Unban)
+	CoopTrico.idleFor = 99
 end
 
 CoopTrico.Reset()
