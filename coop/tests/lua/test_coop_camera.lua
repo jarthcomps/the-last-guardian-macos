@@ -36,8 +36,8 @@ CoopCamera.Update(0.016, true)
 check(#fixes == 1 and fixes[1] == "TricoAutoRunTest_middle" and CoopCamera.mode == "trico", "Trico framing")
 check(CoopCamera.pinned == "gamecamera_param_TricoAutoRunTest_middle", "pinned by name")
 local tm = objects.TricoAutoRunTest_middle
-check(tm.Rod_LengthBase == 14 and tm.Rod_PitchBaseDeg == -25 and tm.Rod_YawBasisType == "Free"
-	and tm.Base_FovDeg == 75, "retuned: 14 m, 25 degrees down, following, wider")
+check(tm.Rod_LengthBase == 14 and tm.Rod_PitchBaseDeg == -25 and tm.Rod_YawBasisType == "Global"
+	and tm.Base_FovDeg == 75, "retuned: 14 m, 25 degrees down, a world yaw, wider")
 for _ = 1, 30 do CoopCamera.Update(0.1, true) end
 check(#fixes == 1, "not pinned again while it holds")
 
@@ -112,6 +112,16 @@ local savedGetPlayerAI = Ai2.Utils.GetPlayerAI
 Ai2.Utils.GetPlayerAI = function() return { pos = boyPos } end
 Harness.objects._trico_camera = { worldPosition = Vector(0, 5, 10), worldRotation = { X = 0, Y = 0, Z = 0, W = 1 } }
 local function boyOut(out) seen.Player = not out; boyPos = out and Vector(30, 4, 0) or Vector(0, 4, 0) end
+-- (the follow's steady rod first: the framing never grows or lifts it)
+CoopCamera.tricoParam = "TricoAutoRunTest_middle"
+CoopCamera.Update(0.016, true)
+boyOut(true)
+for _ = 1, 6 do CoopCamera.Update(0.5, true) end
+check(objects.TricoAutoRunTest_middle.Rod_LengthBase == 14 and objects.TricoAutoRunTest_middle.Rod_PitchBaseDeg == -25,
+	"follow.fixed: the boy out of the shot, the rod as tuned")
+boyOut(false)
+CoopCamera.Update(0.016, false)
+CoopCamera.follow.fixed = false   -- the framing's own tests
 CoopCamera.tricoParam = "TricoAutoRunTest_middle"
 CoopCamera.Update(0.016, true)
 CoopCamera.Update(0.6, true)
@@ -184,6 +194,7 @@ CoopCamera.Update(0.016, true)
 for _ = 1, 4 do CoopCamera.Update(0.5, true) end
 check(tm2.Rod_LengthBase > 14, "the boy behind the camera")
 CoopCamera.Update(0.016, false)
+CoopCamera.follow.fixed = true
 CameraManager.GetVisibleInfo2 = nil
 CharacterMngr = nil
 Harness.objects._trico_camera = nil
@@ -191,41 +202,79 @@ Ai2.Utils.GetPlayerAI = savedGetPlayerAI
 Ai2 = savedAi2
 CoopCamera.tricoParam = "TricoAutoRunTest_far"
 
--- the Trico player's right stick turns the camera around Trico (not while aiming with L2)
+-- the follow: the rod held at a Global yaw behind Trico's heading, through a filter; the Trico
+-- player's right stick (not while aiming with L2) adds an offset that eases back
 local savedAi2b = Ai2
 Ai2 = Ai2 or {}
 Ai2.Utils = Ai2.Utils or {}
 local savedProps = Ai2.Utils.GetCondorAIProps
-Ai2.Utils.GetCondorAIProps = function() return { currentInfo = { ai2Ext = { dirXZ = Vector(0, 0, 1) } } } end
+local heading = Vector(0, 0, 1)
+Ai2.Utils.GetCondorAIProps = function() return { currentInfo = { ai2Ext = { dirXZ = heading } } } end
 Input = { pad1 = { RMag = 0 } }
+local function yawOf(h) return (CoopCamera.orbit.yawZero + h) % 360 end
+local function near(a, b, tol) return math.abs((a - b + 180) % 360 - 180) <= (tol or 0.01) end
 CoopCamera.Update(0.016, true)
 local tf = objects.TricoAutoRunTest_far
-local stick = { x = 0, y = 0, rx = 1, ry = 0, hold = {}, down = {} }
-CoopCamera.Update(0.5, true, stick)
-check(tf.Rod_YawBasisType == "Global" and tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "turned 60 degrees")
-check(CoopCamera.OrbitYaw(0, 1, 0) == 180 and CoopCamera.OrbitYaw(1, 0, 0) == 270, "behind Trico, as mapped")
--- Trico turning under the orbit doesn't swing it: "behind" was taken when the turn began
-local turnedProps = { currentInfo = { ai2Ext = { dirXZ = Vector(1, 0, 0) } } }
-Ai2.Utils.GetCondorAIProps = function() return turnedProps end
-stick.rx = 0
+local stick = { x = 0, y = 0, rx = 0, ry = 0, hold = {}, down = {} }
 CoopCamera.Update(0.1, true, stick)
-check(tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "Trico turned: the orbit holds still")
-Ai2.Utils.GetCondorAIProps = function() return { currentInfo = { ai2Ext = { dirXZ = Vector(0, 0, 1) } } } end
+check(tf.Rod_YawBasisType == "Global" and near(tf.Rod_YawBaseDeg, yawOf(180)), "pinned: straight behind him, " .. tostring(tf.Rod_YawBaseDeg))
+check(CoopCamera.OrbitYaw(0, 1, 0) == yawOf(180) and CoopCamera.OrbitYaw(1, 0, 0) == yawOf(270), "behind Trico, as mapped")
+-- a quarter turn: the camera comes round smoothly, within 15 degrees in 2 s, never past it
+heading = Vector(1, 0, 0)
+local errs = {}
+for i = 1, 20 do
+	CoopCamera.Update(0.1, true, stick)
+	errs[i] = CoopCamera.followState.e
+end
+check(math.abs(errs[20]) < 15, "a quarter turn: behind him within 2 s (" .. errs[20] .. ")")
+local flips = 0
+for i = 2, 20 do if errs[i] * errs[i - 1] < 0 then flips = flips + 1 end end
+check(flips == 0, "no overshoot")
+check(math.abs(errs[2] - errs[1]) <= 12.01, "at most 120 degrees a second")
+for _ = 1, 30 do CoopCamera.Update(0.1, true, stick) end
+local settled = tf.Rod_YawBaseDeg
+check(math.abs(CoopCamera.followState.e) <= 1.01, "settled within a degree")
+-- a wobble inside the dead band doesn't move it
+heading = Vector(math.cos(math.rad(4)), 0, math.sin(math.rad(4)))
+for _ = 1, 10 do CoopCamera.Update(0.1, true, stick) end
+check(tf.Rod_YawBaseDeg == settled, "a 4 degree wobble: still")
+-- a heading jump (a slide's false reading) for 0.2 s is ignored; one lasting is taken
+heading = Vector(-1, 0, 0)
+CoopCamera.Update(0.1, true, stick)
+CoopCamera.Update(0.1, true, stick)
+heading = Vector(1, 0, 0)
+CoopCamera.Update(0.1, true, stick)
+check(tf.Rod_YawBaseDeg == settled, "a short heading jump: ignored")
+heading = Vector(-1, 0, 0)
+for _ = 1, 4 do CoopCamera.Update(0.1, true, stick) end
+check(tf.Rod_YawBaseDeg ~= settled, "a lasting one: followed")
+heading = Vector(0, 0, 1)
+for _ = 1, 60 do CoopCamera.Update(0.1, true, stick) end
+check(near(tf.Rod_YawBaseDeg, yawOf(180), 1.01), "behind him again")
+-- the orbit: 60 degrees round on top of the follow, tilted; held while idle, eased back after
+-- 1.5 s, and never the free camera
 stick.rx = 1
+CoopCamera.Update(0.5, true, stick)
+check(tf.Rod_YawBasisType == "Global" and near(tf.Rod_YawBaseDeg, yawOf(180 + 60), 1.01), "turned 60 degrees")
 stick.rx, stick.ry = 0, 1
 CoopCamera.Update(0.5, true, stick)
 check(tf.Rod_PitchBaseDeg == -25 + 20, "tilted, as far as allowed")
 stick.hold.L2 = true
 stick.rx = 1
 CoopCamera.Update(0.5, true, stick)
-check(tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "the stick aims while L2 is held")
+check(near(tf.Rod_YawBaseDeg, yawOf(240), 1.01), "the stick aims while L2 is held")
 stick.hold.L2 = nil
 stick.rx, stick.ry = 0, 0
-for _ = 1, 4 do CoopCamera.Update(0.5, true, stick) end
-check(tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "held for a while after letting go (L2 counts as idle)")
-for _ = 1, 4 do CoopCamera.Update(0.5, true, stick) end
-check(tf.Rod_YawBasisType == "Free" and CoopCamera.orbitState == nil and tf.Rod_PitchBaseDeg == -25,
-	"eased back behind Trico, then the game's free camera again")
+CoopCamera.Update(0.4, true, stick)
+check(near(tf.Rod_YawBaseDeg, yawOf(240), 1.01), "held for a while after letting go (L2 counts as idle)")
+-- and while the offset holds, Trico turning carries the camera round with him
+heading = Vector(1, 0, 0)
+for _ = 1, 3 do CoopCamera.Update(0.1, true, stick) end
+check(not near(tf.Rod_YawBaseDeg, yawOf(240), 1.01) and CoopCamera.orbitState.yaw == 60, "the offset rides on the follow")
+heading = Vector(0, 0, 1)
+for _ = 1, 30 do CoopCamera.Update(0.1, true, stick) end
+check(tf.Rod_YawBasisType == "Global" and CoopCamera.orbitState == nil and tf.Rod_PitchBaseDeg == -25
+	and near(tf.Rod_YawBaseDeg, yawOf(180), 1.01), "eased back behind Trico, still following")
 -- a turn into a wall (the camera pushed within 4 m of Trico) goes back to the last good angle
 CoopCamera.seenInfo = { CoopCamTrico = { timer = 1, ratio_xy = 0.8, distance_z = 2.0 } }
 stick.rx = 1
@@ -234,20 +283,37 @@ check(CoopCamera.orbitState and CoopCamera.orbitState.yaw == 0, "no room: back t
 CoopCamera.seenInfo = nil
 stick.rx = 0
 for _ = 1, 10 do CoopCamera.Update(0.5, true, stick) end
--- the boy's player turns the game's camera: theirs at once
-stick.rx = 1
-CoopCamera.Update(0.5, true, stick)
-check(tf.Rod_YawBasisType == "Global", "Trico's player turns it")
-stick.rx = 0
+-- the boy's player turns the game's camera: free at once; on letting go the follow picks up from
+-- where the camera is (here looking along -Z: behind angle 0)
 Input.pad1.RMag = 0.9
 CoopCamera.Update(0.016, true, stick)
-check(tf.Rod_YawBasisType == "Free" and CoopCamera.orbitState == nil, "the boy's stick takes it back")
+check(tf.Rod_YawBasisType == "Free" and CoopCamera.orbitState == nil, "the boy's stick takes it")
+Harness.objects._trico_camera = { worldPosition = Vector(0, 5, 10), worldRotation = { X = 0, Y = 0, Z = 0, W = 1 } }
 Input.pad1.RMag = 0
+CoopCamera.Update(0.016, true, stick)
+check(tf.Rod_YawBasisType == "Global" and near(tf.Rod_YawBaseDeg, yawOf(0) + 0.0, 2.5), "let go: following from where he left it, " .. tf.Rod_YawBaseDeg)
+for _ = 1, 50 do CoopCamera.Update(0.1, true, stick) end
+check(near(tf.Rod_YawBaseDeg, yawOf(180), 1.01), "and round behind Trico")
+Harness.objects._trico_camera = nil
+-- the follow off: the old orbit (its own Global yaw, free once eased back)
+CoopCamera.follow.enabled = false
 stick.rx = 1
 CoopCamera.Update(0.5, true, stick)
+check(tf.Rod_YawBaseDeg == CoopCamera.OrbitYaw(0, 1, 60), "follow off: the orbit's own yaw")
+stick.rx = 0
+for _ = 1, 8 do CoopCamera.Update(0.5, true, stick) end
+check(tf.Rod_YawBasisType == "Free" and CoopCamera.orbitState == nil, "follow off: free once eased back")
+CoopCamera.follow.enabled = true
+-- the trace's follow line
+CoopDebug.enabled, CoopCamera.trace, CoopCamera.traceIn = true, 0.25, 0
+for _ = 1, 30 do CoopCamera.Update(0.1, true, stick) end
+CoopDebug.Flush()
+check(#Harness.Find("^CF hd=%-?180.0 h=%-?1[78]%d%.%d e=%-?%d%.%d live=%- off=0 len=14 pitch=%-25 basis=Global$") >= 1, "follow trace line")
+CoopDebug.enabled, CoopCamera.trace = false, nil
+CoopDebug.queue, Harness.lightbar = {}, {}
 CoopCamera.Update(0.016, false)
-check(tf.Rod_YawBasisType == "Global" and tf.Rod_YawBaseDeg == 180 and CoopCamera.orbitState == nil,
-	"the set's own yaw back on release")
+check(tf.Rod_YawBasisType == "Global" and tf.Rod_YawBaseDeg == 180 and CoopCamera.orbitState == nil
+	and CoopCamera.followState == nil, "the set's own yaw back on release")
 Input = nil
 Ai2.Utils.GetCondorAIProps = savedProps
 Ai2 = savedAi2b
