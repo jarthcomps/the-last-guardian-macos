@@ -267,6 +267,21 @@ rest()
 CoopTrico.latch = nil
 tap(btn(nil, -1, 0))   -- stick left: the left of +Z is +X
 check(lastCmd() == "ControlCommand_C_turn_90_left", "stick left: a quarter turn left: " .. lastCmd())
+-- a turn event just after a swap is the swap's own L3: ignored
+rest()
+CoopActions.sent = nil   -- (the turn above is never seen to start here: no resends)
+local nturn = #Harness.CallsNamed("cmd")
+CoopInput.events = { { kind = "swap", value = "boy" } }
+CoopActions.Update(0.016, btn())
+CoopInput.events = { { kind = "turn" } }
+CoopActions.Update(0.5, btn())
+CoopInput.events = {}
+check(#Harness.CallsNamed("cmd") == nturn, "no turn right after a swap")
+CoopActions.Update(1.1, btn())
+CoopActions.sent = nil
+tap(btn())
+check(#Harness.CallsNamed("cmd") == nturn + 1, "but a tap later turns")
+CoopActions.sent = nil
 CoopInput = nil
 CoopTrico.latch = nil
 Harness.objects._trico_camera = nil

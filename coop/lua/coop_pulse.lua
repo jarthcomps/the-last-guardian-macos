@@ -72,6 +72,12 @@ function CoopPulse.Reset()
 	CoopPulse.refused = nil       -- why the last R2 did nothing
 end
 
+-- Trico's position, as steering reads it (coop_trico.lua: aiPos can read zero).
+local function TricoAt(props)
+	if CoopTrico and CoopTrico.Position then return CoopTrico.Position(props) or props.currentInfo.aiPos end
+	return props.currentInfo.aiPos
+end
+
 local function Props()
 	local ok, props = pcall(function() return Ai2.Utils.GetCondorAIProps() end)
 	if ok then return props end
@@ -355,7 +361,7 @@ local function Step(dt, input, props, shield)
 		if input and input.down and input.down.R2 then CoopPulse.refused = "no-shield" end
 		return
 	end
-	local pos = info.aiPos
+	local pos = TricoAt(props)
 	local fx, fz = nil, nil
 	if CoopTrico and CoopTrico.CameraForward then
 		local ok, x, z = pcall(CoopTrico.CameraForward, pos)

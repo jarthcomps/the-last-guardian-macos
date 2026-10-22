@@ -256,6 +256,16 @@ Ai2.Utils.GetCurAnimState = savedAnim
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 CoopActions = nil
 Harness.reachable = function(from, to) return true end
+-- during a turn on the spot the AI's position reads 0,0,0: the character's stands in for it
+CharacterMngr = { GetTrico = function() return { worldPosition = Vector(5, 1, 6) } end }
+local zero = { currentInfo = { aiPos = Vector(0, 0, 0) } }
+local at = CoopTrico.Position(zero)
+check(at and near(at.X, 5) and near(at.Z, 6), "zero AI position: the character's")
+check(near(CoopTrico.Position({ currentInfo = { aiPos = Vector(2, 0, 3) } }).X, 2), "a real AI position is kept")
+CharacterMngr = nil
+check(CoopTrico.Position(zero).X == 0, "no character: the AI's as it is")
+local mineProps = { currentInfo = { aiPos = Vector(0, 0, 0), work = { GetMySelfPos = Vector(7, 1, 8) } } }
+check(near(CoopTrico.Position(mineProps).X, 7), "the entity position comes first")
 -- which turn: the right of a facing (x, z) is (-z, x)
 check(CoopTrico.TurnCommand(0, 1, -1, 0) == "turn90Right" and CoopTrico.TurnCommand(0, 1, 1, 0) == "turn90Left",
 	"quarter turns")

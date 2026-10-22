@@ -93,6 +93,7 @@ CoopActions.commands = {
 local STAND_AGAIN = 2.0                       -- seconds between stand-up requests while a move waits
 CoopActions.queueTime = QUEUE_TIME
 local FACING = 0.7                            -- cosine: a turn already this close is not needed
+local SWAP_QUIET = 1.5                        -- seconds after a swap in which L3 taps are ignored
 local STRETCHES = { "stretchFront", "stretchUp", "stretchBack" }
 -- animation states a single move may start from (not the walk starts: c_stand_walk_fastC...)
 local IDLE = { "c_stand", "c_wait", "c_idle" }
@@ -115,6 +116,12 @@ function CoopActions.Reset()
 	CoopActions.lastError = nil
 end
 
+-- Trico's position, as steering reads it (coop_trico.lua: aiPos can read zero).
+local function TricoAt(props)
+	if CoopTrico and CoopTrico.Position then return CoopTrico.Position(props) or props.currentInfo.aiPos end
+	return props.currentInfo.aiPos
+end
+
 local function Props()
 	local ok, props = pcall(function() return Ai2.Utils.GetCondorAIProps() end)
 	if ok then return props end
@@ -134,7 +141,7 @@ end
 
 -- The way an action goes: the stick's camera-relative way, else Trico's facing.
 function CoopActions.Way(props, input)
-	local pos = props.currentInfo.aiPos
+	local pos = TricoAt(props)
 	local d = props.currentInfo.ai2Ext and props.currentInfo.ai2Ext.dirXZ
 	local faceX, faceZ = d and d.X or 0, d and d.Z or 1
 	local sx, sy = nil, nil
@@ -154,7 +161,7 @@ end
 
 -- A point a special edge leads to (another navmesh island, reachable only through the edge).
 function CoopActions.FindJumpTarget(props, wayX, wayZ)
-	local pos = props.currentInfo.aiPos
+	local pos = TricoAt(props)
 	local check = Ai2.Utils.Navmesh.CheckSameIsland
 	for _, dist in ipairs(JUMP_DISTANCES) do
 		for _, deg in ipairs(JUMP_ANGLES) do
@@ -228,7 +235,7 @@ end
 local function Gesture(props, gType, wayX, wayZ, side)
 	DropGesture(props, "replaced")
 	local info = props.currentInfo
-	local pos = info.aiPos
+	local pos = TricoAt(props)
 	side = side or 0
 	local gx = pos.X + wayX * GESTURE_DISTANCE - wayZ * side
 	local gz = pos.Z + wayZ * GESTURE_DISTANCE + wayX * side
@@ -350,7 +357,7 @@ function CoopActions.EdibleBarrel(props)
 	local info = props.currentInfo
 	local ok, list = pcall(Ai2.Utils.FindInterestByType, info.ai2Ext, "Barrel", true)
 	if not ok or type(list) ~= "table" then return nil end
-	local pos = info.aiPos
+	local pos = TricoAt(props)
 	local best, bestDist = nil, nil
 	for _, intr in ipairs(list) do
 		local ent = intr.sensorEntity
@@ -474,7 +481,7 @@ local function Turn(props, input, anim)
 	local sx, sy
 	if CoopTrico then sx, sy = CoopTrico.Stick(input) end   -- (an `and` would keep only sx)
 	if sx then
-		local fx, fz = CoopTrico.Frame(sx, sy, info.aiPos, face)
+		local fx, fz = CoopTrico.Frame(sx, sy, TricoAt(props), face)
 		fx, fz = fx or face.X, fz or face.Z
 		local x, z = fx * sy - fz * sx, fz * sy + fx * sx   -- the right of (x, z) is (-z, x)
 		local len = math.sqrt(x * x + z * z)
@@ -497,7 +504,7 @@ local function Step(dt, input, props, anim)
 	local j = CoopActions.jump
 	if j then
 		j.timer = j.timer - dt
-		local pos = props.currentInfo.aiPos
+		local pos = TricoAt(props)
 		local dx, dz = pos.X - j.target.X, pos.Z - j.target.Z
 		local okSame, same = pcall(Ai2.Utils.Navmesh.CheckSameIsland, props, pos, j.target, true)
 		if math.sqrt(dx * dx + dz * dz) < JUMP_ARRIVED or (okSame and same) then
@@ -515,9 +522,12 @@ local function Step(dt, input, props, anim)
 	TickQueue(dt, props, anim)
 
 	local did, detail = nil, nil
+	-- (a turn right after a swap is the swap's own L3, not a tap)
 	local turn = false
+	CoopActions.sinceSwap = (CoopActions.sinceSwap or 99) + dt
 	for _, e in ipairs((CoopInput and CoopInput.events) or {}) do
-		if e.kind == "turn" then turn = true end
+		if e.kind == "swap" then CoopActions.sinceSwap = 0 end
+		if e.kind == "turn" and CoopActions.sinceSwap > SWAP_QUIET then turn = true end
 	end
 	if turn then did, detail = "turn", Turn(props, input, anim)
 	elseif down.Cross then did, detail = "jump", Jump(props, input)

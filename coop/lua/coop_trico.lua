@@ -83,6 +83,21 @@ function CoopTrico.Reset()
 	CoopTrico.turnIn = 0
 end
 
+-- Trico's position: his entity's (work.GetMySelfPos, what the game's own AI scripts use), else
+-- his AI's; aiPos can read 0,0,0 for good after a turn on the spot, so a zero one gives way
+-- to his character's position when there is one.
+local function Real(p) return p and (math.abs(p.X) > 0.01 or math.abs(p.Z) > 0.01) end
+function CoopTrico.Position(props)
+	local info = props and props.currentInfo
+	local mine = info and info.work and info.work.GetMySelfPos
+	if Real(mine) then return Vector(mine) end
+	local p = info and info.aiPos
+	if Real(p) then return p end
+	local ok, w = pcall(function() return CharacterMngr:GetTrico().worldPosition end)
+	if ok and Real(w) then return Vector(w) end
+	return p   -- (no character to compare with: the AI's, whatever it says)
+end
+
 local function Props()
 	local ok, props = pcall(function() return Ai2.Utils.GetCondorAIProps() end)
 	if ok then return props end
@@ -300,7 +315,7 @@ local function Report(props)
 	if not CoopDebug or not CoopDebug.enabled then return end
 	local info = props and props.currentInfo
 	if not info or not info.aiPos then return end
-	local p = info.aiPos
+	local p = CoopTrico.Position(props) or info.aiPos
 	local g = CoopTrico.goal
 	local intr = info.interestEntity
 	local okName, intrName = pcall(function() return intr and intr:GetName() end)
@@ -372,7 +387,8 @@ function CoopTrico.Update(dt, input)
 	CoopTrico.refreshIn = REFRESH
 
 	local info = props.currentInfo
-	local pos = info.aiPos
+	local pos = CoopTrico.Position(props)
+	if not pos then return end
 	local dirXZ = info.ai2Ext and info.ai2Ext.dirXZ
 	local fx, fz, src = CoopTrico.Frame(sx, sy, pos, dirXZ)
 	CoopTrico.forward = { fx or 0, fz or 0, src or "trico" }

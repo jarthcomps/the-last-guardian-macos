@@ -174,7 +174,11 @@ local function Seen(entity, bone, id)
 end
 
 local function TricoPos()
-	local ok, p = pcall(function() return Ai2.Utils.GetCondorAIProps().currentInfo.aiPos end)
+	local ok, p = pcall(function()
+		local props = Ai2.Utils.GetCondorAIProps()
+		if CoopTrico and CoopTrico.Position then return CoopTrico.Position(props) end
+		return props.currentInfo.aiPos
+	end)
 	if ok and p then return p end
 	return nil
 end
