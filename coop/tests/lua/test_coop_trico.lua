@@ -585,6 +585,60 @@ Ai2.Utils.GetCurAnimState = function() return "c_stand" end
 CoopTrico.Update(0.016, { x = 0, y = 1 })
 check(CoopTrico.waking and CoopTrico.nav == "ctrl-wake", "ctrl: stood up: woken at once")
 CoopTrico.Update(0.016, { x = 0, y = 0 })
+-- right round from a stand, with the game's quick jump slides on: his jump turn (a planned slide
+-- with the jump-turn switch); with them off: the plain turning slide
+Ai2.Utils.GetCurAnimState = function() return "c_stand" end
+Ai2.CondorUtils.GetFrontGoal = function(props, pos, dir) return Vector(pos.X + dir.X, pos.Y, pos.Z + dir.Z) end
+Ai2.CondorUtils.GetBackGoal = function(ai, pos, dir) return Vector(pos.X - dir.X, pos.Y, pos.Z - dir.Z) end
+Harness.tricoProps.currentInfo.ai2Ext.debugFlags = "|QuickJumpSlide"
+Harness.calls = {}
+CoopTrico.turnIn, CoopTrico.unstickIn = 0, 99
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+local mp = Harness.tricoProps.moveParam
+check(Harness.tricoProps.plannedMove == "ChangeDirectionSlide" and mp and mp.useJumpTurn and near(mp.goalDir.Z, -1)
+	and #Harness.CallsNamed("slide") == 0 and string.find(CoopTrico.nav, "jump", 1, true), "ctrl: right round: his jump turn " .. tostring(CoopTrico.nav) .. " " .. tostring(Harness.tricoProps.plannedMove) .. " " .. tostring(mp and mp.useJumpTurn) .. " " .. #Harness.CallsNamed("slide"))
+-- the jump turn never showed: the plain slide next time, for the rest of the hold
+CoopTrico.turnIn = 0
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+check(#Harness.CallsNamed("slide") == 1 and CoopTrico.jumpTurnOk == false, "ctrl: no jump turn seen: the plain slide")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+check(CoopTrico.jumpTurnOk == nil, "ctrl: tried again next hold")
+Harness.tricoProps.currentInfo.ai2Ext.debugFlags = ""
+Harness.calls = {}
+CoopTrico.turnIn = 0
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+check(#Harness.CallsNamed("slide") == 1, "ctrl: quick slides off: the plain slide")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+Harness.tricoProps.currentInfo.ai2Ext.debugFlags = nil
+-- getting up: no turn asked (one asked now can't play, and is lost)
+Ai2.Utils.GetCurAnimState = function() return "ext_c_sit_end" end
+Harness.calls = {}
+CoopTrico.turnIn, CoopTrico.unstickIn = 0, 99
+CoopTrico.Update(0.016, { x = 0, y = -1 })
+check(#Harness.CallsNamed("slide") == 0 and CoopTrico.nav == "getting-up", "ctrl: getting up: no turn yet")
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+-- (experimental) the gallop: a full push held 1.5 s while walking sends his gallop command
+Ai2.Utils.GetCurAnimState = function() return "c_walkC" end
+Harness.tricoProps.ctrlCmds = { MV_C_GALLOPSLOW = "ControlCommand_C_gallop_slow" }
+CoopTrico.gallop = true
+CoopTrico.progressFrom, CoopTrico.stuckFor, CoopTrico.unstickIn = nil, 0, 99
+CoopTrico.strideFor = 0
+Harness.calls = {}
+local function gallops()
+	local n = 0
+	for _, c in ipairs(Harness.CallsNamed("cmd")) do if c[3] == "ControlCommand_C_gallop_slow" then n = n + 1 end end
+	return n
+end
+for _ = 1, 10 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(gallops() == 0, "gallop: not before 1.5 s")
+for _ = 1, 6 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(gallops() >= 1 and CoopTrico.nav == "ctrl-gallop", "gallop: sent at a full push")
+Harness.calls = {}
+for _ = 1, 20 do CoopTrico.Update(0.1, { x = 0, y = 0.6 }) end
+check(gallops() == 0, "gallop: not at a half push")
+CoopTrico.gallop = nil
+Harness.tricoProps.ctrlCmds = nil
+CoopTrico.Update(0.016, { x = 0, y = 0 })
 -- getting up from a sit takes seconds on the spot: not stuck
 Ai2.Utils.GetCurAnimState = function() return "ext_c_sit_end" end
 CoopTrico.progressFrom, CoopTrico.stuckFor, CoopTrico.unstickIn = nil, 0, 0

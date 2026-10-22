@@ -659,7 +659,23 @@ local function AnimState(props)
 	return ok and tostring(st) or "?"
 end
 
+-- Debug only (CoopActions.testEdges = { at = seconds, names = { ... } }, with the debug channel
+-- on): switch on level jump edges the way a mission script does once the boy has done his part,
+-- so a jump can be tried in a test run without playing the boy there.
+local function TestEdges(dt)
+	local te = CoopActions.testEdges
+	if not te or te.done or not (CoopDebug and CoopDebug.enabled) then return end
+	te.clock = (te.clock or 0) + dt
+	if te.clock < (te.at or 0) or not MS or not MS.SetEnableSpPathEdge then return end
+	te.done = true
+	for _, name in ipairs(te.names or {}) do
+		local ok, err = pcall(MS.SetEnableSpPathEdge, name)
+		Say("AC test edge %s %s", name, ok and "on" or tostring(err))
+	end
+end
+
 local function Step(dt, input, props, anim)
+	pcall(TestEdges, dt)
 	pcall(CoopActions.NoteHint, props)
 	TickGesture(dt, props, anim)
 	Watch(dt, props, anim)

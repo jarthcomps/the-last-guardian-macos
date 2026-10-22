@@ -432,6 +432,26 @@ function CoopTrico.TurnTo(props, wayX, wayZ)
 	return string.format("slide to face %.2f,%.2f", wayX, wayZ)
 end
 
+-- A quicker turn for 60 degrees and more: his jump turn (a hop round, slide_jump_turn_90/180),
+-- which the game switches on for every stage (SetCondorJumpSlideFlag, "QuickJumpSlide") and his
+-- own planning picks when it hurries. The slide request doesn't pass the jump-turn switch on, so
+-- with his planning off the planned slide is set the way the request sets it, plus the switch.
+-- False when the game's switch is off (then the plain turning slide).
+function CoopTrico.JumpTurnTo(props, wayX, wayZ)
+	local info = props.currentInfo
+	local ai = info.ai2Ext
+	local okF, flags = pcall(function() return tostring(ai.debugFlags) end)
+	if not okF or not string.find(flags, "QuickJumpSlide", 1, true) then return false end
+	local pos = CoopTrico.Position(props) or info.aiPos
+	local mp = { goalPos = Vector(pos), goalDir = Vector(wayX, 0, wayZ), useJumpTurn = true }
+	mp.frontGoal = Ai2.CondorUtils.GetFrontGoal(props, mp.goalPos, mp.goalDir)
+	mp.backGoal = Ai2.CondorUtils.GetBackGoal(ai, mp.goalPos, mp.goalDir)
+	props.plannedMove = "ChangeDirectionSlide"
+	props.moveParam = mp
+	CoopTrico.jumpTurns = (CoopTrico.jumpTurns or 0) + 1
+	return true
+end
+
 -- The turn-on-the-spot command that turns Trico from facing (faceX, faceZ) towards the way
 -- (wayX, wayZ): an about-turn beyond 120 degrees, else a quarter turn, on the way's side (the
 -- right of a facing (x, z) is (-z, x)).
@@ -791,6 +811,9 @@ local CTRL_WALK_ANGLE = 35.0   -- degrees off the stick's way he sets off walkin
                                -- (his turning slide can fall short, 55 of 105 degrees: a
                                -- second one beats setting off crooked)
 local CTRL_CURVE_ANGLE = 100.0 -- ... and walking, keeps walking (curving round); beyond: stop, turn
+local JUMP_TURN_COS = math.cos(math.rad(60))   -- this far round or more: his jump turn
+local GALLOP_PUSH = 0.95       -- stick length that counts as a full push (CoopTrico.gallop)
+local GALLOP_AFTER = 1.5       -- seconds of walking at a full push before the gallop
 local CTRL_GEARS = { { 0.55, "ControlCommand_C_walk_slow" }, { 0.9, "ControlCommand_C_walk" },
 	{ 2.0, "ControlCommand_C_walk_fast" } }
 CoopTrico.ctrlStop = "ControlCommand_C_walk_stop"
@@ -886,8 +909,13 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 	end
 	CoopTrico.standIn = math.max(0, (CoopTrico.standIn or 0) - dt)
 	if CoopTrico.StandUp(props, anim) then return end
+	if string.find(anim, "jump_turn", 1, true) then CoopTrico.jumpTurnSeen = true end
 	if (string.find(anim, "turn", 1, true) or string.find(anim, "slide_rot", 1, true)) and not string.find(anim, "walk", 1, true) then
 		CoopTrico.nav = "turning"
+		return
+	end
+	if string.find(anim, "_sit", 1, true) or string.find(anim, "_lie", 1, true) then
+		CoopTrico.nav = "getting-up"   -- (a turn asked now can't play, and is lost)
 		return
 	end
 	local dirXZ = ai.dirXZ
@@ -922,8 +950,21 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		if CoopTrico.turnIn <= 0 then
 			CoopTrico.turnIn = 1.0
 			local name = CoopTrico.TurnCommand(dirXZ.X, dirXZ.Z, wx, wz)
-			pcall(CoopTrico.TurnTo, props, wx, wz)
-			CoopTrico.nav = "ctrl-" .. name
+			-- 60 degrees and more: his jump turn, unless the last one asked for this hold never
+			-- showed (then his plain turning slide)
+			local jumped = false
+			local poised = string.find(anim, "stand", 1, true) or string.find(anim, "stop", 1, true)
+			if cos < JUMP_TURN_COS and CoopTrico.jumpTurnOk ~= false and poised then
+				if CoopTrico.jumpTurnAsked and not CoopTrico.jumpTurnSeen then
+					CoopTrico.jumpTurnOk = false
+				else
+					local okJ, did = pcall(CoopTrico.JumpTurnTo, props, wx, wz)
+					jumped = okJ and did
+					if jumped then CoopTrico.jumpTurnAsked = true end
+				end
+			end
+			if not jumped then pcall(CoopTrico.TurnTo, props, wx, wz) end
+			CoopTrico.nav = "ctrl-" .. (jumped and "jump-" or "") .. name
 		end
 		return
 	end
@@ -937,6 +978,17 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		CoopTrico.kicks = (CoopTrico.kicks or 0) + 1
 		pcall(function() props.moveMngr:RequestForward(CoopTrico.manualMove) end)
 		if CoopDebug then CoopDebug.Print("TR kick %s", anim) end
+	end
+	-- (experimental, CoopTrico.gallop: a full push held while he walks breaks into his gallop;
+	-- the free walk leaves gallops out of its gaits, so his own command is sent on top)
+	local striding = string.find(anim, "walk", 1, true) and not string.find(anim, "stop", 1, true)
+		or string.find(anim, "gallop", 1, true)
+	CoopTrico.strideFor = (striding and (len or 0) > GALLOP_PUSH) and (CoopTrico.strideFor or 0) + dt or 0
+	if ok and CoopTrico.gallop and CoopTrico.strideFor >= GALLOP_AFTER then
+		local cmd = props.ctrlCmds and props.ctrlCmds[CoopTrico.gallop == true and "MV_C_GALLOPSLOW" or CoopTrico.gallop]
+		if cmd then pcall(Ai2.Utils.ReqCtrlCmd, ai, cmd) end
+		CoopTrico.nav = "ctrl-gallop"
+		return
 	end
 	if ok then
 		CoopTrico.nav = "ctrl-walk"
@@ -956,6 +1008,8 @@ function CoopTrico.Unskip(props)
 	if not sk then return end
 	CoopTrico.skipping = nil
 	CoopTrico.waking = nil
+	CoopTrico.jumpTurnAsked, CoopTrico.jumpTurnSeen, CoopTrico.jumpTurnOk = nil, nil, nil
+	CoopTrico.strideFor = 0
 	CoopTrico.stoodUp = nil
 	CoopTrico.progressFrom, CoopTrico.stuckFor = nil, 0
 	sk.approach.skipCreate = sk.was
