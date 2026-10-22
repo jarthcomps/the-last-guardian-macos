@@ -49,7 +49,8 @@ local GESTURE_STARTS = {                      -- the animation states the gestur
 	Gesture_Jump = { "ext_c_Gesture_attack_below" },
 }
 local RISE_REPEAT = 0.5
-local PENDING_TIME = 3.0                      -- seconds a move waits for Trico to stand still
+local PENDING_TIME = 6.0                      -- seconds a move waits for Trico to stand still (getting
+                                              -- up from sitting or stopping a walk takes 3-5 s)
 local PULL_STICK = 0.5                        -- stick x beyond which Circle pulls with that paw
 local WATCH = 3.0                             -- seconds of animation reports after an action
 local DEADZONE = 0.3
@@ -71,8 +72,9 @@ CoopActions.commands = {
 	stomp = "ControlCommand_C_attack_below",
 }
 local STRETCHES = { "stretchFront", "stretchUp", "stretchBack" }
--- animation states a single move may start from
+-- animation states a single move may start from (not the walk starts: c_stand_walk_fastC...)
 local IDLE = { "c_stand", "c_wait", "c_idle" }
+local MOVING = { "walk", "run", "gallop", "turn", "slide", "jump" }
 local SEATED = { "c_sit", "ext_c_sit", "c_lie", "ext_c_lie", "c_liedown", "ext_c_liedown" }
 
 function CoopActions.Reset()
@@ -223,10 +225,18 @@ end
 
 local function Lying(anim) return string.find(anim, "lie") ~= nil end
 
+local function Idle(anim)
+	if not StartsWith(anim, IDLE) then return false end
+	for _, word in ipairs(MOVING) do
+		if string.find(anim, word, 1, true) then return false end
+	end
+	return true
+end
+
 -- A single move: at once from a standing or waiting (or, for the posture moves, seated) Trico;
 -- otherwise it waits for Trico to stand (asked to, when it sits or lies). Returns the report detail.
 local function Move(props, name, anim, seatedToo)
-	if StartsWith(anim, IDLE) or (seatedToo and StartsWith(anim, SEATED)) then
+	if Idle(anim) or (seatedToo and StartsWith(anim, SEATED)) then
 		return Command(props, name)
 	end
 	CoopActions.pending = { name = name, timer = PENDING_TIME }
@@ -355,7 +365,7 @@ local function Step(dt, input, props, anim)
 	local pend = CoopActions.pending
 	if pend then
 		pend.timer = pend.timer - dt
-		if StartsWith(anim, IDLE) then
+		if Idle(anim) then
 			CoopActions.pending = nil
 			Say("AC %s sent %s anim=%s", pend.name, Command(props, pend.name), anim)
 			CoopActions.lastAction, CoopActions.watch, CoopActions.lastAnim = pend.name, WATCH, nil
