@@ -310,7 +310,9 @@ local SP_EDGE_CONE = 60.0       -- degrees off the jump's way to the edge's end 
 local SP_EDGE_PAST = 3.0        -- metres past the edge's end for the goal
 local SP_EDGE_SPOT = 10.0       -- metres from the edge's end within which a jump spot counts as past it
 local FORCE_NEAR = 4.0          -- metres from Trico the boy must be ("near" policy), unless riding
-CoopActions.forceEdges = CoopActions.forceEdges or "near"   -- "near", "always" or "never"
+-- "always" (Jarth's choice: Cross may open any jump ahead; the boy may be left behind and need a
+-- checkpoint reload), "near" (the boy within 4 m or riding, chained jumps only riding), "never"
+CoopActions.forceEdges = CoopActions.forceEdges or "always"
 
 function CoopActions.SpEdges()
 	local now = CoopActions.clock or 0
@@ -367,17 +369,32 @@ function CoopActions.FindSpEdge(props, wayX, wayZ)
 	return best
 end
 
+-- Whether an edge chains on from another: its start is where another special edge ends (the
+-- canyon's stepping stones: column to column). The boy can't walk to such a start.
+local CHAIN_NEAR = 2.0
+function CoopActions.Chained(edge, edges)
+	for _, other in ipairs(edges or CoopActions.SpEdges()) do
+		if other.name ~= edge.name then
+			local dx, dy, dz = other.to.X - edge.from.X, other.to.Y - edge.from.Y, other.to.Z - edge.from.Z
+			if dx * dx + dy * dy + dz * dz <= CHAIN_NEAR * CHAIN_NEAR then return true end
+		end
+	end
+	return false
+end
+
 -- Whether an edge that is off may be switched on now, by CoopActions.forceEdges, and why not.
--- Never in a scripted scene. "near": the boy within FORCE_NEAR of Trico, or riding him (an edge
--- forced with the boy elsewhere can strand him: the canyon's pillar jump lands Trico on the
--- terrace whose collapse scene then plays without the boy).
-function CoopActions.MayForce(props)
+-- Never in a scripted scene. "near": the boy within FORCE_NEAR of Trico, or riding him; and an
+-- edge that chains on from another (Trico on a column) only while the boy rides, as the level
+-- means the columns to be crossed (with the boy left behind he may be stranded: in
+-- coop-h-jump5 Trico crossed all four stepping stones while the boy stood on the ledge).
+function CoopActions.MayForce(props, edge)
 	local policy = CoopActions.forceEdges
 	if policy == "never" or policy == false then return false, "policy never" end
 	if props.currentInfo.controlMode == "EVENT" then return false, "a scripted scene" end
 	if policy == "always" then return true end
 	local okR, riding = pcall(function() return MS.BoyIsRidingOnCondor() end)
 	if okR and riding == true then return true end
+	if edge and CoopActions.Chained(edge) then return false, "a chained jump: only with the boy riding" end
 	local okB, boy = pcall(function() return Ai2.Utils.GetPlayerAI().pos end)
 	if not okB or not boy then return false, "boy unknown" end
 	local pos = TricoAt(props)
@@ -712,7 +729,7 @@ local function ForceEdge(props, wayX, wayZ)
 	local j = CoopActions.jump
 	if edge.valid and j and j.forced == edge.name then return "forced " .. edge.name .. " already" end
 	if edge.valid then return nil end
-	local may, why = CoopActions.MayForce(props)
+	local may, why = CoopActions.MayForce(props, edge)
 	if not may then
 		Say("AC sp edge %s left off: %s", edge.name, tostring(why))
 		return nil
@@ -742,6 +759,8 @@ local function ForceEdge(props, wayX, wayZ)
 end
 
 local function Jump(props, input)
+	-- (the free-walk hooks walk his approach to a jump: there even before the stick has steered)
+	if CoopTrico and CoopTrico.InstallHooks then pcall(CoopTrico.InstallHooks) end
 	local wayX, wayZ = CoopActions.Way(props, input)
 	local ai = props.currentInfo.ai2Ext
 	local forced = ForceEdge(props, wayX, wayZ)
@@ -834,8 +853,30 @@ local function TestEdges(dt)
 	end
 end
 
+-- Debug only (CoopActions.testBoy = { at = seconds, up = metres }, with the debug channel on):
+-- put the boy just above Trico's back once (so a run can test riding without driving him there),
+-- and report whether he rides every 2 s.
+local function TestBoy(dt, props)
+	local tb = CoopActions.testBoy
+	if not tb or not (CoopDebug and CoopDebug.enabled) or not MS then return end
+	tb.clock = (tb.clock or 0) + dt
+	if not tb.done and tb.clock >= (tb.at or 0) and MS.BoySetPosition then
+		tb.done = true
+		local p = TricoAt(props)
+		local ok, err = pcall(MS.BoySetPosition, p.X, p.Y + (tb.up or 6), p.Z)
+		Say("AC test boy placed over Trico %.1f,%.1f,%.1f %s", p.X, p.Y + (tb.up or 6), p.Z, ok and "ok" or tostring(err))
+	end
+	tb.reportIn = (tb.reportIn or 0) - dt
+	if tb.done and tb.reportIn <= 0 then
+		tb.reportIn = 2.0
+		local okR, riding = pcall(function() return MS.BoyIsRidingOnCondor() end)
+		Say("AC test boy riding=%s", okR and tostring(riding) or "?")
+	end
+end
+
 local function Step(dt, input, props, anim)
 	pcall(TestEdges, dt)
+	pcall(TestBoy, dt, props)
 	pcall(CoopActions.NoteHint, props)
 	TickGesture(dt, props, anim)
 	Watch(dt, props, anim)

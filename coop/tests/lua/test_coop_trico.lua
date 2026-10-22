@@ -860,6 +860,14 @@ check(fm:StopDecision(tr) == "orig" and #origCalls == before + 1, "released: his
 local tm = { props = Harness.tricoProps, manualMode = true, useMoveTypes = { "x" }, coopMoveTypes = true }
 fm:Main(tm)
 check(tm.useMoveTypes == nil and tm.coopMoveTypes == nil, "released: our gaits cleared from his action")
+-- a Cross jump held (steering off): his approach in his ordinary walk, then his own gaits again
+CoopActions = { jump = { target = Vector(0, 0, 10) } }
+local tj = { props = Harness.tricoProps, manualMode = false }
+fm:Main(tj)
+check(tj.useMoveTypes and tj.useMoveTypes[#tj.useMoveTypes] == "MV_C_WALK", "a jump held: his approach walks")
+CoopActions = nil
+fm:Main(tj)
+check(tj.useMoveTypes == nil, "the jump over: his own gaits")
 local own = { props = Harness.tricoProps, useMoveTypes = { "MV_C_WALKSTOP", "MV_C_WALKBACK" } }
 fm:Main(own)
 check(own.useMoveTypes and #own.useMoveTypes == 2, "released: his own gaits left alone")
