@@ -309,24 +309,48 @@ local DIRECT_FAR = 25.0        -- ... and at full stick
 -- How far along (dirX, dirZ) from pos the ground stays walkable, up to `dist` metres: in REACH_STEP
 -- steps, each must have his navmesh right under it (within REACH_BOX) and no more than
 -- REACH_DROP up or down from the last. The manual free walk follows its pose without asking for
--- ground ("he walked on air off the cliff"), so the pose may never lie past this.
+-- ground ("he walked on air off the cliff"), so the pose may never lie past this. A step that
+-- misses is tried again REACH_SIDE either side of the line, so a narrow beam a little off it is
+-- not taken for an edge. (Chaining each step from the ground point found before read 1 m of
+-- ground everywhere in game: the found points are no place to step on from.)
 local REACH_STEP = 1.0
 local REACH_BOX = Vector(0.6, 2.5, 0.6)
 local REACH_DROP = 1.5
 local REACH_EVERY = 0.2        -- seconds between measures (kept while the way stays within 5 degrees)
-local EDGE_MARGIN = 1.5        -- metres short of the edge the pose stops
+local EDGE_MARGIN = 1.5        -- metres short of the edge the pose stops (CoopTrico.edgeMargin)
+local REACH_SIDE = 0.4         -- metres either side of the line a missed step is tried again
+local BACK_SLACK = 0.5         -- metres the built path may fall short of him before it counts
+local function EdgeMargin() return tonumber(CoopTrico.edgeMargin) or EDGE_MARGIN end
+local function GroundNear(ai, x, y, z)
+	local probe = Vector(x, y, z)
+	local ok, near = pcall(Ai2FindNearestPosition, ai, probe, REACH_BOX)
+	-- (debug: what the last miss saw, for the TE report)
+	if not ok or type(near) ~= "table" or near.found ~= 1 or not near.pos then
+		CoopTrico.reachMiss = string.format("%.1f,%.1f,%.1f:%s", x, y, z, ok and type(near) == "table" and tostring(near.found) or "err")
+		return nil
+	end
+	local dx, dz = near.pos.X - x, near.pos.Z - z
+	if dx * dx + dz * dz > REACH_BOX.X * REACH_BOX.X * 2 then
+		CoopTrico.reachMiss = string.format("%.1f,%.1f,%.1f:off%.1f,%.1f,%.1f", x, y, z, near.pos.X, near.pos.Y, near.pos.Z)
+		return nil
+	end
+	return near.pos.Y
+end
+
 function CoopTrico.WalkableReach(props, pos, dirX, dirZ, dist)
 	local ai = props.currentInfo.ai2Ext
 	local lastY = pos.Y
 	local d = 0
 	while d + REACH_STEP <= dist do
-		local probe = Vector(pos.X + dirX * (d + REACH_STEP), lastY, pos.Z + dirZ * (d + REACH_STEP))
-		local ok, near = pcall(Ai2FindNearestPosition, ai, probe, REACH_BOX)
-		if not ok or type(near) ~= "table" or near.found ~= 1 or not near.pos then return d end
-		local dx, dz = near.pos.X - probe.X, near.pos.Z - probe.Z
-		if dx * dx + dz * dz > REACH_BOX.X * REACH_BOX.X * 2 then return d end
-		if math.abs(near.pos.Y - lastY) > REACH_DROP then return d end
-		lastY = near.pos.Y
+		local x, z = pos.X + dirX * (d + REACH_STEP), pos.Z + dirZ * (d + REACH_STEP)
+		local y = GroundNear(ai, x, lastY, z)
+		if not y then y = GroundNear(ai, x - dirZ * REACH_SIDE, lastY, z + dirX * REACH_SIDE) end
+		if not y then y = GroundNear(ai, x + dirZ * REACH_SIDE, lastY, z - dirX * REACH_SIDE) end
+		if y and math.abs(y - lastY) > REACH_DROP then
+			CoopTrico.reachMiss = string.format("%.1f,%.1f,%.1f:dy%.1f", x, lastY, z, y - lastY)
+		end
+		if not y or math.abs(y - lastY) > REACH_DROP then return d end
+		lastY = y
 		d = d + REACH_STEP
 	end
 	return dist
@@ -346,20 +370,17 @@ local function Reach(props, pos, dirX, dirZ, dist, dt)
 end
 
 -- The free walk's intermediate path (its "pose") DIRECT_NEAR..DIRECT_FAR ahead, built in place,
--- never past the walkable ground (EDGE_MARGIN short of an edge; nearer than that, onto him).
-function CoopTrico.BuildAhead(props, pos, dirX, dirZ, len, dt)
-	local info = props.currentInfo
-	local ai = info.ai2Ext
-	local dist = DIRECT_NEAR + (DIRECT_FAR - DIRECT_NEAR) * (len or 1)
-	local reach = Reach(props, pos, dirX, dirZ, dist, dt)
-	CoopTrico.blocked = nil
-	if reach < dist then
-		CoopTrico.blocked = reach
-		dist = math.max(0, reach - EDGE_MARGIN)
-	end
+-- never past the walkable ground (the edge margin short of an edge; nearer than that, onto him).
+-- Two checks, each pulling the pose in: the walkable reach (above), and the built path must
+-- reach back from the pose to him (its BackRest: shorter, and a wall or the mesh's end lies
+-- between, that far from the pose), rebuilt once nearer. The navmesh fit gives the pose its height.
+local function BuildPose(ai, info, pos, dirX, dirZ, dist)
 	local target = Vector(pos.X + dirX * dist, pos.Y, pos.Z + dirZ * dist)
-	local fit = Ai2FitNavmesh and Ai2FitNavmesh(ai.navMesh, target, Ai2.Approach.upperLimit, Ai2.Approach.pathLowerLimit)
-	if fit and fit.found == 1 then target = Vector(target.X, fit.pos.Y, target.Z) end
+	local fit = nil
+	if Ai2FitNavmesh then
+		local okF, f = pcall(Ai2FitNavmesh, ai.navMesh, target, Ai2.Approach.upperLimit, Ai2.Approach.pathLowerLimit)
+		fit = okF and f or nil
+	end
 	local dir = Vector(dirX, 0, dirZ)
 	local dp = Ai2.CondorUtils.GetPath(ai, Ai2.Actions.Condor.Path.Pack.FreeMoveIntermediate)
 	local base = info.detailPath
@@ -377,7 +398,48 @@ function CoopTrico.BuildAhead(props, pos, dirX, dirZ, len, dt)
 	dp.FrontGoalTransitOffset = base.FrontGoalTransitOffset
 	dp.BackGoalTransitOffset = base.BackGoalTransitOffset
 	dp.TurnRadius = base.TurnRadius
+	return target, fit, dp, dir
+end
+
+function CoopTrico.BuildAhead(props, pos, dirX, dirZ, len, dt)
+	local info = props.currentInfo
+	local ai = info.ai2Ext
+	local margin = EdgeMargin()
+	local dist = DIRECT_NEAR + (DIRECT_FAR - DIRECT_NEAR) * (len or 1)
+	CoopTrico.reachFrom = string.format("%.1f,%.1f,%.1f>%.2f,%.2f", pos.X, pos.Y, pos.Z, dirX, dirZ)
+	local reach = Reach(props, pos, dirX, dirZ, dist, dt)
+	CoopTrico.blocked = nil
+	CoopTrico.edgeWhy = nil
+	if reach < dist then
+		CoopTrico.blocked, CoopTrico.edgeWhy = reach, "reach"
+		dist = math.max(0, reach - margin)
+	end
+	-- (his own path follower calls the way unsafe: onto him, see CoopTrico.Unsafe)
+	if CoopTrico.unsafeNow then
+		CoopTrico.blocked, CoopTrico.edgeWhy = 0, "unsafe"
+		dist = 0
+	end
+	CoopTrico.reach = reach
+	local target, fit, dp, dir = BuildPose(ai, info, pos, dirX, dirZ, dist)
+	-- (the fit only gives the pose his ground's height: as a test of the pose it failed on open
+	-- ground in game, coop-h-pace6, and stopped him every few metres; the reach is the test)
+	CoopTrico.fitTries = (type(fit) == "table" and fit.found == 1) and 0 or 1
+	if type(fit) == "table" and fit.found == 1 and fit.pos then target = Vector(target.X, fit.pos.Y, target.Z) end
+	dp.BasePos = target
 	Ai2BuildPath(ai, dp, 0)
+	-- the game's own verdict: the path from the pose back to him stops short (a wall, the mesh's
+	-- end): the obstacle lies BackRest from the pose; once, the pose in short of it
+	local back = tonumber(dp.BackRest)
+	CoopTrico.backRest = back
+	if back and dist > 0 and back + BACK_SLACK < DistanceXZ(target, pos) then
+		local obstacle = math.max(0, dist - back)
+		CoopTrico.blocked, CoopTrico.edgeWhy = obstacle, "path"
+		dist = math.max(0, obstacle - margin)
+		target, fit, dp, dir = BuildPose(ai, info, pos, dirX, dirZ, dist)
+		if type(fit) == "table" and fit.found == 1 and fit.pos then target = Vector(target.X, fit.pos.Y, target.Z) end
+		dp.BasePos = target
+		Ai2BuildPath(ai, dp, 0)
+	end
 	info.apDestination = target
 	info.apDestinationDir = dir
 	CoopTrico.goal = target
@@ -406,36 +468,39 @@ end
 -- suspended while the stick is held, as the game's scripted chases do (put back on release):
 -- with it on he stopped half way through a hold and set off again slowly.
 CoopTrico.manualMove = { isFreeMove = true, manualMode = true, alongLinePath = false }
+local CTRL_FAST_PUSH = 0.9     -- stick length beyond which his quick acceleration is used
+-- (a half push is his slow walk, about 1 m/s; his ordinary walk is about 2 m/s, coop-h-pace10)
 local CTRL_TYPES = {
-	{ 0.55, { "MV_C_WALKSTOP", "MV_C_WALKSLOW" } },
+	{ 0.65, { "MV_C_WALKSTOP", "MV_C_WALKSLOW" } },
 	{ 0.9, { "MV_C_WALKSTOP", "MV_C_WALKSLOW", "MV_C_WALK" } },
 	{ 2.0, { "MV_C_WALKSTOP", "MV_C_WALKSLOW", "MV_C_WALK", "MV_C_WALKFAST" } },
 }
-function CoopTrico.CtrlTypes(len)
-	for _, g in ipairs(CTRL_TYPES) do
-		if (len or 1) <= g[1] then return g[2] end
+-- ... and capped by the room to an edge (the walkable reach): with a fast walk's stopping distance
+-- (about 7 m) more than the shortened pose left him, he stopped, set off fast again and stopped,
+-- over and over (coop-h-pace10). Under FAST_ROOM metres no fast walk, under WALK_ROOM slow only.
+local FAST_ROOM = 12.0
+local WALK_ROOM = 7.0
+function CoopTrico.CtrlTypes(len, room)
+	local level = #CTRL_TYPES
+	for i, g in ipairs(CTRL_TYPES) do
+		if (len or 1) <= g[1] then level = i break end
 	end
-	return CTRL_TYPES[#CTRL_TYPES][2]
+	if room and room < WALK_ROOM then level = 1
+	elseif room and room < FAST_ROOM then level = math.min(level, 2) end
+	return CTRL_TYPES[level][2]
 end
 
 function CoopTrico.ManualMove(props, pos, dirX, dirZ, len, dt)
 	local target = CoopTrico.BuildAhead(props, pos, dirX, dirZ, len, dt)
 	Ai2.CondorUtils.Path.ReqDiscretePathMode(props, false, false, false, false)
-	props.curMoveTypes = CoopTrico.CtrlTypes(len)
+	-- (his gaits and acceleration: see the hooks above)
 	local walk = props.moveMngr and props.moveMngr.walk
 	local sk = CoopTrico.skipping
 	if walk and sk and sk.stopDecision == nil then
 		sk.stopDecision = walk.suspendStopDecision or false
-		sk.accelLevel = walk.accelLevel
 		sk.walk = walk
 	end
-	if walk then
-		walk.suspendStopDecision = true
-		-- a full push: his quick acceleration (his movement modes often leave it at "low", one
-		-- gear at a time, and from a slow walk he never got further in a 15 s hold)
-		if (len or 0) > CTRL_TYPES[2][1] then walk.accelLevel = "high"
-		elseif sk and sk.accelLevel ~= nil then walk.accelLevel = sk.accelLevel end
-	end
+	if walk then walk.suspendStopDecision = true end
 	props.isOnGoalInVolume = false
 	props.plannedMove = "ForwardMove"
 	props.moveParam = CoopTrico.manualMove
@@ -512,6 +577,12 @@ end
 -- ("trico" steering), else the camera's, latched while the stick is held.
 function CoopTrico.Frame(sx, sy, pos, dirXZ)
 	if CoopTrico.relative == "trico" and dirXZ then return dirXZ.X, dirXZ.Z, "trico" end
+	-- (debug, for measured runs: "up" on the stick is a fixed world way, CoopTrico.worldForward)
+	if CoopTrico.relative == "world" and type(CoopTrico.worldForward) == "table" then
+		local w = CoopTrico.worldForward
+		local len = math.sqrt(w[1] * w[1] + w[2] * w[2])
+		if len > 0 then return w[1] / len, w[2] / len, "world" end
+	end
 	local angle = math.deg(math.atan2(sx, sy))
 	local l = CoopTrico.latch
 	if l then
@@ -581,6 +652,15 @@ local function Report(props)
 		tostring(props.plannedMove), tostring(run and run.name),
 		okName and tostring(intrName) or "?", tostring(info.interestType),
 		tostring(info.aiMode and info.aiMode.name), okAnim and tostring(anim) or "?")
+	if CoopTrico.steering and CoopTrico.strategy == "ctrl" then
+		local pg = info.pathGen
+		CoopDebug.Print("TE reach=%s fit=%s back=%s edge=%s why=%s sf=%s ut=%s stops=%s from=%s miss=%s",
+			CoopTrico.reach and string.format("%.1f", CoopTrico.reach) or "-", tostring(CoopTrico.fitTries),
+			CoopTrico.backRest and string.format("%.1f", CoopTrico.backRest) or "-",
+			CoopTrico.blocked and string.format("%.1f", CoopTrico.blocked) or "-", tostring(CoopTrico.edgeWhy),
+			tostring(type(pg) == "table" and pg.isSafeFollowPath), tostring(props.moveMngr and props.moveMngr.unsafeTrunkPath),
+			tostring(CoopTrico.hookStops), tostring(CoopTrico.reachFrom), tostring(CoopTrico.reachMiss))
+	end
 
 	local okStage, stage = pcall(Ai2.Condor.StageScripts.GetBoyStageID)
 	local okBoy, boy = pcall(function()
@@ -857,9 +937,138 @@ function CoopTrico.StandUp(props, anim)
 	return true
 end
 
+-- Hooks into his free walk's own decisions, for "ctrl" (installed once, active only while the
+-- stick steers him in manual mode; his own free walks run the originals). Writing his props from
+-- here lost to his AI tick: his movement mode rebuilds curMoveTypes from his interest every tick
+-- (low with the boy's interest lowered: walk-slow only) and sets his acceleration low.
+--   FreeMove.Main: the stick's gaits as the decision's own useMoveTypes, his acceleration high at
+--                  a full push (props.walk, which the decision reads).
+--   FreeMove.StopDecision: in manual mode the game counts the pose as arrived whenever he has
+--                  nearly reached his predicted step (its destination is the pose itself), so he
+--                  stopped and set off again over and over; here he stops only once his own
+--                  stopping distance reaches what is left to the pose (an edge, a wall, release).
+CoopTrico.hooks = CoopTrico.hooks or {}
+local function SteeringManual(t)
+	return CoopTrico.steering and CoopTrico.strategy == "ctrl" and type(t) == "table" and t.manualMode
+		and not t.forcedStop
+end
+
+function CoopTrico.InstallHooks()
+	local fm = Ai2 and Ai2.Actions and Ai2.Actions.Condor and Ai2.Actions.Condor.FreeMove
+	if type(fm) ~= "table" then return false end
+	local h = CoopTrico.hooks
+	if type(fm.Main) == "function" and fm.Main ~= h.main then
+		local orig = fm.Main
+		h.main = function(self, t, ...)
+			if SteeringManual(t) then
+				local len = CoopTrico.stickLen or 1
+				local types = CoopTrico.CtrlTypes(len, CoopTrico.blocked)
+				-- (his current gait stays allowed when only the edge cap left it out: one left out
+				-- sets the decision's slowDown, which the game's stop decision takes as a stop, so
+				-- the cap only keeps him from shifting up, and his stop by distance brakes him at
+				-- the edge. The stick asking for a slower gait is a slow-down the game makes with a
+				-- stop and a slower start: manual mode never shifts down by itself.)
+				local cur = t.curType
+				if cur and cur ~= "MV_C_WALKSTOP" then
+					local listed, wanted = false, false
+					for _, m in ipairs(types) do if m == cur then listed = true end end
+					for _, m in ipairs(CoopTrico.CtrlTypes(len)) do if m == cur then wanted = true end end
+					if wanted and not listed then
+						local copy = {}
+						for i, m in ipairs(types) do copy[i] = m end
+						copy[#copy + 1] = cur
+						types = copy
+					end
+				end
+				t.useMoveTypes = types
+				t.coopMoveTypes = true
+				local walk = t.props and t.props.walk
+				if walk then
+					walk.accelLevel = (len > CTRL_FAST_PUSH and types[#types] == "MV_C_WALKFAST") and "high" or "low"
+					walk.stopAccelLevel = "low"
+				end
+			elseif type(t) == "table" and t.coopMoveTypes then
+				-- (his action's own state outlives the hold: our gaits go with it)
+				t.useMoveTypes, t.coopMoveTypes = nil, nil
+			end
+			return orig(self, t, ...)
+		end
+		fm.Main = h.main
+	end
+	if type(fm.StopDecision) == "function" and fm.StopDecision ~= h.stop then
+		local orig = fm.StopDecision
+		h.stop = function(self, t, parentReport, ...)
+			if SteeringManual(t) and not t.requestStop and not t.slowDown then
+				local okD, toStop, anims = pcall(self.GetDistanceToStop, self, t, t.curAnimStName, true)
+				if okD and (t.progressed or 0) + (toStop or 0) >= (t.rest or 0) - 0.3 then
+					local props = t.props
+					t.ctrlCmd = props.ctrlCmds and props.ctrlCmds.MV_C_WALKSTOP or props.stopCommand
+					t.transAnims = anims or {}
+					t.transGears = {}
+					for i = 1, #t.transAnims do t.transGears[i] = self.stopGearName end
+					CoopTrico.hookStops = (CoopTrico.hookStops or 0) + 1
+					return true
+				end
+				return false
+			end
+			return orig(self, t, parentReport, ...)
+		end
+		fm.StopDecision = h.stop
+	end
+	return true
+end
+
+-- (Off unless CoopTrico.useUnsafe: in game, coop-h-pace8, unsafeTrunkPath fired 12 m short of
+-- any edge and stopped him for 2 s; it reads his own detail path, which is stale while his
+-- planning is off. The walkable reach stops him at real edges.)
+-- His own path follower's alarms while he walks (the game stops his own walks on them): the
+-- followed path is unsafe (isSafeFollowPath 0), or his trunk path runs into a wall right ahead
+-- (unsafeTrunkPath). Only while a walk plays, as the game's own check: standing, they may be
+-- left over from the last walk, and he would never set off again.
+function CoopTrico.Unsafe(props, info, anim)
+	if not CoopTrico.useUnsafe then return false end   -- (off: see above)
+	if not string.find(anim, "walk", 1, true) or string.find(anim, "stand_walk", 1, true) then return false end
+	local pg = info.pathGen
+	local unsafe = (type(pg) == "table" and pg.isSafeFollowPath == 0)
+		or (props.moveMngr and props.moveMngr.unsafeTrunkPath == true)
+	if unsafe then CoopTrico.unsafeCount = (CoopTrico.unsafeCount or 0) + 1 end
+	return unsafe and true or false
+end
+
+-- A stage interest's action of his (the canyon's wing stretch) holding him while the stick is
+-- held: not idling, so the bans leave it be; his stop command every ACTION_STOP_EVERY seconds once
+-- it has held him ACTION_STOP_AFTER (never in an event: a scripted scene's actions stay)
+local ACTION_STOP_AFTER = 1.0
+local ACTION_STOP_EVERY = 2.0
+function CoopTrico.EndStageAction(props, info, anim, dt)
+	local act = info.execAction
+	local moving = string.find(anim, "walk", 1, true) or string.find(anim, "slide", 1, true)
+		or string.find(anim, "turn", 1, true) or string.find(anim, "gallop", 1, true)
+	-- (sitting, lying and getting up are his own: the stand-up handles those; standing or waiting,
+	-- the action's own animation is over though the game may still list it, coop-h-pace12: the
+	-- stick's walk takes over)
+	local seated = string.find(anim, "_sit", 1, true) or string.find(anim, "_lie", 1, true)
+	local plain = string.sub(anim, 1, 7) == "c_stand" or string.sub(anim, 1, 6) == "c_wait"
+	if not act or moving or seated or plain or info.controlMode == "EVENT" then
+		CoopTrico.actionFor = 0
+		return false
+	end
+	CoopTrico.actionFor = (CoopTrico.actionFor or 0) + dt
+	CoopTrico.actionStopIn = math.max(0, (CoopTrico.actionStopIn or 0) - dt)
+	if CoopTrico.actionFor < ACTION_STOP_AFTER then return false end
+	if CoopTrico.actionStopIn <= 0 then
+		CoopTrico.actionStopIn = ACTION_STOP_EVERY
+		CoopTrico.actionStops = (CoopTrico.actionStops or 0) + 1
+		pcall(Ai2.Utils.ReqCtrlCmd, info.ai2Ext, props.stopCommand or CoopTrico.ctrlStop)
+		if CoopDebug then CoopDebug.Print("TR action-stop %s %s", tostring(act.name), anim) end
+	end
+	CoopTrico.nav = "ctrl-action"
+	return true
+end
+
 -- "ctrl", every frame the stick is held (see the top).
 local CTRL_KICK = 0.5          -- seconds standing into a walk before his forward request
-local CTRL_UNSTICK = 2.0       -- seconds without progress before his own stuck requests are dropped
+local CTRL_UNSTICK = 4.0       -- seconds without progress before his own stuck requests are dropped
 local CTRL_PROGRESS = 0.3      -- metres that count as progress
 local WAKE_TIME = 2.0          -- seconds his planning may run to get him going again
 local CTRL_WALK_ANGLE = 35.0   -- degrees off the stick's way he sets off walking; beyond: turn
@@ -881,6 +1090,8 @@ function CoopTrico.CtrlGear(len)
 end
 
 function CoopTrico.Ctrl(dt, props, sx, sy, len)
+	CoopTrico.stickLen = len
+	pcall(CoopTrico.InstallHooks)
 	local info = props.currentInfo
 	local ai = info.ai2Ext
 	local pos = CoopTrico.Position(props, dt)
@@ -902,8 +1113,9 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 	local spinning = string.find(anim, "slide", 1, true) or string.find(anim, "turn", 1, true)
 		or string.find(anim, "_sit", 1, true) or string.find(anim, "_lie", 1, true)   -- (getting up)
 		or string.find(anim, "stand_walk", 1, true)   -- (setting off: 2 s at a crawl)
+		or string.find(anim, "_stop", 1, true)        -- (stopping or setting off from a stop)
 	-- (at an edge he stands by design: not stuck)
-	local atEdge = CoopTrico.blocked and CoopTrico.blocked < EDGE_MARGIN + 1.0
+	local atEdge = CoopTrico.blocked and CoopTrico.blocked < EdgeMargin() + 1.0 or CoopTrico.nav == "ctrl-unsafe"
 	local from = CoopTrico.progressFrom
 	if not from or spinning or atEdge or DistanceXZ(from, pos) > CTRL_PROGRESS then
 		CoopTrico.progressFrom = Vector(pos)
@@ -966,6 +1178,7 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 	end
 	CoopTrico.standIn = math.max(0, (CoopTrico.standIn or 0) - dt)
 	if CoopTrico.StandUp(props, anim) then return end
+	if CoopTrico.EndStageAction(props, info, anim, dt) then return end
 	if string.find(anim, "jump_turn", 1, true) then CoopTrico.jumpTurnSeen = true end
 	if (string.find(anim, "turn", 1, true) or string.find(anim, "slide_rot", 1, true)) and not string.find(anim, "walk", 1, true) then
 		CoopTrico.nav = "turning"
@@ -1025,12 +1238,15 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		end
 		return
 	end
+	CoopTrico.unsafeNow = CoopTrico.Unsafe(props, info, anim)
 	local ok, err = pcall(CoopTrico.ManualMove, props, pos, wx, wz, len, dt)
 	-- after he has sat (and stood up), his action layer leaves the planned move alone until a
 	-- move request comes through: still standing CTRL_KICK into the walk, his own forward
 	-- request (the same move), once a second at most
 	CoopTrico.kickIn = math.max(0, (CoopTrico.kickIn or 0) - dt)
-	if ok and CoopTrico.ctrlStill >= CTRL_KICK and CoopTrico.kickIn <= 0 then
+	local plain = string.sub(anim, 1, 7) == "c_stand" and not string.find(anim, "walk", 1, true)
+		or string.sub(anim, 1, 6) == "c_wait"
+	if ok and plain and CoopTrico.ctrlStill >= CTRL_KICK and CoopTrico.kickIn <= 0 then
 		CoopTrico.kickIn = 1.0
 		CoopTrico.kicks = (CoopTrico.kicks or 0) + 1
 		pcall(function() props.moveMngr:RequestForward(CoopTrico.manualMove) end)
@@ -1047,7 +1263,9 @@ function CoopTrico.Ctrl(dt, props, sx, sy, len)
 		CoopTrico.nav = "ctrl-gallop"
 		return
 	end
-	if ok then
+	if ok and CoopTrico.unsafeNow then
+		CoopTrico.nav = "ctrl-unsafe"
+	elseif ok then
 		CoopTrico.nav = CoopTrico.blocked and string.format("ctrl-edge%.0f", CoopTrico.blocked) or "ctrl-walk"
 	else
 		-- (no path to be had: his walk commands, which at least start him)
@@ -1069,11 +1287,9 @@ function CoopTrico.Unskip(props)
 	CoopTrico.strideFor = 0
 	CoopTrico.stoodUp = nil
 	CoopTrico.progressFrom, CoopTrico.stuckFor = nil, 0
+	CoopTrico.unsafeNow, CoopTrico.actionFor = nil, 0
 	sk.approach.skipCreate = sk.was
-	if sk.walk then
-		sk.walk.suspendStopDecision = sk.stopDecision
-		if sk.accelLevel ~= nil then sk.walk.accelLevel = sk.accelLevel end
-	end
+	if sk.walk then sk.walk.suspendStopDecision = sk.stopDecision end
 	if props and (props.plannedMove == "CoopManual" or props.moveParam == CoopTrico.manualMove) then
 		props.plannedMove = nil
 		props.moveParam = nil

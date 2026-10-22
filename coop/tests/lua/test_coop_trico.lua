@@ -500,15 +500,63 @@ Harness.tricoProps.moveMngr.walk = { suspendStopDecision = false, accelLevel = "
 Harness.calls = {}
 CoopTrico.Update(0.016, { x = 0, y = 1 })
 check(Harness.tricoProps.moveMngr.walk.suspendStopDecision == true, "ctrl: his stop decision suspended while held")
-check(Harness.tricoProps.moveMngr.walk.accelLevel == "high", "ctrl: full stick: his quick acceleration")
-local types = Harness.tricoProps.curMoveTypes
-check(types and types[#types] == "MV_C_WALKFAST", "ctrl: full stick allows the fast walk")
-check(#CoopTrico.CtrlTypes(0.4) == 2 and CoopTrico.CtrlTypes(0.4)[2] == "MV_C_WALKSLOW", "ctrl: a light push walks slowly")
 check(Harness.tricoProps.plannedMove == "ForwardMove" and Harness.tricoProps.moveParam.manualMode
 	and CoopTrico.nav == "ctrl-walk", "ctrl: his forward move, manual")
 check(built.BasePos and near(built.BasePos.Z, 25) and near(built.BaseDir.Z, 1) and #Harness.CallsNamed("build") == 1,
 	"ctrl: the pose 25 m ahead")
 check(#Harness.CallsNamed("cmd") == 0, "ctrl: no walk commands while the path works")
+-- his gaits and acceleration go through hooks on his free walk's own decisions (writing his props
+-- lost to his AI tick): active only while steering in manual mode
+local origCalls = {}
+local fm = {
+	stopGearName = "MV_C_WALKSTOP",
+	Main = function(self, t) origCalls[#origCalls + 1] = "main" end,
+	StopDecision = function(self, t) origCalls[#origCalls + 1] = "stop" return "orig" end,
+	GetDistanceToStop = function(self, t, anim, keep) return 6, { "c_walkC_walk_stopC" } end,
+}
+Ai2.Actions.Condor.FreeMove = fm
+Harness.tricoProps.walk = { accelLevel = "low", stopAccelLevel = "high" }
+Harness.tricoProps.ctrlCmds = { MV_C_WALKSTOP = "ControlCommand_C_walk_stop" }
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(fm.Main == CoopTrico.hooks.main and fm.StopDecision == CoopTrico.hooks.stop, "hooks installed")
+local hookedMain = fm.Main
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(fm.Main == hookedMain, "hooks not installed twice")
+local t = { props = Harness.tricoProps, manualMode = true, progressed = 0, rest = 20, curAnimStName = "c_walkC" }
+fm:Main(t)
+check(t.useMoveTypes[#t.useMoveTypes] == "MV_C_WALKFAST" and Harness.tricoProps.walk.accelLevel == "high"
+	and Harness.tricoProps.walk.stopAccelLevel == "low" and origCalls[#origCalls] == "main", "full push: fast walk allowed, quick acceleration")
+check(fm:StopDecision(t) == false and t.ctrlCmd == nil, "20 m to the pose: no stop (the manual-mode shortcut gone)")
+check(#CoopTrico.CtrlTypes(0.6) == 2, "a half push: his slow walk")
+check(#CoopTrico.CtrlTypes(1, 10) == 3 and #CoopTrico.CtrlTypes(1, 5) == 2 and #CoopTrico.CtrlTypes(1, 20) == 4,
+	"the gaits capped by the room to an edge")
+CoopTrico.blocked = 9
+fm:Main(t)
+check(t.useMoveTypes[#t.useMoveTypes] == "MV_C_WALK" and Harness.tricoProps.walk.accelLevel == "low",
+	"9 m to an edge: no fast walk, no quick acceleration")
+-- walking fast when the room shrinks: the fast walk stays allowed (no slowDown, which the game
+-- turns into a stop); his stop by distance brakes him
+t.curType = "MV_C_WALKFAST"
+fm:Main(t)
+check(t.useMoveTypes[#t.useMoveTypes] == "MV_C_WALKFAST" and #t.useMoveTypes == 4, "his current gait kept allowed")
+t.curType = nil
+-- the stick eased off (half push): the fast walk not kept, the game's own slow-down
+CoopTrico.stickLen = 0.6
+t.curType = "MV_C_WALKFAST"
+fm:Main(t)
+check(#t.useMoveTypes == 2, "eased off: his slow walk only, the game slows him")
+CoopTrico.stickLen = 1
+t.curType = nil
+local sd = { props = Harness.tricoProps, manualMode = true, slowDown = true, progressed = 0, rest = 20, curAnimStName = "c_walk_fastC" }
+check(fm:StopDecision(sd) == "orig", "a slow-down: the game's own decision")
+CoopTrico.blocked = nil
+fm:Main(t)
+t.rest = 5
+check(fm:StopDecision(t) == true and t.ctrlCmd == "ControlCommand_C_walk_stop" and t.transGears[1] == "MV_C_WALKSTOP",
+	"5 m to the pose (an edge), 6 m to stop: he stops")
+local forced = { props = Harness.tricoProps, manualMode = true, forcedStop = true }
+check(fm:StopDecision(forced) == "orig", "a forced stop: the game's own decision")
+check(#CoopTrico.CtrlTypes(0.4) == 2 and CoopTrico.CtrlTypes(0.4)[2] == "MV_C_WALKSLOW", "ctrl: a light push walks slowly")
 -- never past walkable ground: the navmesh ends 6 m ahead (a drop into the cavern), or carries on
 -- 10 m lower (the cavern floor): the pose stops 1.5 m short of the edge; at the edge, onto him
 local savedNear = Ai2FindNearestPosition
@@ -536,6 +584,73 @@ Ai2FindNearestPosition = savedNear
 CoopTrico.reachCache = nil
 CoopTrico.Update(0.016, { x = 0, y = 1 })
 check(near(built.BasePos.Z, 25) and CoopTrico.blocked == nil, "ctrl: open ground again: the full pose")
+-- a narrow beam 0.8 m right of the line (found only within 0.6 m of it): the steps tried again
+-- 0.4 m to each side find it; a beam 1.5 m off is not the way
+Ai2FindNearestPosition = function(ai, p, ext)
+	if math.abs(p.X - 0.8) > 0.6 then return { found = 0 } end
+	return { found = 1, pos = Vector(p.X, 0.5, p.Z) }
+end
+check(CoopTrico.WalkableReach(Harness.tricoProps, Vector(0, 0.5, 0), 0, 1, 10) == 10, "reach: a beam a little off the line")
+Ai2FindNearestPosition = function(ai, p, ext)
+	if math.abs(p.X - 1.5) > 0.6 then return { found = 0 } end
+	return { found = 1, pos = Vector(p.X, 0.5, p.Z) }
+end
+check(CoopTrico.WalkableReach(Harness.tricoProps, Vector(0, 0.5, 0), 0, 1, 10) == 0, "reach: ground well off the line is not the way")
+-- the found point snapped back towards him (as the game's can be): still the full reach
+Ai2FindNearestPosition = function(ai, p, ext) return { found = 1, pos = Vector(p.X, 0.5, p.Z - 0.3) } end
+check(CoopTrico.WalkableReach(Harness.tricoProps, Vector(0, 0.5, 0), 0, 1, 10) == 10, "reach: found points a little behind the probe")
+Ai2FindNearestPosition = savedNear
+-- the fit gives the pose his ground's height, and a fit that fails doesn't stop him (it failed
+-- on open ground in game)
+Ai2FitNavmesh = function(nav, p) return { found = 1, pos = Vector(p.X, 0.7, p.Z) } end
+Ai2.Approach = { upperLimit = 1, pathLowerLimit = 1 }
+CoopTrico.reachCache = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(near(built.BasePos.Z, 25) and near(built.BasePos.Y, 0.7) and CoopTrico.blocked == nil, "ctrl: the pose at his ground's height")
+Ai2FitNavmesh = function() return { found = 0 } end
+CoopTrico.reachCache = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(near(built.BasePos.Z, 25) and CoopTrico.blocked == nil, "ctrl: no fit: the pose kept (the reach is the test)")
+Ai2FitNavmesh = nil
+-- the built path from the pose reaches only 15 m back (a wall 10 m ahead of him): rebuilt once,
+-- the margin short of the wall
+local savedBuild = Ai2BuildPath
+local builds = 0
+Ai2BuildPath = function(ai, dp) builds = builds + 1 dp.BackRest = dp.BasePos.Z > 9 and dp.BasePos.Z - 10 or 30 end
+CoopTrico.reachCache = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(builds == 2 and near(built.BasePos.Z, 8.5) and near(CoopTrico.blocked, 10) and CoopTrico.edgeWhy == "path",
+	"ctrl: the path stops short of him: the pose short of the wall " .. tostring(built.BasePos.Z))
+-- a wider margin from the config
+CoopTrico.edgeMargin = 3
+builds = 0
+CoopTrico.reachCache = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(near(built.BasePos.Z, 7), "ctrl: CoopTrico.edgeMargin used")
+CoopTrico.edgeMargin = nil
+Ai2BuildPath = savedBuild
+-- his path follower calls the way unsafe while he walks: the pose onto him; standing, ignored
+local savedAnimU = Ai2.Utils.GetCurAnimState
+Ai2.Utils.GetCurAnimState = function() return "c_walk_fastC" end
+check(CoopTrico.Unsafe(Harness.tricoProps, { pathGen = { isSafeFollowPath = 0 } }, "c_walkC") == false, "the unsafe alarm off by default")
+CoopTrico.useUnsafe = true
+Harness.tricoProps.currentInfo.pathGen = { isSafeFollowPath = 0 }
+CoopTrico.reachCache = nil
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(near(built.BasePos.Z, 0) and CoopTrico.nav == "ctrl-unsafe", "ctrl: unsafe follow path: onto him")
+Harness.tricoProps.currentInfo.pathGen = { isSafeFollowPath = 1 }
+Harness.tricoProps.moveMngr.unsafeTrunkPath = true
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(CoopTrico.nav == "ctrl-unsafe", "ctrl: unsafe trunk path: onto him")
+Ai2.Utils.GetCurAnimState = function() return "c_stand" end
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(CoopTrico.nav ~= "ctrl-unsafe" and near(built.BasePos.Z, 25), "ctrl: standing: a stale alarm ignored")
+Harness.tricoProps.moveMngr.unsafeTrunkPath = nil
+Harness.tricoProps.currentInfo.pathGen = nil
+CoopTrico.useUnsafe = nil
+Ai2.Utils.GetCurAnimState = savedAnimU
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+CoopTrico.Update(0.016, { x = 0, y = 1 })
 -- still standing half a second into the walk (after a sit): his own forward request, once a second
 local savedAnimK = Ai2.Utils.GetCurAnimState
 Ai2.Utils.GetCurAnimState = function() return "c_stand" end
@@ -551,16 +666,57 @@ check(#Harness.CallsNamed("forward") == 1, "ctrl: not again within a second")
 Ai2.Utils.GetCurAnimState = function() return "c_walkC" end
 for _ = 1, 20 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
 check(#Harness.CallsNamed("forward") == 2 - 1, "ctrl: walking: no kicks")
+Ai2.Utils.GetCurAnimState = function() return "c_stand_walkC" end
+CoopTrico.kickIn = 0
+for _ = 1, 20 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(#Harness.CallsNamed("forward") == 1, "ctrl: setting off: no kicks")
+-- getting up from a sit is his own (the stand-up's), not a stage action
+Ai2.Utils.GetCurAnimState = function() return "ext_c_sit_end" end
+Harness.tricoProps.currentInfo.execAction = { name = "Sit" }
+CoopTrico.actionFor, CoopTrico.actionStopIn = 5, 0
+check(CoopTrico.EndStageAction(Harness.tricoProps, Harness.tricoProps.currentInfo, "ext_c_sit_end", 0.1) == false,
+	"stage action: not while he gets up from a sit")
+check(CoopTrico.EndStageAction(Harness.tricoProps, Harness.tricoProps.currentInfo, "c_stand", 0.1) == false,
+	"stage action: still listed once he stands: the stick's walk takes over")
+Harness.tricoProps.currentInfo.execAction = nil
+-- a stage interest's action (the canyon's wing stretch) holding him: his stop command after 1 s,
+-- every 2 s; never in an event
+Ai2.Utils.GetCurAnimState = function() return "c_stretch_wing" end
+Harness.tricoProps.currentInfo.execAction = { name = "ca_wing" }
+Harness.tricoProps.stopCommand = "ControlCommand_C_stop"
+CoopTrico.actionFor, CoopTrico.actionStopIn = 0, 0
+Harness.calls = {}
+for _ = 1, 5 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+local function stops()
+	local n = 0
+	for _, c in ipairs(Harness.CallsNamed("cmd")) do if c[3] == "ControlCommand_C_stop" then n = n + 1 end end
+	return n
+end
+check(stops() == 0, "stage action: not stopped at once")
+for _ = 1, 6 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(stops() == 1 and CoopTrico.nav == "ctrl-action", "stage action: his stop command after 1 s")
+for _ = 1, 10 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(stops() == 1, "stage action: not again within 2 s")
+for _ = 1, 12 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+check(stops() == 2, "stage action: again after 2 s")
+Harness.tricoProps.currentInfo.controlMode = "EVENT"
+Harness.calls = {}
+CoopTrico.actionFor, CoopTrico.actionStopIn = 5, 0
+CoopTrico.Update(0.1, { x = 0, y = 1 })
+check(stops() == 0, "stage action in an event: left alone")
+Harness.tricoProps.currentInfo.controlMode = nil
+Harness.tricoProps.currentInfo.execAction = nil
+Harness.tricoProps.stopCommand = nil
 -- a stale request of his (a slide taken by his sitting shuffle) holding a turn up: dropped after
--- 1.5 s standing, and the turn asked again
+-- 4 s standing, and the turn asked again
 Ai2.Utils.GetCurAnimState = function() return "c_stand" end
 local stale = { name = "slide" }
 Harness.tricoProps.moveMngr.runningRequest = stale
 Harness.tricoProps.moveMngr.CancelPlannedMove = function(self, props) props.plannedMove = nil props.moveParam = nil end
 CoopTrico.progressFrom, CoopTrico.stuckFor, CoopTrico.unstickIn = nil, 0, 0
 Harness.calls = {}
-for _ = 1, 15 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
-check(Harness.tricoProps.moveMngr.runningRequest == stale, "ctrl: not dropped within 2 s")
+for _ = 1, 35 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
+check(Harness.tricoProps.moveMngr.runningRequest == stale, "ctrl: not dropped within 3.5 s")
 for _ = 1, 7 do CoopTrico.Update(0.1, { x = 0, y = -1 }) end
 check(Harness.tricoProps.moveMngr.runningRequest == nil and CoopTrico.unsticks >= 1, "ctrl: stale request dropped")
 check(CoopTrico.waking and CoopTrico.nav == "ctrl-wake" and not Harness.tricoProps.approach.skipCreate,
@@ -580,7 +736,7 @@ for i = 1, 30 do
 	CoopTrico.Update(0.1, { x = 0, y = 1 })
 end
 check(CoopTrico.unsticks == before, "ctrl: walking on: no unstick")
-for _ = 1, 22 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
+for _ = 1, 42 do CoopTrico.Update(0.1, { x = 0, y = 1 }) end
 check(CoopTrico.unsticks == before + 1 and not CoopTrico.waking, "ctrl: walking on the spot: unstuck, not woken")
 -- walking: 90 degrees round he keeps walking (curving), right round his stop command first
 Ai2.Utils.GetCurAnimState = function() return "c_walkC" end
@@ -697,7 +853,17 @@ CoopTrico.Update(0.016, { x = 0, y = 0 })
 check(not Harness.tricoProps.approach.skipCreate, "ctrl: planning back on release")
 check(Harness.tricoProps.plannedMove == nil and Harness.tricoProps.moveParam == nil, "ctrl: our forward move dropped")
 check(Harness.tricoProps.moveMngr.walk.suspendStopDecision == false, "ctrl: his stop decision back on release")
-check(Harness.tricoProps.moveMngr.walk.accelLevel == "low", "ctrl: his acceleration back on release")
+-- released: the hooks stay but run the originals
+local before = #origCalls
+local tr = { props = Harness.tricoProps, manualMode = true, rest = 5, progressed = 0, curAnimStName = "c_walkC" }
+check(fm:StopDecision(tr) == "orig" and #origCalls == before + 1, "released: his own stop decision")
+local tm = { props = Harness.tricoProps, manualMode = true, useMoveTypes = { "x" }, coopMoveTypes = true }
+fm:Main(tm)
+check(tm.useMoveTypes == nil and tm.coopMoveTypes == nil, "released: our gaits cleared from his action")
+local own = { props = Harness.tricoProps, useMoveTypes = { "MV_C_WALKSTOP", "MV_C_WALKBACK" } }
+fm:Main(own)
+check(own.useMoveTypes and #own.useMoveTypes == 2, "released: his own gaits left alone")
+Ai2.Actions.Condor.FreeMove = nil
 Ai2BuildPath, Ai2.CondorUtils.GetPath, Ai2.CondorUtils.Path, Ai2.Actions = nil, nil, nil, nil
 Harness.tricoProps.plannedMove = "CoopManual"
 CoopTrico.Unskip(Harness.tricoProps)
@@ -736,4 +902,9 @@ check(string.find(ts[1][2], "dir=0.00,1.00$"), "Trico's facing: " .. ts[1][2])
 -- no Trico yet (title screen): nothing happens
 Harness.tricoProps = nil
 CoopTrico.Update(0.016, pad)
+-- debug: a fixed world frame for measured runs
+CoopTrico.relative, CoopTrico.worldForward = "world", { 2, 0 }
+local wfx, wfz, wsrc = CoopTrico.Frame(0, 1, Vector(0, 0, 0), Vector(0, 0, 1))
+check(near(wfx, 1) and near(wfz, 0) and wsrc == "world", "world frame: up is the world way given")
+CoopTrico.relative, CoopTrico.worldForward = nil, nil
 print("ok")
