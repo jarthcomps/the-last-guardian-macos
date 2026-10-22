@@ -24,12 +24,17 @@
 -- Walls are the game's job: with its collision on, the rod shortens where a wall is behind the
 -- camera, so in tight spots the steeper look is what keeps both in view.
 --
--- CoopCamera.orbit: in the Trico framing the Trico player's right stick (while L2 is not held;
--- with L2 it aims the lightning) turns the camera around Trico and tilts it. The rod is then
--- held at a world yaw ("Global" basis) that is Trico's back plus the player's offset, and the
--- offset eases back to straight behind Trico after `idle` seconds without input; once it is
--- back the game's free camera takes over again. The boy's player keeps the game's own
--- right-stick camera: whoever moved a right stick last has the camera.
+-- CoopCamera.follow: in the Trico framing the rod is held at a world yaw ("Global" basis) that
+-- follows Trico's heading through a filter: a dead band (a step or a wobble doesn't swing it), an
+-- exponential approach, at most `rate` degrees a second, and a heading jump (his turns and
+-- slides can report one) only taken once it lasts. With the set's own "Free" yaw nothing
+-- tracked his heading, and the rod swung round him as he turned.
+--
+-- CoopCamera.orbit: the Trico player's right stick (while L2 is not held; with L2 it aims the
+-- lightning) turns the camera around Trico and tilts it: an offset on top of the follow, eased
+-- back to straight behind him after `idle` seconds without input. The boy's player keeps the
+-- game's own right-stick camera ("Free" while his stick is held; the follow picks up from where
+-- he left it): whoever moved a right stick last has the camera.
 
 CoopCamera = CoopCamera or {}
 
@@ -37,8 +42,10 @@ CoopCamera.tricoParam = CoopCamera.tricoParam or "TricoAutoRunTest_middle"
 CoopCamera.tune = CoopCamera.tune or {
 	Rod_LengthBase = 14.0,
 	Rod_PitchBaseDeg = -25.0,
-	Rod_YawBasisType = "Free",
-	Rod_YawBaseDeg = 180.0,   -- the set's own; listed so the orbit's changes are put back too
+	Rod_YawBasisType = "Global",   -- a world yaw, set by the follow (the set's own: "Free")
+	Rod_YawBaseDeg = 180.0,   -- the set's own; listed so the follow's changes are put back too
+	Rod_SpringYaw_Str = 4.0,  -- the rod takes the follow's yaw firmly (the set's own 1 trailed a
+	Rod_SpringYaw_Fric = "0.6 0.6",   -- turn by up to 60 degrees, coop-h-pace4; its friction 0.5 0.5)
 	Target_TargetType = "Trico",   -- the set's own; listed so a spike's switch is put back too
 	Base_FovDeg = 75.0,
 	AutoAvoid_Flags = "Valid|ChkTerrain|ChkCondor",   -- turn the rod away from walls and Trico (as Run does)
@@ -81,14 +88,26 @@ CoopCamera.orbit = CoopCamera.orbit or {
 	pitchMax = 20,
 	deadzone = 0.25,
 	boyDeadzone = 0.4,    -- how far the boy's stick must go to take the camera back
-	idle = 3.0,           -- seconds without input before easing back behind Trico
+	idle = 1.5,           -- seconds without input before easing back behind Trico
 	back = 90,            -- degrees per second while easing back
 	near = 4.0,           -- metres: a turn that brings the camera this close to Trico (a wall
 	                      -- pushing it into him) goes back to the last angle that had room
 	-- the "Global" yaw for a rod pointing from Trico toward the world direction (x, z):
-	-- yawZero + yawSign * atan2(x, z) in degrees (from the yaw probe run)
-	yawZero = 0,
+	-- yawZero + yawSign * atan2(x, z) in degrees (coop-h-pace4: with the follow settled, the
+	-- camera sat 14 degrees on from 12, so about -2; the single-step yaw probe had caught it still
+	-- on its spring)
+	yawZero = -2,
 	yawSign = 1,
+}
+CoopCamera.follow = CoopCamera.follow or {
+	enabled = true,
+	deadband = 6,         -- degrees off straight behind him before the camera starts round
+	settle = 1,           -- ... and once moving, it carries on to within this
+	tau = 0.5,            -- seconds: the exponential approach's time constant
+	rate = 120,           -- degrees per second at most
+	jump = 90,            -- a heading change this big from one frame to the next ...
+	jumpHold = 0.3,       -- ... is only taken once it has lasted this long (seconds)
+	fixed = true,         -- the tuned rod length and pitch, never grown or lifted by the framing
 }
 -- CoopCamera.cycle (a list of set names), when set, uses the next one each time the Trico
 -- framing is switched on (for trying sets in game).
@@ -104,6 +123,7 @@ function CoopCamera.Reset()
 	CoopCamera.missing = false
 	CoopCamera.cycleIndex = 0
 	CoopCamera.orbitState = nil   -- { yaw, pitch, idle } while the Trico player turns the camera
+	CoopCamera.followState = nil  -- { h, heading, e, moving }: the follow's filtered yaw
 end
 
 local function Camera()
@@ -153,6 +173,7 @@ local function Untune()
 	CoopCamera.untune = nil
 	CoopCamera.frame = nil
 	CoopCamera.orbitState = nil
+	CoopCamera.followState = nil
 	CoopCamera.tricoSeen, CoopCamera.boySeen = nil, nil   -- measured again for the next pin
 	if param and CoopCamera.Hold then CoopCamera.Hold(param, false) end
 	CoopCamera.held = nil
@@ -253,6 +274,16 @@ local function Frame(dt)
 	if CoopCamera.spiking then return end   -- (his bones read wrong too: hold the framing)
 	local fr = CoopCamera.frame or { grow = 0, lift = 0, both = 0, out = 0, floor = nil }
 	CoopCamera.frame = fr
+	local fl = CoopCamera.follow
+	if type(fl) == "table" and fl.enabled and fl.fixed then
+		-- a steady rod: changing its length and pitch read as the camera wandering by itself
+		fr.grow, fr.lift, fr.boy, fr.trico = 0, 0, boy, trico
+		fr.length = tune.Rod_LengthBase or 14
+		fr.pitch = tune.Rod_PitchBaseDeg or -25
+		param.Rod_LengthBase = fr.length
+		param.Rod_PitchBaseDeg = fr.pitch + (CoopCamera.orbitState and CoopCamera.orbitState.pitch or 0)
+		return
+	end
 	local here = TricoPos()
 	if fr.floor and here and fr.floor.at and
 		math.sqrt((here.X - fr.floor.at.X) ^ 2 + (here.Z - fr.floor.at.Z) ^ 2) > f.floorMove then
@@ -420,7 +451,61 @@ local function BoyTurning()
 	return mag ~= nil and mag > CoopCamera.orbit.boyDeadzone   -- firmer than the dead zone: drift must not grab it
 end
 
--- Every frame in the Trico framing: the Trico player's right stick turns the camera.
+local function Wrap(a) return (a + 180) % 360 - 180 end
+
+-- Where the camera sits from Trico now, as a "behind" angle (atan2 of the world direction from
+-- him to it), from the rendering camera's look (its position lags in the springs).
+local function LiveBack()
+	local cam = FindObject and FindObject(CAMERA_NAME)
+	local ok, fwd = pcall(function() return Vector(0, 0, -1):Rotate(cam.worldRotation) end)
+	if not ok or not fwd or (fwd.X == 0 and fwd.Z == 0) then return nil end
+	return math.deg(math.atan2(-fwd.X, -fwd.Z))
+end
+CoopCamera.LiveBack = LiveBack
+
+-- Every frame in the Trico framing: the follow's filtered "behind" angle (see the top), written
+-- with the orbit's offset as the rod's Global yaw.
+local function Follow(dt)
+	local fl, o = CoopCamera.follow, CoopCamera.orbit
+	local param = CoopCamera.tunedParam
+	if type(fl) ~= "table" or not fl.enabled or not param then return end
+	local fs = CoopCamera.followState
+	local dx, dz = TricoDir()
+	if not dx then return end
+	local heading = math.deg(math.atan2(-dx, -dz))   -- straight behind him
+	if not fs then
+		-- seeded from where the camera is (less the calibration), so pinning or the boy letting
+		-- go doesn't swing it
+		local live = LiveBack()
+		fs = { h = live or heading, heading = heading, moving = false, jumpFor = 0 }
+		CoopCamera.followState = fs
+	end
+	-- a heading jump (his slides report some) counts once it lasts; none while his position spikes
+	if not CoopCamera.spiking then
+		if math.abs(Wrap(heading - fs.heading)) > fl.jump then
+			fs.jumpFor = fs.jumpFor + dt
+			if fs.jumpFor >= fl.jumpHold then fs.heading, fs.jumpFor = heading, 0 end
+		else
+			fs.heading, fs.jumpFor = heading, 0
+		end
+	end
+	local e = Wrap(fs.heading - fs.h)
+	if math.abs(e) > fl.deadband then fs.moving = true elseif math.abs(e) <= fl.settle then fs.moving = false end
+	if fs.moving then
+		local step = e * (1 - math.exp(-dt / fl.tau))
+		local most = fl.rate * dt
+		if step > most then step = most elseif step < -most then step = -most end
+		fs.h = Wrap(fs.h + step)
+	end
+	fs.e = Wrap(fs.heading - fs.h)
+	local st = CoopCamera.orbitState
+	param.Rod_YawBasisType = "Global"
+	param.Rod_YawBaseDeg = (o.yawZero + o.yawSign * (fs.h + (st and st.yaw or 0))) % 360
+end
+CoopCamera.FollowStep = Follow
+
+-- Every frame in the Trico framing: the Trico player's right stick turns the camera (an offset
+-- on the follow). Returns "boy" while the boy's player has the camera.
 local function Orbit(dt, input)
 	local o = CoopCamera.orbit
 	local param = CoopCamera.tunedParam
@@ -430,19 +515,15 @@ local function Orbit(dt, input)
 	if input and not (input.hold and input.hold.L2) then rx, ry = input.rx or 0, input.ry or 0 end
 	local turning = math.abs(rx) > o.deadzone or math.abs(ry) > o.deadzone
 	if BoyTurning() and not turning then
-		-- the boy's player took the camera: the game's own camera, as it is
-		if st then
-			CoopCamera.orbitState = nil
-			param.Rod_YawBasisType = CoopCamera.tune.Rod_YawBasisType or "Free"
-		end
-		return
+		-- the boy's player took the camera: the game's own camera, as it is, while his stick is
+		-- held; the follow starts again from wherever he leaves it
+		CoopCamera.orbitState = nil
+		CoopCamera.followState = nil
+		param.Rod_YawBasisType = "Free"
+		return "boy"
 	end
 	if turning then
-		if not st then
-			-- "behind Trico" is taken once per turn, so the camera doesn't chase him as he moves
-			local bx, bz = TricoDir()
-			st = { yaw = 0, pitch = 0, idle = 0, good = 0, dirX = bx, dirZ = bz }
-		end
+		st = st or { yaw = 0, pitch = 0, idle = 0, good = 0 }
 		CoopCamera.orbitState = st
 		local t = CoopCamera.seenInfo and CoopCamera.seenInfo.CoopCamTrico
 		local z = t and tonumber(t.distance_z)
@@ -450,7 +531,7 @@ local function Orbit(dt, input)
 			st.yaw = st.good          -- no room this way: back to where there was
 		else
 			st.good = st.yaw
-			st.yaw = (st.yaw + rx * o.yawSpeed * dt + 180) % 360 - 180
+			st.yaw = Wrap(st.yaw + rx * o.yawSpeed * dt)
 		end
 		st.pitch = math.max(o.pitchMin, math.min(o.pitchMax, st.pitch + ry * o.pitchSpeed * dt))
 		st.idle = 0
@@ -462,23 +543,23 @@ local function Orbit(dt, input)
 			st.yaw, st.pitch = Toward(st.yaw), Toward(st.pitch)
 			if st.yaw == 0 and st.pitch == 0 then
 				CoopCamera.orbitState = nil
-				param.Rod_YawBasisType = CoopCamera.tune.Rod_YawBasisType or "Free"
-				param.Rod_PitchBaseDeg = CoopCamera.frame and CoopCamera.frame.pitch or CoopCamera.tune.Rod_PitchBaseDeg
-				return
+				st = nil
 			end
 		end
 	end
-	if not st then return end
-	local dx, dz = st.dirX, st.dirZ
-	if not dx then
-		dx, dz = TricoDir()
-		st.dirX, st.dirZ = dx, dz
-	end
-	if not dx then return end
-	param.Rod_YawBasisType = "Global"
-	param.Rod_YawBaseDeg = CoopCamera.OrbitYaw(dx, dz, st.yaw)
 	local base = CoopCamera.frame and CoopCamera.frame.pitch or (CoopCamera.tune.Rod_PitchBaseDeg or -25)
-	param.Rod_PitchBaseDeg = base + st.pitch
+	param.Rod_PitchBaseDeg = base + (st and st.pitch or 0)
+	local fl = CoopCamera.follow
+	if type(fl) == "table" and fl.enabled then return end   -- (the follow writes the yaw)
+	-- with the follow off: the orbit's own Global yaw from his heading at its start, Free after
+	if not st then
+		param.Rod_YawBasisType = "Free"
+		return
+	end
+	if not st.dirX then st.dirX, st.dirZ = TricoDir() end
+	if not st.dirX then return end
+	param.Rod_YawBasisType = "Global"
+	param.Rod_YawBaseDeg = CoopCamera.OrbitYaw(st.dirX, st.dirZ, st.yaw)
 end
 
 -- Debug (CoopCamera.yawProbe = { start = s, step = s, angles = { ... } }): once the Trico
@@ -612,6 +693,17 @@ local function Trace(dt)
 		tostring(CoopCamera.boySeen):sub(1, 1), b and string.format("%.2f,%.2f", b[1], b[2]) or "-",
 		tostring(CoopCamera.tricoSeen):sub(1, 1), t and tonumber(t.ratio_xy) or -1, t and tonumber(t.distance_z) or -1,
 		o and string.format("%.0f/%.0f", o.yaw, o.pitch) or "-")
+	-- the follow: his straight-behind angle, the filtered one, where the camera really is from
+	-- him (its look), and the rod as set
+	local fs = CoopCamera.followState
+	local param = CoopCamera.tunedParam
+	local live = CoopCamera.LiveBack and CoopCamera.LiveBack()
+	CoopDebug.Print("CF hd=%s h=%s e=%s live=%s off=%s len=%s pitch=%s basis=%s",
+		fs and string.format("%.1f", fs.heading) or "-", fs and string.format("%.1f", fs.h) or "-",
+		fs and fs.e and string.format("%.1f", fs.e) or "-", live and string.format("%.1f", live) or "-",
+		o and string.format("%.0f", o.yaw) or "0",
+		tostring(param and tonumber(param.Rod_LengthBase)), tostring(param and tonumber(param.Rod_PitchBaseDeg)),
+		tostring(param and param.Rod_YawBasisType))
 end
 
 -- Call once per frame with whether the Trico framing is asked for (CoopInput.tricoCamera) and
@@ -630,6 +722,7 @@ function CoopCamera.Update(dt, tricoFraming, tricoInput)
 		pcall(CoopCamera.Spike, dt, CoopCamera.tunedParam)
 		pcall(Watch)
 		local okO, errO = pcall(Orbit, dt, tricoInput)
+		if okO and errO ~= "boy" then okO, errO = pcall(Follow, dt) end
 		if not okO and errO ~= CoopCamera.lastError then
 			CoopCamera.lastError = errO
 			if CoopDebug then CoopDebug.Print("CA error %s", tostring(errO)) end
