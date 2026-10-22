@@ -13,7 +13,7 @@ STEER = re.compile(r"TR (\w+) (on|off) p=(-?[0-9.]+),(-?[0-9.]+),(-?[0-9.]+)")
 
 
 def stretches(lines):
-    now, start, origin, marks = None, None, None, {}
+    now, start, origin, marks, far = None, None, None, {}, 0.0
     for line in lines:
         m = CLOCK.search(line)
         if m:
@@ -25,17 +25,18 @@ def stretches(lines):
         on = m.group(2) == "on"
         x, z = float(m.group(3)), float(m.group(5))
         if on and start is None:
-            start, origin, marks = now, (x, z), {}
+            start, origin, marks, far = now, (x, z), {}, 0.0
         elif on:
             d = math.hypot(x - origin[0], z - origin[1])
+            far = max(far, d)
             for metres in (1, 3):
                 if d >= metres and metres not in marks:
                     marks[metres] = now - start
         elif start is not None:
-            yield start, now - start, marks
+            yield start, now - start, marks, far
             start = None
     if start is not None:
-        yield start, now - start, marks
+        yield start, now - start, marks, far
 
 
 def main(paths):
@@ -43,10 +44,11 @@ def main(paths):
         with open(path, encoding="utf-8", errors="replace") as f:
             lines = f.read().splitlines()
         print(path)
-        for start, held, marks in stretches(lines):
+        for start, held, marks, far in stretches(lines):
             def fmt(m):
                 return f"{marks[m]:.1f} s" if m in marks else "never"
-            print(f"  stick at t={start:.1f} s for {held:.1f} s: 1 m after {fmt(1)}, 3 m after {fmt(3)}")
+            print(f"  stick at t={start:.1f} s for {held:.1f} s: 1 m after {fmt(1)}, 3 m after {fmt(3)}, "
+                  f"furthest {far:.1f} m")
 
 
 if __name__ == "__main__":
