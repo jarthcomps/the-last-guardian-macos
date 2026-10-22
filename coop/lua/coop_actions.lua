@@ -167,7 +167,11 @@ function CoopActions.Way(props, input)
 	if CoopTrico and CoopTrico.Stick then sx, sy = CoopTrico.Stick(input) end
 	if not sx then return faceX, faceZ end
 	local fx, fz = nil, nil
-	if CoopTrico.CameraForward then
+	if CoopTrico.relative == "world" and CoopTrico.Frame then   -- (debug: steering's fixed world way)
+		local ok, x, z = pcall(CoopTrico.Frame, sx, sy, pos, d)
+		if ok then fx, fz = x, z end
+	end
+	if not fx and CoopTrico.CameraForward then
 		local ok, x, z = pcall(CoopTrico.CameraForward, pos)
 		if ok then fx, fz = x, z end
 	end
@@ -292,6 +296,100 @@ function CoopActions.FindJumpTarget(props, wayX, wayZ)
 		end
 	end
 	return nil
+end
+
+-- The level's special edges (its jumps), as the game lists them: name, the start and end node
+-- positions and whether the edge is on. A level script switches a jump's edge on only once the
+-- boy has done his part (the canyon pillar: once he is partway along the beam, or riding Trico);
+-- while it is off the pathfinder ignores it and the spot past it looks unconnected. The list is
+-- kept SP_EDGE_LIST_EVERY seconds (Class() walks the whole world).
+local SP_EDGE_CLASSES = { "AiSpPathEdge", "AiVolSpPathEdge" }
+local SP_EDGE_LIST_EVERY = 30.0
+local SP_EDGE_START = 20.0      -- metres from Trico to the edge's start at most
+local SP_EDGE_CONE = 60.0       -- degrees off the jump's way to the edge's end at most
+local SP_EDGE_PAST = 3.0        -- metres past the edge's end for the goal
+local SP_EDGE_SPOT = 10.0       -- metres from the edge's end within which a jump spot counts as past it
+local FORCE_NEAR = 4.0          -- metres from Trico the boy must be ("near" policy), unless riding
+CoopActions.forceEdges = CoopActions.forceEdges or "near"   -- "near", "always" or "never"
+
+function CoopActions.SpEdges()
+	local now = CoopActions.clock or 0
+	local c = CoopActions.spEdgeNames
+	if not c or now - c.at > SP_EDGE_LIST_EVERY then
+		c = { at = now, names = {} }
+		for _, class in ipairs(SP_EDGE_CLASSES) do
+			local ok, list = pcall(Class, class)
+			if ok and type(list) == "table" then
+				for _, name in ipairs(list) do c.names[#c.names + 1] = name end
+			end
+		end
+		CoopActions.spEdgeNames = c
+	end
+	local edges = {}
+	for _, name in ipairs(c.names) do
+		local edge = FindObject(name)
+		local ok, s, e, attr = pcall(function()
+			return Vector(edge["start"].worldPosition), Vector(edge["end"].worldPosition), tostring(edge.attr or "")
+		end)
+		if edge and ok then
+			-- (attr lists the flags that are set: "Valid" among them when on, "~Valid" never)
+			local valid = string.find(attr, "Valid", 1, true) ~= nil and string.find(attr, "~Valid", 1, true) == nil
+			edges[#edges + 1] = { name = name, from = s, to = e, valid = valid }
+		end
+	end
+	return edges
+end
+
+-- The special edge the jump's way (its start within SP_EDGE_START of Trico, its end within
+-- SP_EDGE_CONE of the way), the nearest start first; logged.
+function CoopActions.FindSpEdge(props, wayX, wayZ)
+	local pos = TricoAt(props)
+	local cosCone = math.cos(math.rad(SP_EDGE_CONE))
+	local best, bestD = nil, nil
+	local all = CoopActions.SpEdges()
+	Say("AC sp edges %d in the level, Trico %.1f,%.1f way %.2f,%.2f", #all, pos.X, pos.Z, wayX, wayZ)
+	for _, edge in ipairs(all) do
+		local sx, sz = edge.from.X - pos.X, edge.from.Z - pos.Z
+		local ds = math.sqrt(sx * sx + sz * sz)
+		local ex, ez = edge.to.X - pos.X, edge.to.Z - pos.Z
+		local de = math.sqrt(ex * ex + ez * ez)
+		local cos = de > 0.01 and (ex * wayX + ez * wayZ) / de or -1
+		if ds <= 40 and CoopDebug and CoopDebug.enabled then
+			Say("AC sp edge near %s start %.1f,%.1f,%.1f end %.1f,%.1f,%.1f valid=%s", edge.name,
+				edge.from.X, edge.from.Y, edge.from.Z, edge.to.X, edge.to.Y, edge.to.Z, tostring(edge.valid))
+		end
+		if ds <= SP_EDGE_START and cos >= cosCone and de > ds then
+			Say("AC sp edge %s start %.1f m end %.1f m %.0f deg valid=%s", edge.name, ds, de,
+				math.deg(math.acos(math.max(-1, math.min(1, cos)))), tostring(edge.valid))
+			if not bestD or ds < bestD then best, bestD = edge, ds end
+		end
+	end
+	return best
+end
+
+-- Whether an edge that is off may be switched on now, by CoopActions.forceEdges, and why not.
+-- Never in a scripted scene. "near": the boy within FORCE_NEAR of Trico, or riding him (an edge
+-- forced with the boy elsewhere can strand him: the canyon's pillar jump lands Trico on the
+-- terrace whose collapse scene then plays without the boy).
+function CoopActions.MayForce(props)
+	local policy = CoopActions.forceEdges
+	if policy == "never" or policy == false then return false, "policy never" end
+	if props.currentInfo.controlMode == "EVENT" then return false, "a scripted scene" end
+	if policy == "always" then return true end
+	local okR, riding = pcall(function() return MS.BoyIsRidingOnCondor() end)
+	if okR and riding == true then return true end
+	local okB, boy = pcall(function() return Ai2.Utils.GetPlayerAI().pos end)
+	if not okB or not boy then return false, "boy unknown" end
+	local pos = TricoAt(props)
+	local d = math.sqrt((boy.X - pos.X) ^ 2 + (boy.Z - pos.Z) ^ 2)
+	if d <= FORCE_NEAR then return true end
+	return false, string.format("boy %.1f m away", d)
+end
+
+local function SetEdge(name, on)
+	local f = MS and (on and MS.SetEnableSpPathEdge or MS.SetDisableSpPathEdge)
+	if not f then return false end
+	return (pcall(f, name))
 end
 
 -- The gesture target entity, made like auto-Trico makes its interests.
@@ -563,6 +661,14 @@ local function DropJump(props, why)
 	local j = CoopActions.jump
 	if not j then return end
 	CoopActions.jump = nil
+	-- an edge we switched on goes off again unless he made the jump (only ours: the level's
+	-- own stay as the level set them)
+	if j.forced and why ~= "arrived" and CoopActions.forced and CoopActions.forced[j.forced] then
+		CoopActions.forced[j.forced] = nil
+		Say("AC sp edge %s off again: %s", j.forced, tostring(SetEdge(j.forced, false)))
+	elseif j.forced and CoopActions.forced then
+		CoopActions.forced[j.forced] = nil
+	end
 	if j.entity then
 		pcall(Ai2.Utils.ResetInterestLevelAddition, props.currentInfo.ai2Ext, j.entity, JUMP_LEVEL_NAME)
 		if CoopActions.gesture and CoopActions.gesture.spot then DropGesture(props, "jump " .. why) end
@@ -578,9 +684,68 @@ local function DropJump(props, why)
 	Say("AC jump end %s", why)
 end
 
+-- A level jump spot: the top interest level, and the boy's jump gesture granted at it.
+local function UseSpot(props, spot, spotPos, forced)
+	local ai = props.currentInfo.ai2Ext
+	DropJump(props, "replaced")
+	Ai2.Utils.RegisterInterest(ai, spot)
+	Ai2.Utils.InterestExclusionSwitching(ai, spot, false)
+	Ai2.Utils.InterestLevelAddition(ai, spot, JUMP_LEVEL_NAME, "addMax")
+	CoopActions.jump = { target = Vector(spotPos), timer = EDGE_TIMEOUT, entity = spot, arrived = EDGE_ARRIVED,
+		forced = forced }
+	local okN, name = pcall(function() return spot:GetName() end)
+	-- and the boy's jump gesture at it, granted as the eye-contact handshake would once the
+	-- spot is what Trico has in mind, so his Instruction action takes the jump
+	if okN and name then
+		DropGesture(props, "replaced")
+		CoopActions.gesture = { type = "Gesture_Jump", timer = EDGE_TIMEOUT, target = name, spot = true }
+	end
+	return string.format("spot %s %.1f,%.1f,%.1f", okN and tostring(name) or "?", spotPos.X, spotPos.Y, spotPos.Z)
+end
+
+-- A special edge the way that the level has switched off: on, by CoopActions.forceEdges, and
+-- Trico sent past it (the level's jump spot past it, else a goal SP_EDGE_PAST beyond its end).
+-- Steering yields while the jump is held, so his own planning crosses the edge.
+local function ForceEdge(props, wayX, wayZ)
+	local okS, edge = pcall(CoopActions.FindSpEdge, props, wayX, wayZ)
+	if not okS or not edge then return nil end
+	local j = CoopActions.jump
+	if edge.valid and j and j.forced == edge.name then return "forced " .. edge.name .. " already" end
+	if edge.valid then return nil end
+	local may, why = CoopActions.MayForce(props)
+	if not may then
+		Say("AC sp edge %s left off: %s", edge.name, tostring(why))
+		return nil
+	end
+	DropJump(props, "replaced")
+	if not SetEdge(edge.name, true) then return nil end
+	CoopActions.forced = CoopActions.forced or {}
+	CoopActions.forced[edge.name] = true
+	CoopActions.forcedCount = (CoopActions.forcedCount or 0) + 1
+	Say("AC sp edge forced on %s", edge.name)
+	local okE, spot, spotPos = pcall(CoopActions.FindEdgeInterest, props, wayX, wayZ)
+	if okE and spot and math.sqrt((spotPos.X - edge.to.X) ^ 2 + (spotPos.Z - edge.to.Z) ^ 2) <= SP_EDGE_SPOT then
+		return "forced " .. edge.name .. " " .. UseSpot(props, spot, spotPos, edge.name)
+	end
+	local dx, dz = edge.to.X - edge.from.X, edge.to.Z - edge.from.Z
+	local len = math.sqrt(dx * dx + dz * dz)
+	if len > 0.01 then dx, dz = dx / len, dz / len else dx, dz = wayX, wayZ end
+	local target = Vector(edge.to.X + dx * SP_EDGE_PAST, edge.to.Y, edge.to.Z + dz * SP_EDGE_PAST)
+	local ai = props.currentInfo.ai2Ext
+	local root = NewInterest(JUMP_NAME, JUMP_INTEREST)
+	SetWorldPosition(root, tostring(target))
+	Ai2.Utils.RegisterInterest(ai, root)
+	Ai2.Utils.InterestExclusionSwitching(ai, root, false)
+	Ai2.Utils.InterestLevelAddition(ai, root, JUMP_LEVEL_NAME, "addMax")
+	CoopActions.jump = { target = target, timer = EDGE_TIMEOUT, forced = edge.name, arrived = EDGE_ARRIVED }
+	return string.format("forced %s goal %.1f,%.1f,%.1f", edge.name, target.X, target.Y, target.Z)
+end
+
 local function Jump(props, input)
 	local wayX, wayZ = CoopActions.Way(props, input)
 	local ai = props.currentInfo.ai2Ext
+	local forced = ForceEdge(props, wayX, wayZ)
+	if forced then return forced end
 	local okH, hint = pcall(CoopActions.HintAhead, props, wayX, wayZ)
 	if okH and hint then
 		DropJump(props, "replaced")
@@ -592,21 +757,7 @@ local function Jump(props, input)
 		return string.format("hint %s %.1f,%.1f,%.1f", okN and tostring(name) or "?", hint.pos.X, hint.pos.Y, hint.pos.Z)
 	end
 	local okE, spot, spotPos = pcall(CoopActions.FindEdgeInterest, props, wayX, wayZ)
-	if okE and spot then
-		DropJump(props, "replaced")
-		Ai2.Utils.RegisterInterest(ai, spot)
-		Ai2.Utils.InterestExclusionSwitching(ai, spot, false)
-		Ai2.Utils.InterestLevelAddition(ai, spot, JUMP_LEVEL_NAME, "addMax")
-		CoopActions.jump = { target = Vector(spotPos), timer = EDGE_TIMEOUT, entity = spot, arrived = EDGE_ARRIVED }
-		local okN, name = pcall(function() return spot:GetName() end)
-		-- and the boy's jump gesture at it, granted as the eye-contact handshake would once the
-		-- spot is what Trico has in mind, so his Instruction action takes the jump
-		if okN and name then
-			DropGesture(props, "replaced")
-			CoopActions.gesture = { type = "Gesture_Jump", timer = EDGE_TIMEOUT, target = name, spot = true }
-		end
-		return string.format("spot %s %.1f,%.1f,%.1f", okN and tostring(name) or "?", spotPos.X, spotPos.Y, spotPos.Z)
-	end
+	if okE and spot then return UseSpot(props, spot, spotPos) end
 	local target = CoopActions.FindJumpTarget(props, wayX, wayZ)
 	if not target then
 		return "gesture " .. Gesture(props, "Gesture_Jump", wayX, wayZ)
@@ -695,6 +846,16 @@ local function Step(dt, input, props, anim)
 		local pushed = CoopTrico and CoopTrico.Stick(input) ~= nil
 		if not pushed then j.stickFree = true
 		elseif j.stickFree then DropJump(props, "stick") j = nil end
+	end
+	if j and j.forced then
+		-- his special approach, as it goes: approaching, on the approach point, the jump itself
+		local info = props.currentInfo
+		local state = string.format("apr=%s onAP=%s act=%s", tostring(info.isSpApproach), tostring(props.isOnSpAP),
+			tostring(info.execSpAction and (info.execSpAction.name or true)))
+		if state ~= j.spState then
+			j.spState = state
+			Say("AC sp %s %s anim=%s", j.forced, state, anim)
+		end
 	end
 	if j then
 		j.timer = j.timer - dt

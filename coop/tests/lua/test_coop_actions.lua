@@ -24,6 +24,10 @@ check(near(wx, 0) and near(wz, 1), "no stick: Trico's facing")
 Harness.objects._trico_camera = { worldPosition = Vector(0, 3, -8) }  -- forward +Z
 wx, wz = CoopActions.Way(Harness.tricoProps, btn(nil, 1, 0))
 check(near(wx, -1) and near(wz, 0), "stick right: -X")
+CoopTrico.relative, CoopTrico.worldForward = "world", { 1, 0 }
+wx, wz = CoopActions.Way(Harness.tricoProps, btn(nil, 0, 1))
+check(near(wx, 1) and near(wz, 0), "debug world frame: stick up is the world way")
+CoopTrico.relative, CoopTrico.worldForward, CoopTrico.latch = nil, nil, nil
 
 -- Square: the attack gesture: an Instruction_Unique interest ahead, on the stick's side
 local work = {}
@@ -207,6 +211,77 @@ check(CoopActions.jump == nil, "the stick pushed again: let go")
 check(CoopActions.gesture == nil, "its gesture let go too")
 CoopActions.Release()
 Ai2.Utils.GetVolumeByAssetName, Ai2.Utils.IsInVolumeSubType = nil, nil
+
+-- Cross toward a special edge the level has switched off (the canyon pillar before the boy's
+-- part): switched on by the "near" policy only with the boy within 4 m or riding, Trico sent 3 m
+-- past its end, and switched off again unless he made the jump
+local edgeLog = {}
+Harness.objects.Edge_0 = { start = { worldPosition = Vector(0, 0, 5) }, ["end"] = { worldPosition = Vector(0, 4, 12) }, attr = "" }
+Harness.objects.Edge_far = { start = { worldPosition = Vector(0, 0, 50) }, ["end"] = { worldPosition = Vector(0, 0, 60) }, attr = "" }
+Class = function(c) if c == "AiSpPathEdge" then return { "Edge_0", "Edge_far" } end return {} end
+local riding = false
+MS = {
+	SetEnableSpPathEdge = function(n) edgeLog[#edgeLog + 1] = "on " .. n Harness.objects[n].attr = "Valid" end,
+	SetDisableSpPathEdge = function(n) edgeLog[#edgeLog + 1] = "off " .. n Harness.objects[n].attr = "" end,
+	BoyIsRidingOnCondor = function() return riding end,
+}
+local boyPos = Vector(0, 0, -10)
+local savedPlayer = Ai2.Utils.GetPlayerAI
+Ai2.Utils.GetPlayerAI = function() return { pos = boyPos } end
+Ai2.Utils.Navmesh.CheckSameIsland = function(props, from, to, ex) return (from.Z > 11) == (to.Z > 11) end
+CoopActions.spEdgeNames = nil
+local edges = CoopActions.SpEdges()
+check(#edges == 2 and edges[1].name == "Edge_0" and not edges[1].valid and near(edges[1].to.Z, 12), "the level's edges listed")
+check(CoopActions.FindSpEdge(Harness.tricoProps, 0, 1).name == "Edge_0", "the edge ahead found (the far one out of reach)")
+check(CoopActions.FindSpEdge(Harness.tricoProps, 0, -1) == nil, "none behind")
+CoopActions.Update(0.016, btn("Cross"))
+check(#edgeLog == 0 and not (CoopActions.jump and CoopActions.jump.forced), "near policy, the boy 10 m away: left off")
+CoopActions.Release()
+boyPos = Vector(1, 0, -2)
+CoopActions.Update(0.016, btn("Cross"))
+local j = CoopActions.jump
+check(edgeLog[1] == "on Edge_0" and j and j.forced == "Edge_0" and near(j.target.Z, 15) and near(j.target.Y, 4),
+	"the boy beside him: switched on, Trico sent 3 m past its end")
+check(Harness.moved[#Harness.moved][2] == "0,4,15" and CoopActions.forced.Edge_0, "the goal interest placed, the edge recorded")
+CoopTrico.Update(0.016, btn(nil, 0, 1))
+check(not CoopTrico.steering, "steering waits: his own planning takes the edge")
+CoopActions.Update(0.1, btn())
+CoopActions.Update(0.016, btn("Cross"))
+check(CoopActions.jump == j and #edgeLog == 1, "Cross again: the same jump, the edge left on")
+for _ = 1, 201 do CoopActions.Update(0.1, btn()) end
+check(CoopActions.jump == nil and edgeLog[2] == "off Edge_0" and Harness.objects.Edge_0.attr == "", "timed out: off again")
+-- made it: the edge stays as it is
+CoopActions.Update(0.016, btn("Cross"))
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 4, 14)
+CoopActions.Update(0.1, btn())
+check(CoopActions.jump == nil and edgeLog[#edgeLog] == "on Edge_0" and Harness.objects.Edge_0.attr == "Valid", "on the far side: left on")
+Harness.tricoProps.currentInfo.aiPos = Vector(0, 0, 0)
+Harness.objects.Edge_0.attr = ""
+-- riding counts as near; "always" and "never"; never in a scripted scene
+boyPos, riding = Vector(30, 0, 30), true
+CoopActions.Update(0.016, btn("Cross"))
+check(CoopActions.jump and CoopActions.jump.forced == "Edge_0", "riding: switched on")
+CoopActions.Release()
+check(edgeLog[#edgeLog] == "off Edge_0", "released: off again")
+riding = false
+CoopActions.forceEdges = "always"
+CoopActions.Update(0.016, btn("Cross"))
+check(CoopActions.jump and CoopActions.jump.forced == "Edge_0", "always: switched on with the boy away")
+CoopActions.Release()
+Harness.tricoProps.currentInfo.controlMode = "EVENT"
+local before = #edgeLog
+CoopActions.Update(0.016, btn("Cross"))
+check(#edgeLog == before, "never in a scripted scene")
+Harness.tricoProps.currentInfo.controlMode = nil
+CoopActions.Release()
+CoopActions.forceEdges = "never"
+CoopActions.Update(0.016, btn("Cross"))
+check(#edgeLog == before, "never: left off")
+CoopActions.Release()
+CoopActions.forceEdges = "near"
+Class, MS, CoopActions.spEdgeNames = nil, nil, nil
+Harness.objects.Edge_0, Harness.objects.Edge_far = nil, nil
+Ai2.Utils.GetPlayerAI = savedPlayer
 
 -- nothing while the lightning is aimed (L2 held)
 local aiming = btn("Square")
