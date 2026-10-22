@@ -266,6 +266,19 @@ CharacterMngr = nil
 check(CoopTrico.Position(zero).X == 0, "no character: the AI's as it is")
 local mineProps = { currentInfo = { aiPos = Vector(0, 0, 0), work = { GetMySelfPos = Vector(7, 1, 8) } } }
 check(near(CoopTrico.Position(mineProps).X, 7), "the entity position comes first")
+-- a goal off a narrow beam snaps onto it (the nearest walkable point), if far enough to walk to
+Harness.reachable = function(from, to) return math.abs(to.X) < 1 end   -- 2 m wide, along Z
+local savedNearest = Ai2FindNearestPosition
+Ai2FindNearestPosition = function(ai, pos, ext) return { found = 1, pos = Vector(0, 0.5, pos.Z) } end
+CoopTrico.strategy = "goal"
+Harness.objects._trico_camera = { worldPosition = Vector(0, 3, -8) }   -- forward +Z
+Harness.tricoProps.currentInfo.ai2Ext.dirXZ = Vector(0, 0, 1)
+CoopTrico.Update(0.016, { x = 0.6, y = 0.8 })   -- forward and to the right: off the beam
+check(CoopTrico.goal and near(CoopTrico.goal.X, 0) and CoopTrico.goal.Z > 4 and CoopTrico.nav == "s1.00",
+	"snapped onto the beam: " .. tostring(CoopTrico.nav))
+CoopTrico.Update(0.016, { x = 0, y = 0 })
+Ai2FindNearestPosition = savedNearest
+Harness.reachable = function(from, to) return true end
 -- which turn: the right of a facing (x, z) is (-z, x)
 check(CoopTrico.TurnCommand(0, 1, -1, 0) == "turn90Right" and CoopTrico.TurnCommand(0, 1, 1, 0) == "turn90Left",
 	"quarter turns")

@@ -174,6 +174,16 @@ local function Reachable(props, from, to)
 	return same, same and "y" or "n", pathEnd
 end
 
+-- The nearest navmesh point to `to` (within SNAP_BOX), or nil.
+local SNAP_BOX = Vector and Vector(8, 12, 8) or nil
+local SNAP_MIN = 0.6           -- of distances.min: a snapped goal nearer is inside Trico's
+                               -- arrival range (6.6 m with the default 11 m)
+local function Snap(props, to)
+	local ok, near = pcall(Ai2FindNearestPosition, props.currentInfo.ai2Ext, to, SNAP_BOX or Vector(8, 12, 8))
+	if ok and near and near.found == 1 and near.pos then return Vector(near.pos) end
+	return nil
+end
+
 local function DistanceXZ(a, b)
 	local dx, dz = a.X - b.X, a.Z - b.Z
 	return math.sqrt(dx * dx + dz * dz)
@@ -401,6 +411,15 @@ function CoopTrico.Update(dt, input)
 		local ok, why, pathEnd = Reachable(props, pos, candidate)
 		if ok then
 			goal, dir, nav = candidate, Vector(dx, 0, dz), why .. string.format("%.2f", scale)
+			break
+		end
+		-- off the navmesh (a ledge, a beam): the nearest walkable point, if it's on Trico's
+		-- island and still far enough to walk to
+		local snapped = Snap(props, candidate)
+		if snapped and DistanceXZ(pos, snapped) >= SNAP_MIN * CoopTrico.distances.min
+			and Reachable(props, pos, snapped) then
+			local sx2, sz2 = Flat(snapped.X - pos.X, snapped.Z - pos.Z)
+			goal, dir, nav = snapped, Vector(sx2 or dx, 0, sz2 or dz), "s" .. string.format("%.2f", scale)
 			break
 		end
 		if not fallback then
