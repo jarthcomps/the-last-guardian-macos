@@ -42,9 +42,7 @@ lightning follows the boy's aim as usual.
 | Triangle | Stomp |
 | Circle | Eat a nearby barrel of food; otherwise act on what Trico is looking at (a barrel box gets broken) |
 | Circle + stick left / right | Pull with the left / right paw |
-| L2 (hold) | Aim the lightning: the shield's marker appears where Trico looks, and the camera follows it |
-| Right stick, while L2 is held | Turn the aim left and right, tilt it up and down |
-| R2, while L2 is held | Fire now (Trico also fires by itself while aimed) |
+| L2 / R2 | Nothing for now (Trico's own lightning aim is switched off; see below) |
 | R1 | Roar |
 | L1 (hold) | Threat posture (let go to end it) |
 | D-pad up (hold) | Rear up on the hind legs |
@@ -66,7 +64,7 @@ Both players share one screen. **Select** (the touchpad button) switches between
   the shot it backs out and looks down more steeply, then eases back once both are in view.
 
 Both players can turn the camera with the right stick: the boy's player as in the normal game,
-the Trico player whenever L2 isn't held. Whoever moved a stick last has the camera. About three
+the Trico player too. Whoever moved a stick last has the camera. About three
 seconds after the Trico player lets go, the camera swings back behind Trico.
 
 Cut-scenes and scripted camera moments always take over; the Trico camera comes back after them.
@@ -83,7 +81,11 @@ the boy stands and waits.
   are requests, not commands.
 - Jumps only find ledges across gaps the game marks; some story jumps still need the boy to call
   Trico, as in normal play.
-- The lightning works only once the boy has the shield.
+- The lightning works only once the boy has the shield. The boy aims and fires it as in the normal
+  game, with Trico near him. The Trico player's own aim (L2 to aim, right stick, R2 to fire) is
+  switched off (`CoopPulse.enabled = false` in `coop_config.lua`): while Trico aimed, the game
+  switched to the boy's aiming view, which the scripts can't prevent. It waits on an engine-side
+  fix.
 - On narrow ledges the Trico camera can end up close to Trico when turned toward a wall.
 - The mod doesn't change the frame rate: on the test Mac the same spot ran at about 16 FPS with
   and without it (the emulator's limit).

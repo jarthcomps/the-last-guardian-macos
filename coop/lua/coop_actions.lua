@@ -42,7 +42,8 @@
 --   L3 tapped alone (the emulator counts the taps): turn on the spot to face the stick's way
 --   (camera-relative, as steering), or right round with the stick centred; queued like a move.
 -- Context moves (eating, climbing, swimming...) stay with Trico's AI: buttons only add requests.
--- Nothing here runs while the Trico player aims the lightning (L2); Circle stays the boy's shield.
+-- Nothing here runs while the Trico player aims the lightning (L2, while CoopPulse.enabled);
+-- Circle stays the boy's shield.
 
 CoopActions = CoopActions or {}
 
@@ -915,7 +916,10 @@ local function Step(dt, input, props, anim)
 	end
 	if not CoopActions.edgeVolume then pcall(CoopActions.AttachEdgeVolume, props) end
 	local down, hold = input.down or {}, input.hold or {}
-	if hold.L2 then CoopActions.riseIn = nil return end   -- aiming the lightning
+	if CoopPulse and CoopPulse.Aiming and CoopPulse.Aiming(input) then   -- aiming the lightning
+		CoopActions.riseIn = nil
+		return
+	end
 	TickQueue(dt, props, anim)
 
 	local did, detail = nil, nil

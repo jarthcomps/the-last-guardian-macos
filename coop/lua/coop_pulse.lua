@@ -57,6 +57,18 @@ local SHOT_AFTER_BOTH = 2.0  -- emblem methods: shot after this long even if the
 local REPORT = 0.5
 
 CoopPulse.method = CoopPulse.method or "aimhold"
+-- Off for now (Jarth, 2026-10-22): while the Trico player aims, the game takes the emblem for the
+-- boy's shield and its camera goes to the boy's aim view, which a script can't hold back (two
+-- tries, coop-h-aim1/2); back on once an engine fix keeps the Trico view. The boy's own shield
+-- lightning is the game's and never runs through here.
+if CoopPulse.enabled == nil then CoopPulse.enabled = false end
+
+-- Whether the Trico player is aiming the lightning (L2 held, the lightning on): the other modules
+-- leave the right stick and the buttons to the aim only then.
+function CoopPulse.Aiming(input)
+	return CoopPulse.enabled == true and type(input) == "table" and type(input.hold) == "table"
+		and input.hold.L2 == true
+end
 
 function CoopPulse.Reset()
 	CoopPulse.active = false      -- the cursor is shown
@@ -460,6 +472,11 @@ function CoopPulse.Update(dt, input)
 		pcall(Report, props, shield)
 	end
 	if not props or not props.currentInfo or not props.currentInfo.aiPos then return end
+	if not CoopPulse.enabled then
+		-- (switched off: nothing of ours up, the boy's own aim left alone)
+		if CoopPulse.active or CoopPulse.ownEmblem or CoopPulse.firing > 0 then pcall(CoopPulse.Release) end
+		return
+	end
 	local ok, err = pcall(Step, dt, input, props, shield)
 	if not ok and err ~= CoopPulse.lastError then
 		CoopPulse.lastError = err
