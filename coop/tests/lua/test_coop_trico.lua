@@ -388,6 +388,15 @@ CoopTrico.idleFor = 99
 CoopTrico.Update(0.016, { x = 0, y = 1 })
 check(bw.IdlingBan and bw.SitIdlingBan and bw.BoyDaisukiProcBan and Harness.tricoProps.moveMngr.prioSelect,
 	"focused: idling, affection and jump slides banned")
+-- an idle action already set out goes the game's own way
+local dropped = {}
+Ai2.CommonScript = { Condor = { DelIdlingIntr = function(props) dropped[#dropped + 1] = props; bw.IdlingIntrPoped = false end } }
+bw.IdlingIntrPoped = true
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(#dropped == 1 and dropped[1] == Harness.tricoProps, "a set-out idle action dropped")
+CoopTrico.Update(0.016, { x = 0, y = 1 })
+check(#dropped == 1, "only while there is one")
+Ai2.CommonScript = nil
 CoopTrico.Update(0.016, { x = 0, y = 0 })
 for _ = 1, 25 do CoopTrico.Update(0.1, { x = 0, y = 0 }) end
 check(not CoopTrico.focused and bw.IdlingBan, "2 s later: the boy back in mind, idle fidgets still banned")

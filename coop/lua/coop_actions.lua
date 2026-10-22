@@ -6,12 +6,17 @@
 -- player skips the handshake: the scripts put such an interest ahead of Trico and set what the
 -- handshake sets (condorinstruction.lua), so the game's own action runs, approach and all. Sending
 -- the action's control command alone does nothing while Trico idles (c_wait), as tried in game.
---   Cross:    jump. First the level's own jump spots: the Instruction interests (where the boy's
---             "jump" gesture sends Trico) inside auto-Trico's search volume, on another navmesh
---             island that a special edge (a jump) leads to, the one nearest the stick's way
---             (else Trico's facing) within EDGE_CONE; it gets the top interest level, as
---             auto-Trico's special-edge mode does, so Trico walks up and takes the jump his own
---             way (forward jumps onto pillars and ledges). Else a point ahead on such an island
+--   Cross:    jump. First the level's own way on: the hint interest the level last gave Trico
+--             (what walked him up the fallen pillar, round and over the jump by himself), when it
+--             lies the stick's way (else his facing's) within EDGE_CONE and HINT_RANGE and was
+--             seen within HINT_MEMORY; it gets the top interest level until he is there or
+--             HINT_TIMEOUT. Then the level's own jump spots: the Instruction interests (where the boy's
+--             "jump" gesture sends Trico) inside auto-Trico's search volume that he can't simply
+--             walk to (those a special edge, a jump, is known to lead to first), the one nearest
+--             the stick's way (else Trico's facing) within EDGE_CONE; it gets the top interest
+--             level, as auto-Trico's special-edge mode does, so Trico walks up and takes the jump
+--             his own way (forward jumps onto pillars and ledges). Pushing the stick again after
+--             the press lets the spot go (steering waits while it is held). Else a point ahead on such an island
 --             (a grid of distances, angles and heights) gets an auto-Trico style interest. With
 --             neither, the jump gesture (Trico pounces, as the boy's gesture does without a
 --             target).
@@ -51,10 +56,13 @@ local JUMP_ARRIVED = 4.0                      -- metres from the target that cou
 local JUMP_TIMEOUT = 10.0
 local EDGE_VOLUME = "autoTrico_findSpEdgeVol"   -- auto-Trico's volume for finding jump spots
 local EDGE_TYPES = { "Instruction", "Instruction_30s" }
-local EDGE_CONE = 70.0                          -- degrees either side of the jump's way
+local EDGE_CONE = 90.0                          -- degrees either side of the jump's way
 local EDGE_RANGE = 45.0                         -- metres at most
 local EDGE_TIMEOUT = 20.0                       -- seconds to walk up and jump
 local EDGE_ARRIVED = 5.5                        -- metres from the spot that count as there (as auto-Trico)
+local HINT_RANGE = 60.0                         -- metres at most to the level's hint
+local HINT_MEMORY = 120.0                       -- seconds a seen hint is remembered
+local HINT_TIMEOUT = 30.0
 local GESTURE_NAME = "CoopActions_Gesture"
 local GESTURE_INTEREST = "Instruction_Unique"
 local GESTURE_LEVEL_NAME = "CoopActions_Gesture"
@@ -170,6 +178,29 @@ function CoopActions.Way(props, input)
 	return wx / len, wz / len
 end
 
+-- The level's hint interests (their type "CommonHint"), remembered as Trico has them in mind.
+function CoopActions.NoteHint(props)
+	local info = props.currentInfo
+	local t = tostring(info.interestType or "")
+	if not string.find(t, "Hint", 1, true) then return end
+	local intr = info.interestEntity
+	local okP, p = pcall(function() return intr.worldPosition end)
+	if not intr or not okP or not p then return end
+	CoopActions.hint = { entity = intr, pos = Vector(p), seen = CoopActions.clock or 0 }
+end
+
+-- The remembered hint, when it lies the way (wayX, wayZ) within EDGE_CONE and HINT_RANGE.
+function CoopActions.HintAhead(props, wayX, wayZ)
+	local h = CoopActions.hint
+	if not h or (CoopActions.clock or 0) - h.seen > HINT_MEMORY then return nil end
+	local pos = TricoAt(props)
+	local dx, dz = h.pos.X - pos.X, h.pos.Z - pos.Z
+	local d = math.sqrt(dx * dx + dz * dz)
+	if d > HINT_RANGE or d < EDGE_ARRIVED then return nil end
+	if (dx * wayX + dz * wayZ) / d < math.cos(math.rad(EDGE_CONE)) then return nil end
+	return h
+end
+
 -- The search volume is attached as soon as the Trico player is there (an attach is only a request
 -- the engine carries out later, so it can't wait for the press).
 function CoopActions.AttachEdgeVolume(props)
@@ -208,12 +239,32 @@ function CoopActions.FindEdgeInterest(props, wayX, wayZ)
 			local dx, dz = p.X - pos.X, p.Z - pos.Z
 			local d = math.sqrt(dx * dx + dz * dz)
 			local cos = d > 0.01 and (dx * wayX + dz * wayZ) / d or 1
+			if CoopDebug and CoopDebug.enabled then
+				local okA, walk = pcall(check, props, pos, p, true)
+				local okB, edge = pcall(check, props, pos, p, false)
+				local okN, name = pcall(function() return intr:GetName() end)
+				local okS, sp = pcall(Ai2GetStraightPath, props.currentInfo.ai2Ext, pos, p,
+					Ai2.Approach and Ai2.Approach.findNearPosExt, Ai2.Approach and Ai2.Approach.findNearPosExt)
+				local spInfo = "-"
+				if okS and type(sp) == "table" and sp.path then
+					local last = sp.path[#sp.path]
+					spInfo = string.format("n=%d sp=%s end=%.1f short=%.1f", #sp.path, tostring(sp.spEdge),
+						sp.endOnPoly and last and Vector.Distance3(sp.endOnPoly, last) or -1,
+						last and math.sqrt((last.X - p.X) ^ 2 + (last.Z - p.Z) ^ 2) or -1)
+				end
+				Say("AC edge spot %s %.1f m %.0f deg up %.1f walk=%s edge=%s path %s", okN and tostring(name) or "?", d,
+					math.deg(math.acos(math.max(-1, math.min(1, cos)))), p.Y - pos.Y, tostring(walk), tostring(edge), spInfo)
+			end
 			if d <= EDGE_RANGE and cos >= cosCone then
 				local okA, walk = pcall(check, props, pos, p, true)
 				local okB, edge = pcall(check, props, pos, p, false)
-				if okA and okB and walk == false and edge == true then
+				-- (a level's jump spot is reached through its own special approach, which the
+				-- navmesh checks don't see: from the ledge before the pillar bridge the spot past
+				-- the jump read neither walkable nor across a special edge, so any spot he can't
+				-- simply walk to counts, those the edge check confirms first)
+				if okA and walk == false then
 					-- the nearest to the stick's way first, then the nearest
-					local score = (1 - cos) * 40 + d
+					local score = (1 - cos) * 40 + d + ((okB and edge == true) and 0 or 10)
 					if not bestScore or score < bestScore then best, bestPos, bestScore, bestD = intr, p, score, d end
 				end
 			end
@@ -514,6 +565,7 @@ local function DropJump(props, why)
 	CoopActions.jump = nil
 	if j.entity then
 		pcall(Ai2.Utils.ResetInterestLevelAddition, props.currentInfo.ai2Ext, j.entity, JUMP_LEVEL_NAME)
+		if CoopActions.gesture and CoopActions.gesture.spot then DropGesture(props, "jump " .. why) end
 		Say("AC jump end %s", why)
 		return
 	end
@@ -529,6 +581,16 @@ end
 local function Jump(props, input)
 	local wayX, wayZ = CoopActions.Way(props, input)
 	local ai = props.currentInfo.ai2Ext
+	local okH, hint = pcall(CoopActions.HintAhead, props, wayX, wayZ)
+	if okH and hint then
+		DropJump(props, "replaced")
+		Ai2.Utils.RegisterInterest(ai, hint.entity)
+		Ai2.Utils.InterestExclusionSwitching(ai, hint.entity, false)
+		Ai2.Utils.InterestLevelAddition(ai, hint.entity, JUMP_LEVEL_NAME, "addMax")
+		CoopActions.jump = { target = Vector(hint.pos), timer = HINT_TIMEOUT, entity = hint.entity, arrived = EDGE_ARRIVED }
+		local okN, name = pcall(function() return hint.entity:GetName() end)
+		return string.format("hint %s %.1f,%.1f,%.1f", okN and tostring(name) or "?", hint.pos.X, hint.pos.Y, hint.pos.Z)
+	end
 	local okE, spot, spotPos = pcall(CoopActions.FindEdgeInterest, props, wayX, wayZ)
 	if okE and spot then
 		DropJump(props, "replaced")
@@ -537,6 +599,12 @@ local function Jump(props, input)
 		Ai2.Utils.InterestLevelAddition(ai, spot, JUMP_LEVEL_NAME, "addMax")
 		CoopActions.jump = { target = Vector(spotPos), timer = EDGE_TIMEOUT, entity = spot, arrived = EDGE_ARRIVED }
 		local okN, name = pcall(function() return spot:GetName() end)
+		-- and the boy's jump gesture at it, granted as the eye-contact handshake would once the
+		-- spot is what Trico has in mind, so his Instruction action takes the jump
+		if okN and name then
+			DropGesture(props, "replaced")
+			CoopActions.gesture = { type = "Gesture_Jump", timer = EDGE_TIMEOUT, target = name, spot = true }
+		end
 		return string.format("spot %s %.1f,%.1f,%.1f", okN and tostring(name) or "?", spotPos.X, spotPos.Y, spotPos.Z)
 	end
 	local target = CoopActions.FindJumpTarget(props, wayX, wayZ)
@@ -592,10 +660,17 @@ local function AnimState(props)
 end
 
 local function Step(dt, input, props, anim)
+	pcall(CoopActions.NoteHint, props)
 	TickGesture(dt, props, anim)
 	Watch(dt, props, anim)
 	-- a held jump target: until Trico is there (or on its island), or the time is up
 	local j = CoopActions.jump
+	-- the stick let go and pushed again after the press: the player wants to steer instead
+	if j and input then
+		local pushed = CoopTrico and CoopTrico.Stick(input) ~= nil
+		if not pushed then j.stickFree = true
+		elseif j.stickFree then DropJump(props, "stick") j = nil end
+	end
 	if j then
 		j.timer = j.timer - dt
 		local pos = TricoAt(props)

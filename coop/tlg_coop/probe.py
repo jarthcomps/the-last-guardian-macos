@@ -168,7 +168,7 @@ def main(argv=None) -> int:
                    help="extra argument passed to guardian_outdoor_experiments.py")
     p.add_argument("--engine", type=Path, help="emulator build to run (default: release 117)")
     p.add_argument("--coop", action="store_true", help="turn on the emulator's co-op mode")
-    p.add_argument("--strategy", default="goal", choices=("goal", "steer", "interest", "forward"),
+    p.add_argument("--strategy", default="goal", choices=("goal", "steer", "interest", "forward", "direct", "ctrl"),
                    help="how the scripts steer Trico")
     p.add_argument("--pulse", default="aimhold",
                    choices=("aimhold", "both", "aim", "hold", "emblem", "command"),

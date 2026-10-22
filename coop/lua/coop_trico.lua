@@ -23,11 +23,18 @@
 --               stick's way and the move manager is asked for a manual free move, the walk the
 --               game's move code uses when it steers him itself (no stop decision, no interests).
 --               The game still picks his gait, turns and footing.
---   "ctrl":     his own move planning switched off (approach.skipCreate, as the game does for
---               scripted moments) and his animation controller driven with the game's own
---               commands: a walk (slow, normal or fast by stick) while he faces within
---               CTRL_WALK_ANGLE of the stick's way, a quarter or about turn on the spot beyond
---               it, the walk stop on release (planning back on).
+--   "ctrl":     (shipped) the stick drives him directly. His own move planning is switched off
+--               (approach.skipCreate, as the game does for scripted moments) and his own
+--               forward move is set as his planned move, in the free walk's manual mode, towards
+--               a pose 12-25 m out the stick's way, rebuilt every frame: his action layer walks
+--               him there with his own gaits (set from the stick), footing and wall handling.
+--               From a stand he turns on the spot (his move manager's turning slide) when the
+--               stick is more than CTRL_WALK_ANGLE off his facing; walking, he curves round up
+--               to CTRL_CURVE_ANGLE and is stopped first beyond it. Kept from stalling: his
+--               destination is moved off where he stands, a forward request kicks him when he
+--               stays standing, and with no progress for CTRL_UNSTICK his stuck requests are
+--               dropped (and a standing Trico is woken with a moment of his planning). On
+--               release: his walk stop and his planning back on.
 -- With the stick released, Trico is asked to stop and its AI is left alone.
 --
 -- The stick is camera-relative by default, with the camera's direction latched when the stick
@@ -571,7 +578,19 @@ function CoopTrico.Focus(dt, input, props)
 	if Active(input) then CoopTrico.idleFor = 0 else CoopTrico.idleFor = (CoopTrico.idleFor or 99) + dt end
 	CoopTrico.focusIn = (CoopTrico.focusIn or 0) - dt
 	CoopTrico.focused = CoopTrico.idleFor < FOCUS_TIME
-	if CoopTrico.idleFor < BAN_TIME then Ban(props) else CoopTrico.Unban() end
+	if CoopTrico.idleFor < BAN_TIME then
+		Ban(props)
+		-- the bans keep new idle actions away, not one already set out (a head shake that takes
+		-- no commands for 7 s, picked up as soon as his planning runs again): that one goes the
+		-- game's own way
+		local work = props.currentInfo.work
+		if work and work.IdlingIntrPoped and Ai2.CommonScript and Ai2.CommonScript.Condor then
+			pcall(Ai2.CommonScript.Condor.DelIdlingIntr, props)
+			CoopTrico.idlesDropped = (CoopTrico.idlesDropped or 0) + 1
+		end
+	else
+		CoopTrico.Unban()
+	end
 	if not CoopTrico.focused or CoopTrico.focusIn > 0 then return end
 	CoopTrico.focusIn = FOCUS_REFRESH
 	local ai = props.currentInfo.ai2Ext
