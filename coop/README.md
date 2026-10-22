@@ -21,7 +21,7 @@ The Trico player:
 | Cross | Jump (to a ledge across a gap in the stick's direction, else a pounce) |
 | Square | Attack (side swipe; the stick picks the side) |
 | Triangle | Stomp |
-| Circle | Action (on what Trico is looking at; a barrel box gets broken, food is just eaten) |
+| Circle | Eat a nearby edible barrel; otherwise Action on what Trico is looking at (a barrel box gets broken) |
 | Circle + stick left / right | Pull with the left / right paw |
 | R1 | Roar |
 | L1 (hold) | Threat posture |
@@ -34,7 +34,7 @@ For both players:
 
 | Input | |
 |---|---|
-| L3 + R3 | Swap roles (a lightning arc runs along Trico) |
+| L3 + R3 | Swap roles (a lightning arc runs between Trico's tail and the boy's head, starting at whoever swapped) |
 | Select (touchpad) | Switch the shared camera between the boy framing and the wider Trico framing |
 
 Trico's own AI keeps running: eating, following, climbing, swimming and its own jumps happen as
