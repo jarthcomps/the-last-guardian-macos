@@ -183,6 +183,9 @@ def main(argv=None) -> int:
     p.add_argument("--set", action="append", default=[], metavar="LUA",
                    help='an extra line for the probe\'s coop_config.lua, e.g. "CoopSwapFx.arcTime = 3"')
     p.add_argument("--save", type=Path, help="play this save (copied in, originals put back)")
+    p.add_argument("--no-mod", action="store_true",
+                   help="leave the co-op scripts out (engine, co-op mode and patches as given), "
+                        "e.g. to measure what the mod costs")
     args = p.parse_args(argv)
 
     root = ROOT
@@ -197,10 +200,15 @@ def main(argv=None) -> int:
 
     game = runtime / "CUSA03745"
     engine = args.engine if args.engine is None or args.engine.is_absolute() else root / args.engine
-    with tempfile.TemporaryDirectory() as tmp:
-        lua_dir = probe_lua_dir(Path(tmp), args.strategy, pulse=args.pulse, camera=args.camera,
-                                camera_dump=args.camera_dump, settings=args.set)
-        print(json.dumps({"install": install.install(game, lua_dir)}), flush=True)
+    if args.no_mod:
+        if install.status(game)["installed"]:
+            install.uninstall(game)
+        print(json.dumps({"install": "left out (--no-mod)"}), flush=True)
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            lua_dir = probe_lua_dir(Path(tmp), args.strategy, pulse=args.pulse, camera=args.camera,
+                                    camera_dump=args.camera_dump, settings=args.set)
+            print(json.dumps({"install": install.install(game, lua_dir)}), flush=True)
     save = None
     if args.save:
         save = args.save if args.save.is_absolute() else root / args.save
@@ -217,8 +225,9 @@ def main(argv=None) -> int:
             print("running:", " ".join(cmd), flush=True)
             code = subprocess.call(cmd, cwd=root)
     finally:
-        install.uninstall(game)
-        print("co-op mod removed from the private runtime", flush=True)
+        if not args.no_mod:
+            install.uninstall(game)
+            print("co-op mod removed from the private runtime", flush=True)
     shad_log = runtime / "user/log/shad_log.txt"
     kept = out_dir / f"{args.tag}-shad_log.txt"
     if shad_log.is_file():
